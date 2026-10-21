@@ -1,6 +1,1 @@
 -r requirements.txt
-torch>=2.5
-transformers>=4.49,<6
-peft>=0.14
-accelerate>=1.2
-bitsandbytes>=0.45; platform_system == "Linux"

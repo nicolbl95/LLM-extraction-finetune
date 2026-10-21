@@ -1,7 +1,15 @@
-pydantic
+pydantic>=2,<3
 pandas
 requests
 datasets
 huggingface_hub
 reportlab>=4.4
 PyMuPDF>=1.26
+gradio==6.30.0
+Pillow>=11
+pytesseract>=0.3.13,<0.4
+torch>=2.5
+transformers>=4.49,<6
+peft>=0.14
+accelerate>=1.2
+bitsandbytes>=0.45; platform_system == "Linux"
