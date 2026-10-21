@@ -71,7 +71,6 @@ structurée complexe ; une supériorité sur des modèles plus volumineux reste
 
 ```text
 .
-├── assets/loss_curve.png
 ├── data/
 │   ├── generate_dataset.py / render_invoice.py / schema.py
 │   ├── dataset.jsonl                  # 600 factures
@@ -140,70 +139,23 @@ Le prompt d'évaluation, identique à celui de l'entraînement, reste inchangé.
 
 ### Garde-fous arithmétiques Pydantic
 
-Le schéma partagé [data/schema.py](data/schema.py) valide la structure et
-croise les champs numériques avant l'affichage du résultat :
-
-| Contrôle | Règle appliquée |
-| --- | --- |
-| Cohérence d'une ligne | Comparaison de `quantity × unit_price` avec le `total_ht` de la ligne |
-| Cohérence de la facture | Comparaison de la somme des `line_items[].total_ht` avec le `total_ht` global |
-| Tolérance monétaire | Détection de tout écart absolu strictement supérieur à **0,02 unité monétaire**, par ligne et sur le total HT global ; avertissement non bloquant dans l'application après l'unique tentative de correction |
-| Valeurs non finies | Rejet de `NaN`, `+Infinity` et `-Infinity` dans les quantités, prix et totaux |
-
-Les calculs utilisent `Decimal` à partir des représentations décimales des
-valeurs. Le produit quantité × prix unitaire est arrondi au centime avec
-`ROUND_HALF_UP`, comme dans le générateur du dataset. Le prix unitaire cible
-est le prix **net après remise**. Une facture sans articles signale une
-incohérence si son total HT diffère de zéro de plus de 0,02.
-
-**Dans l'application, les écarts arithmétiques ne bloquent plus l'affichage.**
-Après l'unique tentative d'auto-correction, le dernier JSON structurellement
-valide est rendu avec un bandeau d'avertissement. Celui-ci indique chaque
-ligne concernée, la valeur calculée, la valeur extraite et l'écart absolu,
-ainsi que toute incohérence du total HT global. Une vérification manuelle
-est demandée ; les valeurs ne sont pas recalculées de force.
-
-Le schéma reste **strict par défaut** pour les données, l'évaluation et les
-tests Golden. L'application utilise explicitement une validation structurelle
-non bloquante sur l'arithmétique pour conserver les résultats exploitables ;
-les contrôles numériques sont partagés entre les deux modes.
-
-L'application exige également un objet JSON strict : le texte explicatif,
-les balises Markdown et les clés dupliquées ne sont pas acceptés. Les champs
-requis, leurs types et les valeurs finies restent obligatoires : un JSON
-mal formé ou structurellement invalide n'est pas affiché. Un résultat avec
-avertissement n'est pas présenté comme arithmétiquement validé.
+- **Structure :** objet JSON strict, champs et types requis, valeurs finies ;
+  prose, Markdown et clés dupliquées sont refusés.
+- **Calculs :** contrôle de `quantity × unit_price` net et de la somme HT,
+  avec `Decimal`, arrondi `ROUND_HALF_UP` et tolérance de **0,02**.
+- **Affichage :** après correction, un JSON structurellement valide peut être
+  affiché avec des avertissements arithmétiques détaillés, sans recalcul forcé.
+  Les données, l'évaluation et les tests Golden restent stricts par défaut.
 
 ## Boucle d'auto-correction (Self-Correction)
 
-La démo limite la correction à **un unique essai**, soit au maximum
-**deux passes d'inférence** :
-
-1. Générer une première réponse, la parser comme JSON strict, puis appliquer
-   les validations Pydantic de structure et de cohérence arithmétique.
-2. Si le JSON est mal formé ou échoue à Pydantic, conserver la facture
-   originale et ajouter à la conversation **le JSON erroné et l'erreur exacte
-   du parseur ou de Pydantic**, avec les champs et incohérences signalés.
-3. Demander une correction ciblée respectant les valeurs littérales de la
-   facture, notamment les décimales. En présence d'écarts arithmétiques,
-   transmettre les anomalies de chaque ligne et du total, puis donner priorité
-   à la relecture des champs `quantity` et `unit_price` net après remise.
-   Seules les valeurs confirmées dans le texte source doivent être corrigées,
-   avant de relire les totaux, sans les recalculer artificiellement pour
-   satisfaire la validation.
-4. Revalider la seconde réponse. Si sa structure est valide mais ses calculs
-   restent incohérents, afficher son JSON avec les avertissements détaillés.
-   Si elle est inutilisable ou si cette seconde inférence échoue, conserver
-   le premier JSON structurellement valide avec ses avertissements et le motif
-   d'échec de la correction. En l'absence de tout JSON structurellement valide,
-   afficher l'erreur et laisser le résultat vide.
-   **Aucune troisième tentative n'est lancée.**
-
-Les erreurs de chargement, réponses tronquées et dépassements du contexte
-ne déclenchent pas cette correction. Si ces erreurs surviennent pendant la
-seconde passe, elles n'effacent pas le premier résultat structurellement valide.
-Le contexte reste limité sans troncature silencieuse, y compris pendant la
-seconde passe.
+La démo autorise **une seule correction**, soit deux passes maximum :
+le modèle reçoit la facture originale, sa réponse et les erreurs de validation
+pour relire les valeurs sources, sans ajuster artificiellement les totaux.
+Le dernier JSON structurellement valide est conservé avec avertissements si
+nécessaire ; sans résultat valide, une erreur est affichée.
+Les erreurs de chargement, troncatures et dépassements de contexte ne
+déclenchent pas de correction ; aucun contexte n'est tronqué silencieusement.
 
 ## 🎯 Résultats clés
 
@@ -239,8 +191,6 @@ tokenizer sont importés dans `results/`.
 | Contexte maximal | `4096` tokens |
 | Durée du run | Environ **40 min 19 s** |
 | Train loss / validation loss | **0,00746 / 0,00591** |
-
-![Pertes d'entraînement et de validation du fine-tuning QLoRA](assets/loss_curve.png)
 
 La perte diminue rapidement puis reste faible ; la validation se stabilise
 autour de **0,006**, sans remontée durable visible. Cela suggère une convergence
