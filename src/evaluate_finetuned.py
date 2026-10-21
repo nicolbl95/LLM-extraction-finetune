@@ -138,9 +138,10 @@ class LoRAInference:
         if self.device == "cuda":
             self.torch.cuda.synchronize()
 
-    def predict(self, row: dict) -> dict:
+    def predict(self, row: dict, *, messages: list[dict] | None = None) -> dict:
         inputs = self.tokenizer.apply_chat_template(
-            build_messages(row), tokenize=True, add_generation_prompt=True,
+            build_messages(row) if messages is None else messages,
+            tokenize=True, add_generation_prompt=True,
             return_tensors="pt", return_dict=True,
         ).to(self.device)
         prompt_tokens = inputs["input_ids"].shape[1]

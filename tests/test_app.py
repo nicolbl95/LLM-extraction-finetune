@@ -141,12 +141,102 @@ class AppTests(unittest.TestCase):
         model.predict.return_value = {"raw": json.dumps(self.gold), "finish_reason": "stop"}
         with patch.object(main, "get_extractor", return_value=model):
             payload = main.extract_invoice("Text from the uploaded invoice")
-        model.predict.assert_called_once_with(
-            {"id": "live-upload", "input": "Text from the uploaded invoice"}
+        model.predict.assert_called_once()
+        self.assertEqual(
+            model.predict.call_args.args[0],
+            {"id": "live-upload", "input": "Text from the uploaded invoice"},
         )
+        messages = model.predict.call_args.kwargs["messages"]
+        self.assertEqual([item["role"] for item in messages], ["system", "user", "assistant", "user"])
+        self.assertIn("7,2", messages[0]["content"])
+        self.assertIn("jamais 142", messages[0]["content"])
+        self.assertIn("7,2", messages[1]["content"])
+        example = main.Invoice.model_validate_json(messages[2]["content"])
+        self.assertEqual(example.line_items[0].quantity, 7.2)
+        self.assertEqual(example.line_items[0].unit_price, 12.5)
+        self.assertEqual(example.line_items[0].total_ht, 90.0)
+        self.assertIn("Text from the uploaded invoice", messages[-1]["content"])
         self.assertEqual(payload, self.gold)
         self.assertEqual(payload["invoice_date"], "2026-10-21")
         json.dumps(payload, allow_nan=False)
+
+    def test_self_correction_preserves_decimal_quantity_and_injects_exact_pydantic_error(self):
+        corrected = {
+            **self.gold, "total_ht": 90.0, "total_ttc": 108.0,
+            "line_items": [{
+                "description": "Service", "quantity": 7.2, "unit_price": 12.5, "total_ht": 90.0,
+            }],
+        }
+        invalid = {
+            **corrected, "line_items": [{**corrected["line_items"][0], "quantity": 142}],
+        }
+        raw = json.dumps(invalid)
+        with self.assertRaises(main.ValidationError) as validation:
+            main.Invoice.model_validate(invalid)
+        model = MagicMock()
+        model.predict.side_effect = [
+            {"raw": raw, "finish_reason": "stop"},
+            {"raw": json.dumps(corrected), "finish_reason": "stop"},
+        ]
+        text = "Facture réelle : Service | quantité 7,2 | PU 12,50 | total HT 90,00"
+        with patch.object(main, "get_extractor", return_value=model), \
+                self.assertLogs(main.LOGGER, level="WARNING"):
+            result = main.extract_invoice(text)
+        self.assertEqual(result, corrected)
+        self.assertEqual(model.predict.call_count, 2)
+        first, second = model.predict.call_args_list
+        initial_messages = first.kwargs["messages"]
+        corrected_messages = second.kwargs["messages"]
+        self.assertEqual(len(initial_messages), 4)
+        self.assertEqual(corrected_messages[:-2], initial_messages)
+        self.assertIn(text, corrected_messages[-3]["content"])
+        self.assertEqual(corrected_messages[-2], {"role": "assistant", "content": raw})
+        self.assertIn(str(validation.exception), corrected_messages[-1]["content"])
+        self.assertIn("valeurs de la facture réelle", corrected_messages[-1]["content"])
+        self.assertEqual(first.args, second.args)
+
+    def test_self_correction_handles_missing_fields_and_malformed_json(self):
+        missing_date = {key: value for key, value in self.gold.items() if key != "invoice_date"}
+        for raw in (json.dumps(missing_date), '{"supplier_name":'):
+            with self.subTest(raw=raw):
+                model = MagicMock()
+                model.predict.side_effect = [
+                    {"raw": raw, "finish_reason": "stop"},
+                    {"raw": json.dumps(self.gold), "finish_reason": "stop"},
+                ]
+                with self.assertRaises(ValueError) as validation:
+                    main.validate_invoice_json(raw)
+                with patch.object(main, "get_extractor", return_value=model), \
+                        self.assertLogs(main.LOGGER, level="WARNING"):
+                    self.assertEqual(main.extract_invoice("Original invoice"), self.gold)
+                self.assertEqual(model.predict.call_count, 2)
+                messages = model.predict.call_args.kwargs["messages"]
+                self.assertEqual(messages[-2]["content"], raw)
+                self.assertIn(str(validation.exception), messages[-1]["content"])
+
+    def test_no_retry_for_model_failures_or_truncated_responses(self):
+        model = MagicMock()
+        model.predict.side_effect = RuntimeError("Model unavailable")
+        with patch.object(main, "get_extractor", return_value=model):
+            with self.assertRaisesRegex(RuntimeError, "Model unavailable"):
+                main.extract_invoice("invoice")
+        self.assertEqual(model.predict.call_count, 1)
+        model.reset_mock(side_effect=True)
+        model.predict.return_value = {"raw": json.dumps(self.gold), "finish_reason": "length"}
+        with patch.object(main, "get_extractor", return_value=model):
+            with self.assertRaisesRegex(ValueError, "incomplète"):
+                main.extract_invoice("invoice")
+        self.assertEqual(model.predict.call_count, 1)
+
+    def test_second_invalid_response_is_rejected_without_a_third_attempt(self):
+        invalid = {**self.gold, "total_ht": 999}
+        model = MagicMock()
+        model.predict.return_value = {"raw": json.dumps(invalid), "finish_reason": "stop"}
+        with patch.object(main, "get_extractor", return_value=model), \
+                self.assertLogs(main.LOGGER, level="WARNING"):
+            with self.assertRaises(main.ValidationError):
+                main.extract_invoice("original invoice")
+        self.assertEqual(model.predict.call_count, 2)
 
     def test_rejects_invalid_schema_json_nonfinite_and_truncated_responses(self):
         model = MagicMock()
@@ -182,7 +272,8 @@ class AppTests(unittest.TestCase):
                 self.assertIsNone(updates[-1][0])
                 self.assertIn("Avertissement", updates[-1][1])
                 self.assertIn("Incoherence", updates[-1][1])
-                self.assertIn("Aucune valeur", updates[-1][1])
+                self.assertIn("Aucun JSON invalide", updates[-1][1])
+                self.assertEqual(model.predict.call_count, 2)
 
     def test_errors_clear_previous_json_and_success_is_validated(self):
         filename = str(main.EXAMPLES[0][1])

@@ -225,10 +225,22 @@ absolue de **0,02 unité monétaire** par ligne et sur le total HT global.
 La somme des montants HT de toutes les lignes doit correspondre au total HT
 de la facture ; une liste vide n'est donc pas valide pour un total HT non nul
 au-delà de cette tolérance. Les valeurs non finies (`NaN`, infinis) sont refusées.
-En cas d'incohérence, l'interface affiche un avertissement détaillé et ne
-présente pas le JSON comme valide. Aucune quantité ni somme n'est corrigée
-silencieusement. Le calcul du TTC n'est pas vérifié : les taux de taxe ne
-font pas partie du schéma.
+La démo utilise un prompt renforcé exigeant une lecture littérale des nombres
+et un exemple fictif complet : `7,2 × 12,50 = 90,00` devient
+`quantity=7.2`, `unit_price=12.5`, `total_ht=90.0`. Le prompt d'évaluation,
+identique à celui de l'entraînement, reste inchangé.
+
+Si le JSON est mal formé ou échoue à la validation Pydantic, **une seule**
+nouvelle inférence est tentée. La conversation conserve la facture originale
+et reçoit le JSON rejeté ainsi que l'erreur exacte du parseur ou de Pydantic.
+La seconde réponse est soumise aux mêmes contrôles, sans troisième tentative.
+Les erreurs de chargement, réponses tronquées et dépassements du contexte ne
+déclenchent pas cette correction. Le contexte reste limité sans troncature
+silencieuse, y compris pendant la seconde passe.
+
+En cas d'échec persistant, l'interface affiche l'erreur et ne présente pas
+le JSON comme valide. Aucune correction arithmétique forcée n'est appliquée.
+Le calcul du TTC n'est pas vérifié : les taux de taxe ne font pas partie du schéma.
 
 La génération utilise déjà un décodage sans échantillonnage (`do_sample=False`
 en LoRA, `temperature=0.0` en GGUF). Ce réglage et les contrôles mathématiques

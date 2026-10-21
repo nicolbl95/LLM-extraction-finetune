@@ -208,6 +208,14 @@ class EvaluationTests(unittest.TestCase):
             inference.tokenizer.decode.assert_called_once_with([5, 6, 2], skip_special_tokens=True)
             self.assertEqual(inference.model.generate.call_args.kwargs["pad_token_id"], 0)
             self.assertIs(inference.model.generate.call_args.kwargs["do_sample"], False)
+            self.assertEqual(
+                inference.tokenizer.apply_chat_template.call_args.args[0],
+                evaluation.build_messages({"input": "invoice", "id": "test"}),
+            )
+            messages = [{"role": "system", "content": "Live numerical precision prompt"},
+                        {"role": "user", "content": "Original invoice"}]
+            inference.predict({"input": "invoice", "id": "test"}, messages=messages)
+            self.assertEqual(inference.tokenizer.apply_chat_template.call_args.args[0], messages)
             inputs.__getitem__.return_value.shape = (1, 3000)
             with self.assertRaisesRegex(ValueError, "exceeds context"):
                 inference.predict({"input": "invoice", "id": "test"})
