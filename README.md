@@ -375,114 +375,13 @@ l'archive doit être téléchargée avant expiration du runtime.
 **Les adaptateurs nécessitent le modèle de base.** L'export GGUF fusionné
 Q4_K_M est facultatif ; les uploads Hub/W&B sont désactivés par défaut.
 
-## ⚙️ Installation / Utilisation
+## ⚙️ Installation & Utilisation
 
-Commandes depuis la racine du projet, avec un Python compatible avec la pile
-GPU utilisée pour l'entraînement.
-
-### Installer et vérifier les données
+### 1. Installation
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
-
-python src/evaluate_finetuned.py --check-data-only
-python -m unittest discover -s tests -v
+pip install -r requirements.txt
+pip install -r requirements-inference.txt  # Pour l'inférence et l'évaluation
 ```
-
-### Golden Dataset de non-régression
-
-Les quatre cas synthétiques de [tests/golden_dataset/](tests/golden_dataset/)
-couvrent les quantités `7,2` et `4,2`, les accents et caractères spéciaux,
-les prix nets après remise, les taxes multiples et exonérations, ainsi que
-les formats FR/EUR, UK/GBP et US/USD avec séparateurs de milliers.
-
-| Cas de référence | Difficultés couvertes |
-| --- | --- |
-| [France — quantités décimales](tests/golden_dataset/fr_decimal_quantities.json) | `7,2` et `4,2`, virgule décimale, accents, guillemets et symbole euro |
-| [France — remises et taxes multiples](tests/golden_dataset/fr_discounts_mixed_taxes.json) | Prix nets après remise de 10 %, TVA à 20 %, 5,5 % et 0 % |
-| [Royaume-Uni — TVA et exonération](tests/golden_dataset/uk_fractional_zero_vat.json) | Quantité `7.2`, livre sterling, date en anglais, TVA à 20 % et 0 % |
-| [États-Unis — remises et milliers](tests/golden_dataset/us_discount_thousands.json) | Quantité `4.2`, remise de 20 %, taxe à 8.875 %, format `$1,250.00` |
-
-Chaque fixture versionne le texte de facture, une réponse JSON de référence
-figée et le résultat attendu, plus les détails de taxes et remises vérifiables.
-
-[tests/test_golden_dataset.py](tests/test_golden_dataset.py) est découvert
-automatiquement par `unittest`. Il exécute le pipeline réel de prompt,
-validation Pydantic et auto-correction avec un backend d'inférence simulé,
-puis compare tous les champs aux attentes par égalité exacte, sans tolérance
-sur les nombres, les textes ou l'ordre des articles. Les cas négatifs couvrent
-les quantités décalées, une différence d'un centime et les erreurs cohérentes
-mathématiquement qui échappent au seul schéma Pydantic.
-La comparaison Golden n'utilise donc **pas** la tolérance de 0,02 du schéma :
-une différence numérique d'un seul centime par rapport à la référence est
-une régression, même si Pydantic accepte encore le résultat.
-
-```bash
-python -m unittest discover -s tests -p test_golden_dataset.py -v
-```
-
-Ces tests restent hors ligne, sans OCR, téléchargement de poids ni GPU.
-Les réponses figées ne sont pas des mesures de qualité du modèle : cette
-brique sécurise le pipeline logiciel et ne remplace pas une évaluation des
-vraies prédictions. Pour ajouter un cas, conserver séparément le texte source,
-la réponse brute et le JSON attendu revu ; ne pas régénérer les attentes depuis
-la sortie courante du modèle.
-
-Pour **régénérer** les données et les images :
-
-```bash
-python data/generate_dataset.py
-python src/split_data.py
-```
-
-La régénération remplace les fichiers existants : conserver les données et
-hashes du run avant toute modification.
-
-### Charger les adaptateurs et évaluer
-
-Sur un environnement CUDA avec suffisamment de VRAM :
-
-```bash
-python -m pip install -r requirements-inference.txt
-
-RUN_NAME="qwen25-3b-international-v3-20261021T053959288046Z"
-ADAPTER_DIR="results/$RUN_NAME/lora_adapter"
-
-# Vérification des fichiers et de la provenance, sans charger le modèle.
-python src/evaluate_finetuned.py \
-  --adapter-path "$ADAPTER_DIR" --check-data-only
-
-# Smoke test de chargement et de génération.
-python src/evaluate_finetuned.py \
-  --adapter-path "$ADAPTER_DIR" --load-in-4bit --limit 3 \
-  --output-dir "results/$RUN_NAME/smoke-test"
-
-# Évaluation complète du split de test.
-python src/evaluate_finetuned.py \
-  --adapter-path "$ADAPTER_DIR" --load-in-4bit \
-  --output-dir "results/$RUN_NAME/evaluation-v3"
-```
-
-Chaque dossier de sortie doit être **nouveau**. L'évaluation produit
-`metrics.json` et `predictions.jsonl`, sans écraser les rapports existants.
-Le précontrôle vérifie les splits voisins et les hashes disponibles du
-manifeste ; il ne garantit pas le chargement des poids.
-
-Le modèle de base est téléchargé si nécessaire. Par défaut : décodage sans
-échantillonnage, contexte **4096**, budget de réponse **2048** tokens et une
-requête de warmup exclue du timing. En LoRA, un dépassement prompt + budget
-provoque une erreur explicite ; ajuster les limites au contexte entraîné,
-sans accepter de sorties tronquées comme benchmark complet.
-
-Le backend GGUF est accessible avec `--model-path chemin/modele.gguf`
-à la place de `--adapter-path` et nécessite `llama-cpp-python`.
-La tentative locale initiale était bloquée par l'absence de PyTorch/GPU ;
-elle n'est pas la source des scores du rapport fourni.
-
-> **Limites à retenir :** test synthétique avec familles de templates partagées,
-> pas de benchmark OCR ni de preuve de généralisation aux factures réelles.
-> Pydantic détecte des écarts de structure, sans garantir l'absence
-> d'hallucinations. Les tests logiciels utilisent des modèles simulés ;
-> ils ne remplacent pas une évaluation des vrais poids.
