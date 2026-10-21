@@ -77,7 +77,7 @@ class AppTests(unittest.TestCase):
         ocr.assert_called_once()
 
     def test_input_limits_and_errors(self):
-        with self.assertRaisesRegex(ValueError, "Importez"):
+        with self.assertRaisesRegex(ValueError, "Sélectionnez une facture"):
             main.checked_path(None)
         unsupported = self.folder / "invoice.txt"
         unsupported.write_text("invoice")
@@ -102,7 +102,7 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(image)
         self.assertIsNone(result)
         self.assertIn("Impossible", status)
-        self.assertEqual(main.preview_document(None)[:2], (None, None))
+        self.assertEqual(main.preview_document(None), (None, None, ""))
 
     def test_encrypted_pdf_is_rejected(self):
         path = self.folder / "protected.pdf"
@@ -489,18 +489,27 @@ class AppTests(unittest.TestCase):
         self.assertIn("json", types)
         self.assertEqual(types.count("row"), 1)
         self.assertEqual(types.count("column"), 2)
+        self.assertEqual(demo.config["title"], "Extraction standardisée de factures")
+        examples = [
+            component for component in demo.config["components"] if component["type"] == "dataset"
+        ]
+        self.assertEqual(
+            examples[0]["props"]["label"],
+            "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽",
+        )
         markdown = [
             component["props"]["value"] for component in demo.config["components"]
             if component["type"] == "markdown"
         ]
         self.assertEqual(
             markdown[0],
-            "# Extraction intelligente de factures\n"
+            "# Extraction standardisée de factures\n"
             "Transformez vos factures françaises, britanniques et américaines "
             "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
             "des données importantes standardisées.",
         )
-        self.assertIn("Importez une facture ou choisissez un exemple.", markdown)
+        self.assertNotIn("Importez une facture ou choisissez un exemple.", markdown)
+        self.assertEqual(markdown[-1], "")
         self.assertFalse(any("À vérifier avant utilisation" in text for text in markdown))
         self.assertFalse(any("Confidentialité" in text for text in markdown))
 

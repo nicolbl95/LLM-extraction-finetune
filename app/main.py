@@ -78,7 +78,7 @@ FEW_SHOT_RESULT = {
 
 def checked_path(filename: str | None) -> Path:
     if not filename:
-        raise ValueError("Importez une facture ou choisissez un exemple.")
+        raise ValueError("Sélectionnez une facture avant de lancer l'extraction.")
     path = Path(filename)
     if path.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"}:
         raise ValueError("Formats acceptés : PDF, PNG et JPEG.")
@@ -116,7 +116,7 @@ def check_pdf(document: pymupdf.Document) -> None:
 
 def preview_document(filename: str | None):
     if not filename:
-        return None, None, "Importez une facture ou choisissez un exemple."
+        return None, None, ""
     try:
         path = checked_path(filename)
         if path.suffix.lower() == ".pdf":
@@ -322,9 +322,9 @@ def run_extraction(filename: str | None):
 
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(title="Extraction intelligente de factures") as demo:
+    with gr.Blocks(title="Extraction standardisée de factures") as demo:
         gr.Markdown(
-            "# Extraction intelligente de factures\n"
+            "# Extraction standardisée de factures\n"
             "Transformez vos factures françaises, britanniques et américaines "
             "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
             "des données importantes standardisées."
@@ -340,14 +340,14 @@ def build_app() -> gr.Blocks:
                 gr.Examples(
                     examples=[[str(path)] for _, path in EXAMPLES],
                     inputs=[upload],
-                    label="Essayer une facture : France / Royaume-Uni / États-Unis",
+                    label="Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽",
                     example_labels=[label for label, _ in EXAMPLES],
                     cache_examples=False,
                 )
                 extract = gr.Button("Extraire les données", variant="primary")
                 preview = gr.Image(label="Aperçu de la facture", type="pil", interactive=False)
             with gr.Column():
-                status = gr.Markdown("Importez une facture ou choisissez un exemple.")
+                status = gr.Markdown("")
                 result = gr.JSON(label="Résultat de l'extraction — JSON structuré")
         upload.change(
             preview_document, inputs=[upload], outputs=[preview, result, status],
