@@ -326,7 +326,8 @@ def build_app() -> gr.Blocks:
         gr.Markdown(
             "# Extraction intelligente de factures\n"
             "Transformez vos factures françaises, britanniques et américaines "
-            "en données JSON structurées avec un modèle spécialisé."
+            "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
+            "des données importantes standardisées."
         )
         with gr.Row():
             with gr.Column():
@@ -348,16 +349,6 @@ def build_app() -> gr.Blocks:
             with gr.Column():
                 status = gr.Markdown("Importez une facture ou choisissez un exemple.")
                 result = gr.JSON(label="Résultat de l'extraction — JSON structuré")
-                gr.Markdown(
-                    "**À vérifier avant utilisation :** Pydantic valide la structure et les valeurs finies. "
-                    "Les écarts sur les montants HT (tolérance de 0,02) sont signalés sans bloquer le JSON. "
-                    "Une seule nouvelle inférence est tentée si le JSON échoue à la validation. "
-                    "Si nécessaire, le dernier JSON structurellement valide reste affiché avec avertissement. "
-                    "Cette démo utilise l'OCR puis le modèle LoRA ; "
-                    "elle ne renvoie pas les réponses du dataset.\n\n"
-                    "**Confidentialité :** utilisez de préférence des factures fictives ou anonymisées. "
-                    "Les documents sont traités sur le serveur hébergeant la démo."
-                )
         upload.change(
             preview_document, inputs=[upload], outputs=[preview, result, status],
             concurrency_limit=1,

@@ -487,6 +487,22 @@ class AppTests(unittest.TestCase):
         self.assertIn("file", types)
         self.assertIn("image", types)
         self.assertIn("json", types)
+        self.assertEqual(types.count("row"), 1)
+        self.assertEqual(types.count("column"), 2)
+        markdown = [
+            component["props"]["value"] for component in demo.config["components"]
+            if component["type"] == "markdown"
+        ]
+        self.assertEqual(
+            markdown[0],
+            "# Extraction intelligente de factures\n"
+            "Transformez vos factures françaises, britanniques et américaines "
+            "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
+            "des données importantes standardisées.",
+        )
+        self.assertIn("Importez une facture ou choisissez un exemple.", markdown)
+        self.assertFalse(any("À vérifier avant utilisation" in text for text in markdown))
+        self.assertFalse(any("Confidentialité" in text for text in markdown))
 
     def test_zerogpu_registers_inference_at_import(self):
         import runpy
