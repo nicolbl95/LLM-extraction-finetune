@@ -219,6 +219,22 @@ Le schéma Pydantic v2 définit `Invoice` et ses `LineItem` :
 | `line_items[].unit_price` | `float` | Prix unitaire net après remise, hors taxes |
 | `line_items[].total_ht` | `float` | Montant net de la ligne |
 
+Les contrôles arithmétiques Pydantic utilisent `Decimal`, l'arrondi
+`ROUND_HALF_UP` au centime pour `quantity × unit_price`, et une tolérance
+absolue de **0,02 unité monétaire** par ligne et sur le total HT global.
+La somme des montants HT de toutes les lignes doit correspondre au total HT
+de la facture ; une liste vide n'est donc pas valide pour un total HT non nul
+au-delà de cette tolérance. Les valeurs non finies (`NaN`, infinis) sont refusées.
+En cas d'incohérence, l'interface affiche un avertissement détaillé et ne
+présente pas le JSON comme valide. Aucune quantité ni somme n'est corrigée
+silencieusement. Le calcul du TTC n'est pas vérifié : les taux de taxe ne
+font pas partie du schéma.
+
+La génération utilise déjà un décodage sans échantillonnage (`do_sample=False`
+en LoRA, `temperature=0.0` en GGUF). Ce réglage et les contrôles mathématiques
+ne garantissent pas l'absence d'hallucinations : des valeurs erronées mais
+arithmétiquement cohérentes nécessitent toujours une vérification du document.
+
 **Champs extraits ≠ métadonnées.** Client, coordonnées bancaires et références
 sont présents dans les documents, mais ne sont pas des champs cibles.
 `locale`, `currency`, template, chemin d'image et détails taxes/remises servent

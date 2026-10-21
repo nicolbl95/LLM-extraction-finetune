@@ -14,6 +14,7 @@ import pytesseract
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HfHubHTTPError
 from PIL import Image, ImageOps
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -187,7 +188,6 @@ def extract_invoice(text: str) -> dict:
         raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
     invoice = Invoice.model_validate(parse_object(prediction["raw"]))
     payload = invoice.model_dump(mode="json")
-    # Pydantic's shared schema allows non-finite floats; JSON output must not.
     json.dumps(payload, allow_nan=False)
     return payload
 
@@ -200,12 +200,24 @@ def run_extraction(filename: str | None):
         yield None, "Préparation des poids du modèle… Téléchargement au premier lancement si nécessaire."
         resolve_adapter_path()
         payload = extract_invoice(text)
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(map(str, error['loc'])) or 'facture'} : {error['msg']}"
+            for error in exc.errors(include_url=False, include_input=False, include_context=False)
+        )
+        LOGGER.warning("Invoice validation rejected: %s", details)
+        yield None, (
+            "**Avertissement — JSON rejeté : données invalides ou incohérence arithmétique.** "
+            f"{details} Vérifiez les quantités, prix et totaux sur la facture. "
+            "Aucune valeur n'a été corrigée automatiquement."
+        )
+        return
     except (OSError, ValueError, RuntimeError, ImportError,
             pytesseract.TesseractError, Image.DecompressionBombError) as exc:
         LOGGER.exception("Invoice extraction failed")
         yield None, f"Échec de l'extraction : {exc}"
         return
-    yield payload, "Extraction terminée — JSON validé par Pydantic."
+    yield payload, "Extraction terminée — JSON validé par Pydantic, cohérence des montants HT contrôlée."
 
 
 def build_app() -> gr.Blocks:
@@ -236,8 +248,9 @@ def build_app() -> gr.Blocks:
                 status = gr.Markdown("Importez une facture ou choisissez un exemple.")
                 result = gr.JSON(label="Résultat de l'extraction — JSON validé")
                 gr.Markdown(
-                    "**À vérifier avant utilisation :** la validation Pydantic garantit la structure, "
-                    "pas l'exactitude des données. Cette démo utilise l'OCR puis le modèle LoRA ; "
+                    "**À vérifier avant utilisation :** Pydantic contrôle la structure et la cohérence "
+                    "des montants HT (tolérance de 0,02), pas l'exactitude des données extraites. "
+                    "Cette démo utilise l'OCR puis le modèle LoRA ; "
                     "elle ne renvoie pas les réponses du dataset.\n\n"
                     "**Confidentialité :** utilisez de préférence des factures fictives ou anonymisées. "
                     "Les documents sont traités sur le serveur hébergeant la démo."

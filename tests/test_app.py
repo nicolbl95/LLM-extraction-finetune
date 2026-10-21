@@ -165,6 +165,25 @@ class AppTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         main.extract_invoice("invoice text")
 
+    def test_arithmetic_inconsistencies_warn_and_do_not_display_invalid_json(self):
+        invalid_payloads = [
+            {**self.gold, "line_items": [{**self.gold["line_items"][0], "quantity": 10}]},
+            {**self.gold, "total_ht": 101},
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                model = MagicMock()
+                model.predict.return_value = {"raw": json.dumps(payload), "finish_reason": "stop"}
+                with patch.object(main, "document_text", return_value="OCR text"), \
+                        patch.object(main, "resolve_adapter_path"), \
+                        patch.object(main, "get_extractor", return_value=model), \
+                        self.assertLogs(main.LOGGER, level="WARNING"):
+                    updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
+                self.assertIsNone(updates[-1][0])
+                self.assertIn("Avertissement", updates[-1][1])
+                self.assertIn("Incoherence", updates[-1][1])
+                self.assertIn("Aucune valeur", updates[-1][1])
+
     def test_errors_clear_previous_json_and_success_is_validated(self):
         filename = str(main.EXAMPLES[0][1])
         with patch.object(main, "document_text", return_value="OCR text"), \

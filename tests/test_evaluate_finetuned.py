@@ -207,6 +207,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(result["finish_reason"], "stop")
             inference.tokenizer.decode.assert_called_once_with([5, 6, 2], skip_special_tokens=True)
             self.assertEqual(inference.model.generate.call_args.kwargs["pad_token_id"], 0)
+            self.assertIs(inference.model.generate.call_args.kwargs["do_sample"], False)
             inputs.__getitem__.return_value.shape = (1, 3000)
             with self.assertRaisesRegex(ValueError, "exceeds context"):
                 inference.predict({"input": "invoice", "id": "test"})
@@ -220,6 +221,7 @@ class EvaluationTests(unittest.TestCase):
         result = evaluation.generate(llm, self.rows[0], 1024)
         self.assertEqual(result["completion_tokens"], 2)
         self.assertEqual(llm.create_chat_completion.call_args.kwargs["max_tokens"], 1024)
+        self.assertEqual(llm.create_chat_completion.call_args.kwargs["temperature"], 0.0)
 
     def test_cli_writes_auditable_outputs_without_overwriting(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
