@@ -1,6 +1,5 @@
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,7 +15,7 @@ class LineItem(BaseModel):
     total_ht: float
 
     @model_validator(mode="after")
-    def validate_line_total(self) -> Self:
+    def validate_line_total(self) -> "LineItem":
         try:
             expected = (Decimal(str(self.quantity)) * Decimal(str(self.unit_price))).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP,
@@ -42,7 +41,7 @@ class Invoice(BaseModel):
     line_items: list[LineItem] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_invoice_total(self) -> Self:
+    def validate_invoice_total(self) -> "Invoice":
         expected = sum((Decimal(str(item.total_ht)) for item in self.line_items), Decimal(0))
         actual = Decimal(str(self.total_ht))
         if abs(expected - actual) > MONEY_TOLERANCE:
