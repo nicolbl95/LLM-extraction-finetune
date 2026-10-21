@@ -16,7 +16,7 @@ Extraction de factures internationales **FR/EUR, UK/GBP et US/USD** vers un
 JSON structuré : fournisseur, date, articles et totaux. Le projet met en œuvre
 les étapes d'un workflow LLM / IA Engineering, de la synthèse de données
 jusqu'à la mesure de la qualité d'extraction.
-**[Accéder à la démo live sur Hugging Face Spaces](https://huggingface.co/spaces/nicolbl95/LLM-extraction-finetune)**.
+**[Tester la démo live](https://huggingface.co/spaces/nicolbl95/LLM-extraction-finetune)**.
 
 **100 % de validité JSON et 95 % d'Exact Match déclarés dans le rapport v3 :
 un résultat remarquable pour Qwen2.5-3B-Instruct, un modèle léger de seulement
@@ -182,12 +182,6 @@ requis, leurs types et les valeurs finies restent obligatoires : un JSON
 mal formé ou structurellement invalide n'est pas affiché. Un résultat avec
 avertissement n'est pas présenté comme arithmétiquement validé.
 
-**Limites :** le TTC doit être fini, mais son calcul n'est pas vérifié, car
-les taux de taxe ne font pas partie du schéma. Le décodage sans échantillonnage
-ne garantit ni des résultats identiques entre tous les matériels et versions,
-ni l'absence d'hallucinations. Des valeurs erronées mais arithmétiquement
-cohérentes nécessitent toujours une vérification du document.
-
 ## Boucle d'auto-correction (Self-Correction)
 
 La démo limite la correction à **un unique essai**, soit au maximum
@@ -218,12 +212,6 @@ ne déclenchent pas cette correction. Si ces erreurs surviennent pendant la
 seconde passe, elles n'effacent pas le premier résultat structurellement valide.
 Le contexte reste limité sans troncature silencieuse, y compris pendant la
 seconde passe.
-
-Sur ZeroGPU, seules les opérations de chargement et de génération du modèle
-sont exécutées dans `predict_invoice`, décorée avec `@spaces.GPU`. La
-validation et l'orchestration des deux passes restent dans le processus
-Gradio, afin de préserver les erreurs Pydantic sans les faire traverser
-la frontière du worker GPU.
 
 ## 🎯 Résultats clés
 
@@ -275,11 +263,24 @@ Q4_K_M est facultatif ; les uploads Hub/W&B sont désactivés par défaut.
 
 ## ⚙️ Installation & Utilisation
 
-### 1. Installation
+Depuis la racine du projet :
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-pip install -r requirements-inference.txt  # Pour l'inférence et l'évaluation
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-inference.txt
+
+# Vérifier les données sans charger de modèle.
+python src/evaluate_finetuned.py --check-data-only
+
+# Évaluer les adaptateurs téléchargés sur un environnement CUDA compatible.
+python src/evaluate_finetuned.py \
+  --adapter-path results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter \
+  --load-in-4bit \
+  --output-dir results/evaluation-v3
 ```
+
+Les adaptateurs nécessitent le modèle de base et leur tokenizer. Choisir un
+nouveau dossier de sortie pour chaque évaluation ; les rapports existants
+ne sont pas écrasés.
