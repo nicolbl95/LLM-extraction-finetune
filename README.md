@@ -125,27 +125,6 @@ seule une généralisation à des structures entièrement nouvelles.
 └── requirements-inference.txt
 ```
 
-### Contrat de sortie
-
-Le schéma Pydantic v2 définit `Invoice` et ses `LineItem` :
-
-| Champ | Type | Contenu |
-| --- | --- | --- |
-| `supplier_name` | `str` | Nom du fournisseur |
-| `invoice_date` | `date` | Date normalisée `AAAA-MM-JJ` |
-| `total_ht`, `total_ttc` | `float` | Totaux hors taxes et taxes comprises |
-| `line_items` | `list[LineItem]` | Articles ordonnés ; liste vide par défaut dans le schéma |
-| `line_items[].description` | `str` | Désignation |
-| `line_items[].quantity` | `float` | Quantité |
-| `line_items[].unit_price` | `float` | Prix unitaire net après remise, hors taxes |
-| `line_items[].total_ht` | `float` | Montant net de la ligne |
-
-**Champs extraits ≠ métadonnées.** Client, coordonnées bancaires et références
-sont présents dans les documents, mais ne sont pas des champs cibles.
-`locale`, `currency`, template, chemin d'image et détails taxes/remises servent
-à la traçabilité du dataset, pas au prompt du modèle. Les montants prédits
-restent dans la devise du document ; aucun champ `currency` n'est extrait.
-
 ## Mécanismes de fiabilisation & déterminisme
 
 ### Décodage sans échantillonnage et précision numérique
@@ -220,6 +199,8 @@ tokenizer sont importés dans `results/`.
 | Contexte maximal | `4096` tokens |
 | Durée du run | Environ **40 min 19 s** |
 | Train loss / validation loss | **0,00746 / 0,00591** |
+
+![Pertes d'entraînement et de validation du fine-tuning QLoRA](results/loss_curve.png)
 
 La perte diminue rapidement puis reste faible ; la validation se stabilise
 autour de **0,006**, sans remontée durable visible. Cela suggère une convergence
