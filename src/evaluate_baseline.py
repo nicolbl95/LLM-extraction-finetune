@@ -2,7 +2,9 @@
 
 import json
 import re
+import statistics
 import sys
+import time
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -158,7 +160,12 @@ def rate(flags: list[bool]) -> float:
 def main() -> None:
     lines = TEST_PATH.read_text(encoding="utf-8").splitlines()
     records = [json.loads(line) for line in lines if line.strip()]
-    results = [evaluate_record(record) for record in records]
+    results = []
+    for record in records:
+        start = time.perf_counter()
+        result = evaluate_record(record)
+        result["latency_ms"] = (time.perf_counter() - start) * 1000
+        results.append(result)
 
     per_format = {}
     for fmt in sorted({r["format"] for r in results}):
@@ -178,6 +185,8 @@ def main() -> None:
         "field_accuracy": field_accuracy,
         "mean_field_accuracy": round(sum(field_accuracy.values()) / len(FIELDS), 4),
         "exact_match_rate": rate([r["exact"] for r in results]),
+        "latency_ms_mean": round(statistics.mean([r["latency_ms"] for r in results]), 3),
+        "latency_ms_median": round(statistics.median([r["latency_ms"] for r in results]), 3),
         "per_format": per_format,
     }
 

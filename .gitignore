@@ -1,0 +1,7 @@
+
+# Gros fichiers et modèles à ne pas pousser sur GitHub
+*.gguf
+*.zip
+data/invoices/
+results/qwen25-3b-international-v3-*/
+results/*.zip
