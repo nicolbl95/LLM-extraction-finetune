@@ -1,186 +1,104 @@
 # LLM-extraction-finetune
 
-[![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/) [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/) [![Unsloth](https://img.shields.io/badge/Unsloth-059669?style=for-the-badge)](https://docs.unsloth.ai/) [![QLoRA 4-bit](https://img.shields.io/badge/QLoRA-4--bit-8B5CF6?style=for-the-badge)](https://arxiv.org/abs/2305.14314) [![Qwen 2.5 · 3B](https://img.shields.io/badge/Qwen_2.5-3B-6366F1?style=for-the-badge)](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063?style=for-the-badge&logo=pydantic&logoColor=white)](https://docs.pydantic.dev/latest/) [![Hugging Face](https://img.shields.io/badge/Hugging_Face-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/) [![Google Colab](https://img.shields.io/badge/Google_Colab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=black)](https://colab.research.google.com/) [![ReportLab](https://img.shields.io/badge/ReportLab-1D4ED8?style=for-the-badge)](https://docs.reportlab.com/) [![GGUF / llama.cpp](https://img.shields.io/badge/GGUF_%2F_llama.cpp-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)](https://github.com/ggml-org/llama.cpp)
+[![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/) [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/) [![Unsloth](https://img.shields.io/badge/Unsloth-059669?style=for-the-badge)](https://docs.unsloth.ai/) [![QLoRA 4-bit](https://img.shields.io/badge/QLoRA-4--bit-8B5CF6?style=for-the-badge)](https://arxiv.org/abs/2305.14314) [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063?style=for-the-badge&logo=pydantic&logoColor=white)](https://docs.pydantic.dev/latest/)
 
 ## 📖 Description
 
-Extraction de factures internationales **FR/EUR, UK/GBP et US/USD** vers un
-JSON structuré : fournisseur, date, articles et totaux. Le projet met en œuvre
-les étapes d'un workflow LLM / IA Engineering, de la synthèse de données
-jusqu'à la mesure de la qualité d'extraction.
+Extraction de factures **FR/EUR, UK/GBP et US/USD** vers un JSON structuré : fournisseur, date, articles et totaux.
+Stack : **Qwen2.5-3B-Instruct, QLoRA 4 bits, Unsloth et PEFT**, avec validation Pydantic v2.
+Rapport v3 : **100 % de validité JSON et 95 % d'Exact Match déclarés** ; la supériorité sur des modèles plus volumineux reste à démontrer.
 **[Tester la démo live](https://huggingface.co/spaces/nicolbl95/LLM-extraction-finetune)**.
-
-**100 % de validité JSON et 95 % d'Exact Match déclarés dans le rapport v3 :
-un résultat remarquable pour Qwen2.5-3B-Instruct, un modèle léger de seulement
-3 milliards de paramètres.** Ce résultat illustre l'intérêt d'un fine-tuning
-ciblé LoRA/Unsloth pour spécialiser un petit modèle sur une extraction
-structurée complexe ; une supériorité sur des modèles plus volumineux reste
-à démontrer par un benchmark comparatif.
 
 ## 🛠️ Stack Technique & Méthodologies
 
-- **LLM & Fine-Tuning :** Qwen2.5-3B-Instruct, Unsloth pour l'optimisation
-  mémoire/vitesse, adaptation LoRA avec PEFT et quantification 4 bits
-  du modèle de base (QLoRA).
-- **Structuration & Validation :** Pydantic v2 pour définir le contrat
-  d'extraction ; contrôle du JSON strict et validation du schéma après
-  génération pour les entités, montants HT/TTC et tableaux d'articles.
-  Le pipeline n'impose pas de JSON Schema au décodage.
-- **Garde-fous & Auto-correction :** validation Pydantic stricte et contrôles
-  arithmétiques avec `Decimal`, tolérance de **0,02** et arrondi
-  `ROUND_HALF_UP`. Une seule passe corrective relit les données sources ;
-  les incohérences persistantes sont signalées, sans ajustement forcé.
-- **Pipeline de Données :** génération synthétique multilingue et multidevise,
-  diversification procédurale des contenus et mises en page (data augmentation),
-  partitionnement Train/Val/Test reproductible et contrôles de chevauchement.
-- **Rôle des jeux de données (Split 80/10/10) :** le script Python crée les
-  exemples ; Qwen apprend sur **Train (480)**, est suivi sur
-  **Validation (60)**, l'« examen blanc », puis évalué sur
-  **Test (60)**, l'« examen final » réservé à des exemples non utilisés
-  pour l'apprentissage ni le réglage.
-- **Évaluation & Métriques :** benchmark personnalisé, Exact Match Rate,
-  JSON Validity Rate et rapports `metrics.json`, avec prédictions détaillées
-  et ventilation par région, devise, format et template.
-- **Environnement & Tooling :** PyTorch, Hugging Face Transformers et Datasets,
-  VS Code / GitHub Codespaces pour le développement et Google Colab pour
-  l'entraînement GPU.
+- **Modèle :** 3 milliards de paramètres ; Unsloth pour la mémoire/vitesse,
+  LoRA via PEFT ; contrôle des longueurs sans troncature silencieuse.
+- **Données :** synthèse multilingue/multidevise, diversification procédurale
+  des contenus et mises en page ; rendu ReportLab/PyMuPDF.
+- **Évaluation :** benchmark personnalisé, Exact Match Rate, JSON Validity Rate,
+  rapports `metrics.json` et prédictions par région, devise, format et template.
+- **Tooling :** PyTorch, Hugging Face Transformers/Datasets, VS Code/Codespaces,
+  Google Colab pour le GPU ; backend alternatif GGUF/llama.cpp.
 
 ## 🏗️ Architecture
 
 ```text
-9 références de templates internationaux
-                  │
-     Génération procédurale déterministe
-                  │
-    600 textes + cibles JSON + 600 PNG
-                  │
-      Train 480 / Validation 60 / Test 60
-                  │
-      Qwen2.5-3B + QLoRA / Unsloth
-                  │
-     Adaptateurs LoRA + tokenizer
-                  │
-   Base + PEFT → JSON → Pydantic / scoring
-                  │
-       Métriques + prédictions détaillées
+Templates → Génération Python → Textes + cibles JSON + PNG
+                            → Train / Validation / Test
+                            → Qwen + QLoRA / Unsloth
+                            → Adaptateurs + tokenizer
+                            → Base + PEFT → JSON → Validation / scoring
 ```
 
-- **Data Engineering :** neuf familles de structures, 600 profils visuels
-  distincts, rendu ReportLab/PyMuPDF, 1 à 12 articles, dates et devises
-  régionalisées. Calculs monétaires contrôlés avec `Decimal` et arrondi au
-  centime ; seed **42**.
-- **Optimisation :** base en 4 bits, supervision des réponses assistant,
-  accumulation de gradients et contrôle des longueurs sans troncature
-  silencieuse.
-- **Fiabilité :** contrat Pydantic v2, scoring du JSON strict, erreurs
-  explicites et provenance par hashes. Les splits sont disjoints par ID et
-  texte ; les templates restent partagés entre les sous-ensembles.
+Les données sont générées par règles Python déterministes (`data/generate_dataset.py`),
+puis réparties en trois splits disjoints (`src/split_data.py`).
+Le modèle apprend des régularités d'extraction à partir des couples texte/JSON,
+pas l'exécution du script ni une garantie de calcul exact.
 
-### Méthodologie : génération et apprentissage
+### Données et partitionnement
 
-**Le script crée les exercices ; le modèle apprend à les résoudre.**
-`data/generate_dataset.py` fabrique les factures et leurs cibles JSON par des
-règles Python explicites. `src/split_data.py` les répartit en trois jeux
-disjoints ; aucun apprentissage n'a lieu pendant cette génération.
-Lors du fine-tuning, Qwen ajuste ses adaptateurs à partir des couples
-texte/JSON : il apprend des régularités d'extraction, pas l'exécution du
-script ni une garantie de raisonnement arithmétique exact.
+**600 factures textuelles + 600 PNG**, dont **200 FR / 200 UK / 200 US** :
+neuf familles de templates, 600 profils visuels distincts, 1 à 12 articles,
+dates et devises régionalisées ; seed **42**.
+Les calculs monétaires de génération sont contrôlés et arrondis au centime.
 
-| Fichier | Part / exemples | Rôle pédagogique et technique |
+| Fichier | Part / exemples | Rôle |
 | --- | --- | --- |
-| `data/train.jsonl` | **80 % / 480** | **Apprentissage des règles** : exemples corrigés utilisés pour calculer la perte et mettre à jour les adaptateurs. |
-| `data/val.jsonl` | **10 % / 60** | **Examen blanc** : mesure la perte sans mise à jour des poids ; aide à surveiller le surapprentissage et à guider les choix d'entraînement, sans garantir son absence. |
-| `data/test.jsonl` | **10 % / 60** | **Examen final scellé vis-à-vis du réglage** : réservé à la mesure finale, jamais utilisé pour les gradients ni pour choisir les hyperparamètres. |
+| `data/train.jsonl` | **80 % / 480** | Mise à jour des adaptateurs. |
+| `data/val.jsonl` | **10 % / 60** | Suivi de la perte, sans mise à jour des poids. |
+| `data/test.jsonl` | **10 % / 60** | Mesure finale, jamais utilisé pour les gradients ni les hyperparamètres. |
 
-Les exemples de test sont inédits pour l'apprentissage, mais partagent les
-familles de templates du dataset : cette évaluation ne démontre pas à elle
-seule une généralisation à des structures entièrement nouvelles.
+Splits disjoints par ID et texte, contrôles de chevauchement et provenance par
+hashes. Les exemples de test sont inédits pour l'apprentissage, mais partagent
+les familles de templates : la généralisation à des structures entièrement
+nouvelles n'est pas démontrée. La validation aide à surveiller le
+surapprentissage, sans garantir son absence.
 
-### Organisation du projet
+### Garde-fous et auto-correction
 
-```text
-.
-├── data/
-│   ├── generate_dataset.py / render_invoice.py / schema.py
-│   ├── dataset.jsonl                  # 600 factures
-│   ├── train.jsonl / val.jsonl / test.jsonl
-│   ├── templates/                     # 1.png à 9.png
-│   └── invoices/                      # 600 rendus PNG uniques
-├── notebooks/fine_tune_unsloth.ipynb
-├── src/
-│   ├── split_data.py
-│   ├── evaluate_baseline.py            # baseline Regex, pas Qwen brut
-│   └── evaluate_finetuned.py           # LoRA / GGUF
-├── tests/                             # données, notebook, évaluation
-├── results/
-│   ├── evaluation-3/finetuned_metrics.json
-│   ├── qwen25-3b-international-v3-20261021T053959288046Z.zip
-│   └── qwen25-3b-international-v3-20261021T053959288046Z/
-│       ├── lora_adapter/              # poids et tokenizer
-│       ├── checkpoints/
-│       ├── training_manifest.json
-│       ├── train_log.json
-│       └── loss_curve.png
-├── requirements.txt
-└── requirements-inference.txt
-```
+- **Validation après génération :** Pydantic v2, objet JSON strict, champs/types
+  requis et valeurs finies ; prose, Markdown et clés dupliquées refusés.
+  Le pipeline n'impose pas de JSON Schema au décodage.
+- **Arithmétique :** `quantity × unit_price` net et somme HT, calculs `Decimal`,
+  arrondi `ROUND_HALF_UP`, tolérance **0,02**.
+- **Correction :** une seule passe corrective, deux inférences maximum, à partir
+  de la facture, de la réponse et des erreurs ; pas d'ajustement artificiel des
+  totaux. Le dernier JSON structurellement valide est conservé avec
+  avertissements si nécessaire ; sans résultat valide, une erreur est affichée.
+  Données, évaluation et tests Golden restent stricts par défaut.
+- **Erreurs opérationnelles :** chargement, troncature ou dépassement de contexte
+  ne déclenchent pas la correction ; aucun contexte n'est tronqué silencieusement.
 
-## Mécanismes de fiabilisation & déterminisme
-
-### Décodage sans échantillonnage et précision numérique
-
-Le décodage est explicitement verrouillé dans
-[src/evaluate_finetuned.py](src/evaluate_finetuned.py) :
-
-- **LoRA / Transformers :** `do_sample=False` pour les deux passes éventuelles.
-- **GGUF :** `temperature=0.0` pour la génération.
-
+Décodage sans échantillonnage dans [l'évaluateur](src/evaluate_finetuned.py) :
+LoRA `do_sample=False` pour les deux passes éventuelles ; GGUF `temperature=0.0`.
 Lecture littérale des chiffres : [détails du prompt système](docs/DESIGN.md).
 
-### Garde-fous arithmétiques Pydantic
+## 🎯 Résultats
 
-- **Structure :** objet JSON strict, champs et types requis, valeurs finies ;
-  prose, Markdown et clés dupliquées sont refusés.
-- **Calculs :** contrôle de `quantity × unit_price` net et de la somme HT,
-  avec `Decimal`, arrondi `ROUND_HALF_UP` et tolérance de **0,02**.
-- **Affichage :** après correction, un JSON structurellement valide peut être
-  affiché avec des avertissements arithmétiques détaillés, sans recalcul forcé.
-  Les données, l'évaluation et les tests Golden restent stricts par défaut.
+| Système | JSON valide | Exact Match | Source |
+| --- | ---: | ---: | --- |
+| Baseline Regex (rapport historique) | 46,67 % | 43,33 % | [src/evaluate_baseline.py](src/evaluate_baseline.py) |
+| Qwen2.5-3B-Instruct brut (sans fine-tuning) | à mesurer | à mesurer | — |
+| Qwen2.5-3B + QLoRA (v3) | 100 % (déclaré) | 95 % (déclaré) | [results/evaluation-3/finetuned_metrics.json](results/evaluation-3/finetuned_metrics.json) |
 
-## Boucle d'auto-correction (Self-Correction)
-
-La démo autorise **une seule correction**, soit deux passes maximum :
-le modèle reçoit la facture originale, sa réponse et les erreurs de validation
-pour relire les valeurs sources, sans ajuster artificiellement les totaux.
-Le dernier JSON structurellement valide est conservé avec avertissements si
-nécessaire ; sans résultat valide, une erreur est affichée.
-Les erreurs de chargement, troncatures et dépassements de contexte ne
-déclenchent pas de correction ; aucun contexte n'est tronqué silencieusement.
-
-## 🎯 Résultats clés
-
-| Indicateur | Résultat |
-| --- | ---: |
-| Validité JSON déclarée | **100 %** |
-| Exact Match déclaré | **95 %** |
-| Dataset international v3 | **600 factures + 600 PNG** |
-| Répartition par région | **200 FR / 200 UK / 200 US** |
-| Split train / validation / test | **480 / 60 / 60** |
-
-Source : [rapport final v3](results/evaluation-3/finetuned_metrics.json),
-qui identifie les adaptateurs du run Colab. Ce rapport synthétique ne fournit
-ni effectif évalué, ni hash du test, ni latence, ni détail par segment :
+Valeurs Regex reprises du [rapport existant](results/baseline_metrics.json).
+Les rapports historiques Regex/GGUF ne constituent pas une comparaison
+contrôlée v3. Le rapport v3 identifie les adaptateurs, mais ne fournit ni
+effectif évalué, ni hash du test, ni latence, ni détail par segment :
 les deux taux sont repris tels que déclarés, sans extrapolation.
 
-L'évaluateur prépare les ventilations région/devise/format/template et distingue
-JSON strict, validité du schéma et exactitude métier. Il compare les nombres
-avec une tolérance de **0,01** et les articles dans leur ordre. Les rapports
-historiques Regex/GGUF ne constituent pas une comparaison contrôlée v3.
+Baseline à produire : évaluer le modèle de base avec le même prompt et le
+même test set (60 exemples), sans adaptateur. Ce mode n'est pas proposé
+actuellement par le CLI LoRA ; ne pas assimiler la baseline Regex à Qwen brut.
+
+L'évaluateur distingue JSON strict, validité du schéma et exactitude métier ;
+les articles sont comparés dans leur ordre. Sa tolérance numérique de
+**0,01** sert au scoring des prédictions contre les cibles, contrairement à
+la tolérance arithmétique ci-dessus qui contrôle la cohérence interne.
 
 ## 🚀 Fine-tuning & Loss
 
-Entraînement QLoRA réalisé sur Colab avec Unsloth ; les poids LoRA et le
-tokenizer sont importés dans `results/`.
+Run QLoRA Colab terminé ; poids LoRA et tokenizer importés dans `results/`.
 
 | Configuration | Valeur |
 | --- | --- |
@@ -198,16 +116,15 @@ La perte diminue rapidement puis reste faible ; la validation se stabilise
 autour de **0,006**, sans remontée durable visible. Cela suggère une convergence
 stable sur ce run, sans prouver l'absence de surapprentissage.
 
-Pour reproduire : ouvrir le notebook sur un GPU compatible (Colab T4 prévu),
-fournir les fichiers v3 `train.jsonl` et `val.jsonl`, puis exécuter les cellules
-dans l'ordre. Le manifeste sauvegarde configuration, versions et hashes ;
-l'archive doit être téléchargée avant expiration du runtime.
-**Les adaptateurs nécessitent le modèle de base.** L'export GGUF fusionné
-Q4_K_M est facultatif ; les uploads Hub/W&B sont désactivés par défaut.
+Pour reproduire : exécuter le notebook sur un GPU compatible (Colab T4 prévu)
+avec les fichiers v3 d'entraînement/validation ; télécharger l'archive avant
+expiration du runtime. Le manifeste sauvegarde configuration, versions et hashes.
+**Les adaptateurs nécessitent le modèle de base et le tokenizer.**
+Export GGUF fusionné Q4_K_M facultatif ; uploads Hub/W&B désactivés par défaut.
 
 ## ⚙️ Installation & Utilisation
 
-Depuis la racine du projet :
+Depuis la racine, sur un environnement CUDA compatible pour l'inférence :
 
 ```bash
 python -m venv .venv
@@ -218,13 +135,25 @@ python -m pip install -r requirements-inference.txt
 # Vérifier les données sans charger de modèle.
 python src/evaluate_finetuned.py --check-data-only
 
-# Évaluer les adaptateurs téléchargés sur un environnement CUDA compatible.
-python src/evaluate_finetuned.py \
-  --adapter-path results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter \
-  --load-in-4bit \
-  --output-dir results/evaluation-v3
+ADAPTER="results/<run>/lora_adapter"  # chemin vers les adaptateurs téléchargés
+python src/evaluate_finetuned.py --adapter-path "$ADAPTER" --load-in-4bit --output-dir results/evaluation-3/nouveau-run
 ```
 
-Les adaptateurs nécessitent le modèle de base et leur tokenizer. Choisir un
-nouveau dossier de sortie pour chaque évaluation ; les rapports existants
-ne sont pas écrasés.
+Remplacer `<run>` par le dossier téléchargé et `nouveau-run` par un nom inédit.
+Le dossier existant `results/evaluation-3` conserve le rapport fourni ; chaque
+évaluation écrit `metrics.json` et `predictions.jsonl` dans un nouveau
+sous-dossier, sans écraser les scores déclarés.
+
+### Organisation du projet
+
+```text
+.
+├── data/                 # génération, schéma, textes, templates et PNG
+├── notebooks/            # entraînement Unsloth
+├── src/                  # partitionnement et évaluation
+├── tests/                # tests logiciels et Golden
+├── results/              # rapports, courbe et adaptateurs par run
+├── app/                  # interface documentaire
+├── docs/                 # notes de conception
+└── requirements*.txt     # dépendances données et inférence
+```
