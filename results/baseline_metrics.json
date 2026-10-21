@@ -1,0 +1,32 @@
+{
+  "model": "rule_based_baseline",
+  "split": "test",
+  "num_examples": 6,
+  "json_validity_rate": 1.0,
+  "field_accuracy": {
+    "supplier_name": 1.0,
+    "invoice_date": 1.0,
+    "total_ht": 1.0,
+    "total_ttc": 1.0,
+    "line_items": 1.0
+  },
+  "mean_field_accuracy": 1.0,
+  "exact_match_rate": 1.0,
+  "per_format": {
+    "email": {
+      "num_examples": 2,
+      "json_validity_rate": 1.0,
+      "exact_match_rate": 1.0
+    },
+    "raw_text": {
+      "num_examples": 2,
+      "json_validity_rate": 1.0,
+      "exact_match_rate": 1.0
+    },
+    "text_block": {
+      "num_examples": 2,
+      "json_validity_rate": 1.0,
+      "exact_match_rate": 1.0
+    }
+  }
+}

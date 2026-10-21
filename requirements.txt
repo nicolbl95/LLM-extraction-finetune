@@ -1,0 +1,5 @@
+pydantic
+pandas
+requests
+datasets
+huggingface_hub
