@@ -93,6 +93,12 @@ Prévoir un **Space GPU** et rendre les adaptateurs/tokenizer disponibles dans
 le Space (y compris `adapter_config.json` et `adapter_model.safetensors`),
 puis configurer `INVOICE_ADAPTER_PATH`. Un Space CPU reste possible avec
 `INVOICE_DEVICE=cpu`, suffisamment de RAM et une latence plus élevée.
+Sur **ZeroGPU**, sélectionner ce matériel dans les paramètres du Space et
+conserver `INVOICE_DEVICE=cuda`. Le paquet `spaces` est inclus dans les
+dépendances et `extract_invoice` porte le décorateur `@spaces.GPU` :
+le chargement du modèle et la génération ont lieu dans la réservation GPU,
+tandis que l'OCR reste hors de cette réservation. Le décorateur est sans
+effet hors de ZeroGPU, ce qui préserve le lancement local et les GPU dédiés.
 Le lien ci-dessus pointe vers le Space cible
 `nicolbl95/LLM-extraction-finetune`.
 

@@ -199,6 +199,18 @@ class AppTests(unittest.TestCase):
         self.assertIn("image", types)
         self.assertIn("json", types)
 
+    def test_zerogpu_registers_inference_at_import(self):
+        import runpy
+        import sys
+        import types
+
+        gpu = MagicMock(side_effect=lambda function: function)
+        with patch.dict(sys.modules, {"spaces": types.SimpleNamespace(GPU=gpu)}), \
+                patch("evaluate_finetuned.LoRAInference") as backend:
+            namespace = runpy.run_path(str(main.ROOT / "app/main.py"))
+        gpu.assert_called_once_with(namespace["extract_invoice"])
+        backend.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

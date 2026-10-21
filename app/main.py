@@ -7,6 +7,7 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+import spaces
 import gradio as gr
 import pymupdf
 import pytesseract
@@ -130,6 +131,7 @@ def get_extractor() -> LoRAInference:
     )
 
 
+@spaces.GPU
 def extract_invoice(text: str) -> dict:
     prediction = get_extractor().predict({"id": "live-upload", "input": text})
     if prediction["finish_reason"] != "stop":
