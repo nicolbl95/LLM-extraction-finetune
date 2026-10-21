@@ -5,3 +5,18 @@
 data/invoices/
 results/qwen25-3b-international-v3-*/
 results/*.zip
+
+# Templates, images et autres binaires exclus du depot de deploiement
+data/templates/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Cache Python genere localement
+__pycache__/
+*.pyc
