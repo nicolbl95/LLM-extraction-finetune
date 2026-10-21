@@ -222,39 +222,84 @@ Le schéma Pydantic v2 définit `Invoice` et ses `LineItem` :
 | `line_items[].unit_price` | `float` | Prix unitaire net après remise, hors taxes |
 | `line_items[].total_ht` | `float` | Montant net de la ligne |
 
-Les contrôles arithmétiques Pydantic utilisent `Decimal`, l'arrondi
-`ROUND_HALF_UP` au centime pour `quantity × unit_price`, et une tolérance
-absolue de **0,02 unité monétaire** par ligne et sur le total HT global.
-La somme des montants HT de toutes les lignes doit correspondre au total HT
-de la facture ; une liste vide n'est donc pas valide pour un total HT non nul
-au-delà de cette tolérance. Les valeurs non finies (`NaN`, infinis) sont refusées.
-La démo utilise un prompt renforcé exigeant une lecture littérale des nombres
-et un exemple fictif complet : `7,2 × 12,50 = 90,00` devient
-`quantity=7.2`, `unit_price=12.5`, `total_ht=90.0`. Le prompt d'évaluation,
-identique à celui de l'entraînement, reste inchangé.
-
-Si le JSON est mal formé ou échoue à la validation Pydantic, **une seule**
-nouvelle inférence est tentée. La conversation conserve la facture originale
-et reçoit le JSON rejeté ainsi que l'erreur exacte du parseur ou de Pydantic.
-La seconde réponse est soumise aux mêmes contrôles, sans troisième tentative.
-Les erreurs de chargement, réponses tronquées et dépassements du contexte ne
-déclenchent pas cette correction. Le contexte reste limité sans troncature
-silencieuse, y compris pendant la seconde passe.
-
-En cas d'échec persistant, l'interface affiche l'erreur et ne présente pas
-le JSON comme valide. Aucune correction arithmétique forcée n'est appliquée.
-Le calcul du TTC n'est pas vérifié : les taux de taxe ne font pas partie du schéma.
-
-La génération utilise déjà un décodage sans échantillonnage (`do_sample=False`
-en LoRA, `temperature=0.0` en GGUF). Ce réglage et les contrôles mathématiques
-ne garantissent pas l'absence d'hallucinations : des valeurs erronées mais
-arithmétiquement cohérentes nécessitent toujours une vérification du document.
-
 **Champs extraits ≠ métadonnées.** Client, coordonnées bancaires et références
 sont présents dans les documents, mais ne sont pas des champs cibles.
 `locale`, `currency`, template, chemin d'image et détails taxes/remises servent
 à la traçabilité du dataset, pas au prompt du modèle. Les montants prédits
 restent dans la devise du document ; aucun champ `currency` n'est extrait.
+
+## Mécanismes de fiabilisation & déterminisme
+
+### Décodage sans échantillonnage et précision numérique
+
+Le décodage est explicitement verrouillé dans
+[src/evaluate_finetuned.py](src/evaluate_finetuned.py) :
+
+- **LoRA / Transformers :** `do_sample=False` pour les deux passes éventuelles.
+- **GGUF :** `temperature=0.0` pour la génération.
+
+Dans [app/main.py](app/main.py), le prompt système impose une lecture
+littérale des chiffres : une quantité `7,2` doit être transcrite `7.2`,
+et non `142` ou `72`. Un exemple few-shot fictif complet illustre le calcul
+`7,2 × 12,50 = 90,00`, soit `quantity=7.2`, `unit_price=12.5`, `total_ht=90.0`.
+Les valeurs de cet exemple ne doivent pas être recopiées dans la facture réelle.
+Le prompt d'évaluation, identique à celui de l'entraînement, reste inchangé.
+
+### Garde-fous arithmétiques Pydantic
+
+Le schéma partagé [data/schema.py](data/schema.py) valide la structure et
+croise les champs numériques avant l'affichage du résultat :
+
+| Contrôle | Règle appliquée |
+| --- | --- |
+| Cohérence d'une ligne | Comparaison de `quantity × unit_price` avec le `total_ht` de la ligne |
+| Cohérence de la facture | Comparaison de la somme des `line_items[].total_ht` avec le `total_ht` global |
+| Tolérance monétaire | Écart absolu maximal de **0,02 unité monétaire**, par ligne et sur le total HT global ; tout écart strictement supérieur est rejeté |
+| Valeurs non finies | Rejet de `NaN`, `+Infinity` et `-Infinity` dans les quantités, prix et totaux |
+
+Les calculs utilisent `Decimal` à partir des représentations décimales des
+valeurs. Le produit quantité × prix unitaire est arrondi au centime avec
+`ROUND_HALF_UP`, comme dans le générateur du dataset. Le prix unitaire cible
+est le prix **net après remise**. Une facture sans articles est rejetée si
+son total HT diffère de zéro de plus de 0,02.
+
+L'application exige également un objet JSON strict : le texte explicatif,
+les balises Markdown et les clés dupliquées ne sont pas acceptés. Aucun JSON
+ayant échoué aux contrôles n'est affiché comme un résultat validé, et aucune
+quantité ni somme n'est recalculée de force pour masquer une incohérence.
+
+**Limites :** le TTC doit être fini, mais son calcul n'est pas vérifié, car
+les taux de taxe ne font pas partie du schéma. Le décodage sans échantillonnage
+ne garantit ni des résultats identiques entre tous les matériels et versions,
+ni l'absence d'hallucinations. Des valeurs erronées mais arithmétiquement
+cohérentes nécessitent toujours une vérification du document.
+
+## Boucle d'auto-correction (Self-Correction)
+
+La démo limite la correction à **un unique essai**, soit au maximum
+**deux passes d'inférence** :
+
+1. Générer une première réponse, la parser comme JSON strict, puis appliquer
+   les validations Pydantic de structure et de cohérence arithmétique.
+2. Si le JSON est mal formé ou échoue à Pydantic, conserver la facture
+   originale et ajouter à la conversation **le JSON erroné et l'erreur exacte
+   du parseur ou de Pydantic**, avec les champs et incohérences signalés.
+3. Demander une correction ciblée respectant les valeurs littérales de la
+   facture, notamment les décimales, sans modifier artificiellement les montants
+   pour satisfaire la validation.
+4. Revalider la seconde réponse avec les mêmes contrôles. Si elle échoue,
+   afficher une erreur ou un avertissement détaillé dans Gradio et laisser
+   le résultat JSON vide. **Aucune troisième tentative n'est lancée.**
+
+Les erreurs de chargement, réponses tronquées et dépassements du contexte
+ne déclenchent pas cette correction. Le contexte reste limité sans troncature
+silencieuse, y compris pendant la seconde passe.
+
+Sur ZeroGPU, seules les opérations de chargement et de génération du modèle
+sont exécutées dans `predict_invoice`, décorée avec `@spaces.GPU`. La
+validation et l'orchestration des deux passes restent dans le processus
+Gradio, afin de préserver les erreurs Pydantic sans les faire traverser
+la frontière du worker GPU.
 
 ## 🎯 Résultats clés
 
@@ -326,6 +371,14 @@ Les quatre cas synthétiques de [tests/golden_dataset/](tests/golden_dataset/)
 couvrent les quantités `7,2` et `4,2`, les accents et caractères spéciaux,
 les prix nets après remise, les taxes multiples et exonérations, ainsi que
 les formats FR/EUR, UK/GBP et US/USD avec séparateurs de milliers.
+
+| Cas de référence | Difficultés couvertes |
+| --- | --- |
+| [France — quantités décimales](tests/golden_dataset/fr_decimal_quantities.json) | `7,2` et `4,2`, virgule décimale, accents, guillemets et symbole euro |
+| [France — remises et taxes multiples](tests/golden_dataset/fr_discounts_mixed_taxes.json) | Prix nets après remise de 10 %, TVA à 20 %, 5,5 % et 0 % |
+| [Royaume-Uni — TVA et exonération](tests/golden_dataset/uk_fractional_zero_vat.json) | Quantité `7.2`, livre sterling, date en anglais, TVA à 20 % et 0 % |
+| [États-Unis — remises et milliers](tests/golden_dataset/us_discount_thousands.json) | Quantité `4.2`, remise de 20 %, taxe à 8.875 %, format `$1,250.00` |
+
 Chaque fixture versionne le texte de facture, une réponse JSON de référence
 figée et le résultat attendu, plus les détails de taxes et remises vérifiables.
 
@@ -336,6 +389,9 @@ puis compare tous les champs aux attentes par égalité exacte, sans tolérance
 sur les nombres, les textes ou l'ordre des articles. Les cas négatifs couvrent
 les quantités décalées, une différence d'un centime et les erreurs cohérentes
 mathématiquement qui échappent au seul schéma Pydantic.
+La comparaison Golden n'utilise donc **pas** la tolérance de 0,02 du schéma :
+une différence numérique d'un seul centime par rapport à la référence est
+une régression, même si Pydantic accepte encore le résultat.
 
 ```bash
 python -m unittest discover -s tests -p test_golden_dataset.py -v
