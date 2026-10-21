@@ -290,7 +290,7 @@ def run_extraction(filename: str | None):
     try:
         path = checked_path(filename)
         text = document_text(str(path))
-        yield None, "Préparation des poids du modèle… Téléchargement au premier lancement si nécessaire."
+        yield None, "Analyse des données et détection des erreurs.."
         resolve_adapter_path()
         warnings = []
         payload = extract_invoice(text, warnings=warnings)

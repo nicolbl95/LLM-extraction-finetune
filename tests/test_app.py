@@ -472,12 +472,20 @@ class AppTests(unittest.TestCase):
                 patch.object(main, "extract_invoice", sequence.extract_invoice):
             sequence.document_text.return_value = "OCR text"
             sequence.extract_invoice.return_value = self.gold
-            updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
+            updates = main.run_extraction(str(main.EXAMPLES[0][1]))
+            self.assertIsNone(next(updates)[0])
+            self.assertEqual(next(updates), (None, "Analyse des données et détection des erreurs.."))
+            sequence.resolve_adapter_path.assert_not_called()
+            sequence.extract_invoice.assert_not_called()
+            last_update = next(updates)
+            with self.assertRaises(StopIteration):
+                next(updates)
         self.assertEqual(
             [entry[0] for entry in sequence.mock_calls],
             ["document_text", "resolve_adapter_path", "extract_invoice"],
         )
-        self.assertEqual(updates[-1][0], self.gold)
+        self.assertEqual(last_update[0], self.gold)
+        self.assertIn("Extraction terminée", last_update[1])
 
     def test_gradio_interface_builds_without_loading_model(self):
         with patch.object(main, "get_extractor") as backend:
