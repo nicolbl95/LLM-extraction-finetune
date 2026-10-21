@@ -16,6 +16,7 @@ Extraction de factures internationales **FR/EUR, UK/GBP et US/USD** vers un
 JSON structuré : fournisseur, date, articles et totaux. Le projet met en œuvre
 les étapes d'un workflow LLM / IA Engineering, de la synthèse de données
 jusqu'à la mesure de la qualité d'extraction.
+**[Accéder à la démo live sur Hugging Face Spaces](https://huggingface.co/spaces/nicolbl95/LLM-extraction-finetune)**.
 
 **100 % de validité JSON et 95 % d'Exact Match déclarés dans le rapport v3 :
 un résultat remarquable pour Qwen2.5-3B-Instruct, un modèle léger de seulement
@@ -23,109 +24,6 @@ un résultat remarquable pour Qwen2.5-3B-Instruct, un modèle léger de seulemen
 ciblé LoRA/Unsloth pour spécialiser un petit modèle sur une extraction
 structurée complexe ; une supériorité sur des modèles plus volumineux reste
 à démontrer par un benchmark comparatif.
-
-> **Périmètre : extraction textuelle avec interface documentaire.** La démo
-> Gradio accepte les PDF et les images : le texte est lu dans les PDF natifs
-> ou extrait par OCR français/anglais avant l'inférence. Le modèle reste
-> textuel ; les scores ci-dessus ne mesurent pas la chaîne OCR + extraction.
-
-## Démo live — Gradio
-
-**[Ouvrir la démo sur Hugging Face Spaces](https://huggingface.co/spaces/nicolbl95/LLM-extraction-finetune)**.
-L'URL est celle du Space cible ; sa disponibilité dépend du déploiement des
-sources et de la configuration des poids décrits ci-dessous.
-
-L'application [app/main.py](app/main.py) propose un upload PDF/PNG/JPEG,
-trois exemples cliquables France/EUR, Royaume-Uni/GBP et États-Unis/USD,
-un aperçu visuel et le JSON validé par le schéma Pydantic `Invoice`.
-Les exemples suivent exactement le même parcours OCR + modèle que les uploads :
-aucune réponse attendue du dataset n'est utilisée pour simuler l'extraction.
-
-### Lancement local
-
-Utiliser Python 3.11 ou 3.12, puis installer les dépendances Python et Tesseract
-avec les langues française et anglaise (Debian/Ubuntu) :
-
-```bash
-sudo apt-get update
-sudo apt-get install -y tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
-python -m pip install -r requirements.txt
-python app/main.py
-```
-
-Ouvrir <http://localhost:7860>. Le modèle est chargé à la première extraction,
-pas au démarrage de l'interface. Par défaut, les adaptateurs locaux du run
-`results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter`
-sont chargés sur CUDA en 4 bits s'ils sont présents et complets. Sinon, les
-adaptateurs et le tokenizer sont téléchargés automatiquement depuis
-[nicolbl95/llm-extraction-weights](https://huggingface.co/nicolbl95/llm-extraction-weights)
-et conservés dans le cache Hugging Face. Les poids ne sont pas suivis dans
-le dépôt de l'application.
-
-| Variable | Valeur par défaut | Rôle |
-| --- | --- | --- |
-| `INVOICE_ADAPTER_PATH` | Chemin du run ci-dessus | Dossier des adaptateurs et du tokenizer, absolu ou relatif au dépôt |
-| `INVOICE_ADAPTER_REPO` | `nicolbl95/llm-extraction-weights` | Dépôt Hub utilisé lorsque les poids locaux sont absents ou incomplets |
-| `INVOICE_ADAPTER_REVISION` | `main` | Branche, tag ou hash de commit du dépôt des poids |
-| `HF_TOKEN` | Non défini | Secret de lecture pour un dépôt Hub privé ; inutile pour le dépôt public |
-| `INVOICE_DEVICE` | `cuda` | `cuda` (4 bits) ou `cpu` (float32, RAM et latence importantes) |
-| `PORT` | `7860` | Port du serveur Gradio |
-
-Le chemin retourné par `snapshot_download` est transmis au backend LoRA après
-vérification des fichiers. Le dépôt des poids doit contenir à sa racine
-`adapter_config.json`, `adapter_model.safetensors`, `tokenizer_config.json`
-et les fichiers du tokenizer (notamment `tokenizer.json` et le template de chat).
-Le modèle de base indiqué par les adaptateurs est téléchargé via Transformers
-si nécessaire. Un téléchargement échoué ou un dépôt incomplet produit une
-erreur explicite ; aucun modèle non fine-tuné ni résultat simulé n'est substitué.
-
-### Hébergement sur Hugging Face Spaces
-
-Créer un Space **Gradio**, sélectionner Python **3.11** et définir dans
-l'en-tête YAML du README du Space :
-
-```yaml
----
-title: Extraction intelligente de factures
-sdk: gradio
-sdk_version: 6.30.0
-python_version: "3.11"
-app_file: app/main.py
----
-```
-
-Utiliser la même version Gradio 6.x dans `sdk_version` et dans l'environnement
-déployé. Publier les sources, `requirements.txt`, `packages.txt` et
-`app/examples/`. Les trois PNG distribuables sont des copies des factures du
-split test : France `invoice-0406`, UK `invoice-0110`, US `invoice-0435`.
-Ils ne dépendent pas du dossier `data/invoices/`, ignoré par Git.
-
-Prévoir un **Space GPU**. Aucun poids n'a besoin d'être inclus dans le dépôt
-du Space : ils sont téléchargés depuis le dépôt Hub configuré. Pour un dépôt
-privé, ajouter `HF_TOKEN` dans les **Secrets** du Space ; ne pas l'écrire dans
-le code ou le README. Un Space CPU reste possible avec
-`INVOICE_DEVICE=cpu`, suffisamment de RAM et une latence plus élevée.
-Sur **ZeroGPU**, sélectionner ce matériel dans les paramètres du Space et
-conserver `INVOICE_DEVICE=cuda`. Le paquet `spaces` est inclus dans les
-dépendances et `predict_invoice` porte le décorateur `@spaces.GPU` :
-le chargement du modèle et la génération ont lieu dans la réservation GPU,
-tandis que l'OCR et le téléchargement des adaptateurs restent hors de cette
-réservation. La validation Pydantic et l'orchestration de l'auto-correction
-restent dans le processus Gradio : les erreurs de validation ne traversent
-pas la frontière du worker ZeroGPU. Chaque passe réserve le GPU uniquement
-pour sa génération. Le décorateur est sans
-effet hors de ZeroGPU, ce qui préserve le lancement local et les GPU dédiés.
-Le lien ci-dessus pointe vers le Space cible
-`nicolbl95/LLM-extraction-finetune`.
-
-Limites de la démo : 20 Mo, 10 pages PDF, 25 mégapixels par image/page rendue,
-une extraction à la fois et une file d'attente de 8 requêtes. L'aperçu PDF
-montre la première page ; l'extraction lit toutes les pages, avec OCR pour
-les pages sans texte. Un document dépassant le contexte du modèle est refusé,
-sans troncature silencieuse. Utiliser des factures fictives ou anonymisées ;
-les fichiers transitent par le serveur Gradio. La validation Pydantic garantit
-la structure, pas l'exactitude métier. Les performances publiées ne sont pas
-un benchmark de cette interface ni de son OCR.
 
 ## 🛠️ Stack Technique & Méthodologies
 
