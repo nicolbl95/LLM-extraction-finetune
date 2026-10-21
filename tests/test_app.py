@@ -409,8 +409,20 @@ class AppTests(unittest.TestCase):
         with patch.dict(sys.modules, {"spaces": types.SimpleNamespace(GPU=gpu)}), \
                 patch("evaluate_finetuned.LoRAInference") as backend:
             namespace = runpy.run_path(str(main.ROOT / "app/main.py"))
-        gpu.assert_called_once_with(namespace["extract_invoice"])
+        gpu.assert_called_once_with(namespace["predict_invoice"])
         backend.assert_not_called()
+
+    def test_gpu_callback_returns_raw_predictions_without_pydantic_validation(self):
+        prediction = {"raw": '{"supplier_name":"Incomplete invoice"}', "finish_reason": "stop"}
+        model = MagicMock()
+        model.predict.return_value = prediction
+        row = {"id": "test", "input": "invoice"}
+        messages = [{"role": "user", "content": "invoice"}]
+        with patch.object(main, "get_extractor", return_value=model), \
+                patch.object(main, "validate_invoice_json") as validate:
+            self.assertEqual(main.predict_invoice(row, messages), prediction)
+        model.predict.assert_called_once_with(row, messages=messages)
+        validate.assert_not_called()
 
 
 if __name__ == "__main__":

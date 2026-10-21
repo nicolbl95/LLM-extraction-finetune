@@ -218,6 +218,10 @@ def validate_invoice_json(raw: str) -> dict:
 
 
 @spaces.GPU
+def predict_invoice(row: dict, messages: list[dict]) -> dict:
+    return get_extractor().predict(row, messages=messages)
+
+
 def extract_invoice(text: str) -> dict:
     messages = [
         {"role": "system", "content": LIVE_SYSTEM_PROMPT},
@@ -225,9 +229,8 @@ def extract_invoice(text: str) -> dict:
         {"role": "assistant", "content": json.dumps(FEW_SHOT_RESULT, ensure_ascii=False)},
         {"role": "user", "content": f"{INSTRUCTION}\n\n{text}"},
     ]
-    extractor = get_extractor()
     row = {"id": "live-upload", "input": text}
-    prediction = extractor.predict(row, messages=messages)
+    prediction = predict_invoice(row, messages)
     if prediction["finish_reason"] != "stop":
         raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
     try:
@@ -248,7 +251,7 @@ def extract_invoice(text: str) -> dict:
                 ),
             },
         ]
-    prediction = extractor.predict(row, messages=messages)
+    prediction = predict_invoice(row, messages)
     if prediction["finish_reason"] != "stop":
         raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
     return validate_invoice_json(prediction["raw"])
