@@ -179,10 +179,12 @@ class AppTests(unittest.TestCase):
             {"raw": json.dumps(corrected), "finish_reason": "stop"},
         ]
         text = "Facture réelle : Service | quantité 7,2 | PU 12,50 | total HT 90,00"
+        warnings = []
         with patch.object(main, "get_extractor", return_value=model), \
                 self.assertLogs(main.LOGGER, level="WARNING"):
-            result = main.extract_invoice(text)
+            result = main.extract_invoice(text, warnings=warnings)
         self.assertEqual(result, corrected)
+        self.assertEqual(warnings, [])
         self.assertEqual(model.predict.call_count, 2)
         first, second = model.predict.call_args_list
         initial_messages = first.kwargs["messages"]
@@ -228,15 +230,81 @@ class AppTests(unittest.TestCase):
                 main.extract_invoice("invoice")
         self.assertEqual(model.predict.call_count, 1)
 
-    def test_second_invalid_response_is_rejected_without_a_third_attempt(self):
-        invalid = {**self.gold, "total_ht": 999}
+    def test_second_arithmetic_inconsistency_is_displayed_without_a_third_attempt(self):
+        first = {**self.gold, "total_ht": 999}
+        last = {**self.gold, "total_ht": 888}
         model = MagicMock()
-        model.predict.return_value = {"raw": json.dumps(invalid), "finish_reason": "stop"}
+        model.predict.side_effect = [
+            {"raw": json.dumps(first), "finish_reason": "stop"},
+            {"raw": json.dumps(last), "finish_reason": "stop"},
+        ]
+        warnings = []
         with patch.object(main, "get_extractor", return_value=model), \
                 self.assertLogs(main.LOGGER, level="WARNING"):
-            with self.assertRaises(main.ValidationError):
-                main.extract_invoice("original invoice")
+            actual = main.extract_invoice("original invoice", warnings=warnings)
+        self.assertEqual(actual, last)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("888", warnings[0])
+        self.assertNotIn("999", warnings[0])
         self.assertEqual(model.predict.call_count, 2)
+
+    def test_failed_correction_preserves_first_structurally_valid_json(self):
+        first = {**self.gold, "total_ht": 999}
+        failures = [
+            RuntimeError("GPU unavailable"),
+            main.gr.Error("ZeroGPU worker unavailable"),
+            {"raw": "not JSON", "finish_reason": "stop"},
+            {"raw": '{"supplier_name":"Missing fields"}', "finish_reason": "stop"},
+            {"raw": json.dumps({**self.gold, "total_ht": float("nan")}), "finish_reason": "stop"},
+            {"raw": json.dumps(self.gold), "finish_reason": "length"},
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure):
+                model = MagicMock()
+                model.predict.side_effect = [
+                    {"raw": json.dumps(first), "finish_reason": "stop"}, failure,
+                ]
+                warnings = []
+                with patch.object(main, "get_extractor", return_value=model), \
+                        self.assertLogs(main.LOGGER, level="WARNING"):
+                    actual = main.extract_invoice("invoice", warnings=warnings)
+                self.assertEqual(actual, first)
+                self.assertEqual(model.predict.call_count, 2)
+                self.assertTrue(any("ecart absolu" in message for message in warnings))
+                self.assertTrue(any("Auto-correction impossible" in message for message in warnings))
+
+    def test_model_error_is_not_hidden_without_a_valid_fallback(self):
+        model = MagicMock()
+        model.predict.side_effect = [
+            {"raw": "not JSON", "finish_reason": "stop"},
+            RuntimeError("GPU unavailable"),
+        ]
+        with patch.object(main, "get_extractor", return_value=model), \
+                self.assertLogs(main.LOGGER, level="WARNING"):
+            with self.assertRaisesRegex(RuntimeError, "GPU unavailable"):
+                main.extract_invoice("invoice")
+        self.assertEqual(model.predict.call_count, 2)
+
+    def test_warning_mode_collects_every_line_and_global_discrepancy(self):
+        payload = {
+            **self.gold, "total_ht": 200,
+            "line_items": [
+                {**self.gold["line_items"][0], "quantity": 10},
+                {"description": "Second service", "quantity": 1, "unit_price": 20, "total_ht": 19},
+            ],
+        }
+        warnings = []
+        actual = main.validate_invoice_json(json.dumps(payload), arithmetic_warnings=warnings)
+        self.assertEqual(actual, payload)
+        self.assertEqual(len(warnings), 3)
+        self.assertIn("Ligne 1", warnings[0])
+        self.assertIn("ecart absolu = 900", warnings[0])
+        self.assertIn("Ligne 2", warnings[1])
+        self.assertIn("ecart absolu = 1", warnings[1])
+        self.assertIn("Total HT de la facture", warnings[2])
+        self.assertIn("ecart absolu = 81", warnings[2])
+        with self.assertRaises(main.ValidationError):
+            main.validate_invoice_json(json.dumps(payload))
 
     def test_rejects_invalid_schema_json_nonfinite_and_truncated_responses(self):
         model = MagicMock()
@@ -255,7 +323,7 @@ class AppTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         main.extract_invoice("invoice text")
 
-    def test_arithmetic_inconsistencies_warn_and_do_not_display_invalid_json(self):
+    def test_arithmetic_inconsistencies_display_json_with_manual_review_warning(self):
         invalid_payloads = [
             {**self.gold, "line_items": [{**self.gold["line_items"][0], "quantity": 10}]},
             {**self.gold, "total_ht": 101},
@@ -269,10 +337,30 @@ class AppTests(unittest.TestCase):
                         patch.object(main, "get_extractor", return_value=model), \
                         self.assertLogs(main.LOGGER, level="WARNING"):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
-                self.assertIsNone(updates[-1][0])
+                self.assertEqual(updates[-1][0], payload)
                 self.assertIn("Avertissement", updates[-1][1])
                 self.assertIn("Incoherence", updates[-1][1])
-                self.assertIn("Aucun JSON invalide", updates[-1][1])
+                self.assertIn("vérification manuelle", updates[-1][1])
+                self.assertIn("ecart absolu", updates[-1][1])
+                self.assertNotIn("cohérence des montants HT contrôlée", updates[-1][1])
+                self.assertEqual(model.predict.call_count, 2)
+
+    def test_structural_errors_and_nonfinite_values_still_block_json_display(self):
+        invalid = [
+            {key: value for key, value in self.gold.items() if key != "invoice_date"},
+            {**self.gold, "total_ht": float("inf")},
+            {**self.gold, "line_items": [{**self.gold["line_items"][0], "quantity": "invalid"}]},
+        ]
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                model = MagicMock()
+                model.predict.return_value = {"raw": json.dumps(payload), "finish_reason": "stop"}
+                with patch.object(main, "document_text", return_value="OCR text"), \
+                        patch.object(main, "resolve_adapter_path"), \
+                        patch.object(main, "get_extractor", return_value=model), \
+                        self.assertLogs(main.LOGGER, level="WARNING"):
+                    updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
+                self.assertIsNone(updates[-1][0])
                 self.assertEqual(model.predict.call_count, 2)
 
     def test_errors_clear_previous_json_and_success_is_validated(self):

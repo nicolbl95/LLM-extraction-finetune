@@ -254,19 +254,32 @@ croise les champs numériques avant l'affichage du résultat :
 | --- | --- |
 | Cohérence d'une ligne | Comparaison de `quantity × unit_price` avec le `total_ht` de la ligne |
 | Cohérence de la facture | Comparaison de la somme des `line_items[].total_ht` avec le `total_ht` global |
-| Tolérance monétaire | Écart absolu maximal de **0,02 unité monétaire**, par ligne et sur le total HT global ; tout écart strictement supérieur est rejeté |
+| Tolérance monétaire | Détection de tout écart absolu strictement supérieur à **0,02 unité monétaire**, par ligne et sur le total HT global ; avertissement non bloquant dans l'application après l'unique tentative de correction |
 | Valeurs non finies | Rejet de `NaN`, `+Infinity` et `-Infinity` dans les quantités, prix et totaux |
 
 Les calculs utilisent `Decimal` à partir des représentations décimales des
 valeurs. Le produit quantité × prix unitaire est arrondi au centime avec
 `ROUND_HALF_UP`, comme dans le générateur du dataset. Le prix unitaire cible
-est le prix **net après remise**. Une facture sans articles est rejetée si
-son total HT diffère de zéro de plus de 0,02.
+est le prix **net après remise**. Une facture sans articles signale une
+incohérence si son total HT diffère de zéro de plus de 0,02.
+
+**Dans l'application, les écarts arithmétiques ne bloquent plus l'affichage.**
+Après l'unique tentative d'auto-correction, le dernier JSON structurellement
+valide est rendu avec un bandeau d'avertissement. Celui-ci indique chaque
+ligne concernée, la valeur calculée, la valeur extraite et l'écart absolu,
+ainsi que toute incohérence du total HT global. Une vérification manuelle
+est demandée ; les valeurs ne sont pas recalculées de force.
+
+Le schéma reste **strict par défaut** pour les données, l'évaluation et les
+tests Golden. L'application utilise explicitement une validation structurelle
+non bloquante sur l'arithmétique pour conserver les résultats exploitables ;
+les contrôles numériques sont partagés entre les deux modes.
 
 L'application exige également un objet JSON strict : le texte explicatif,
-les balises Markdown et les clés dupliquées ne sont pas acceptés. Aucun JSON
-ayant échoué aux contrôles n'est affiché comme un résultat validé, et aucune
-quantité ni somme n'est recalculée de force pour masquer une incohérence.
+les balises Markdown et les clés dupliquées ne sont pas acceptés. Les champs
+requis, leurs types et les valeurs finies restent obligatoires : un JSON
+mal formé ou structurellement invalide n'est pas affiché. Un résultat avec
+avertissement n'est pas présenté comme arithmétiquement validé.
 
 **Limites :** le TTC doit être fini, mais son calcul n'est pas vérifié, car
 les taux de taxe ne font pas partie du schéma. Le décodage sans échantillonnage
@@ -287,13 +300,19 @@ La démo limite la correction à **un unique essai**, soit au maximum
 3. Demander une correction ciblée respectant les valeurs littérales de la
    facture, notamment les décimales, sans modifier artificiellement les montants
    pour satisfaire la validation.
-4. Revalider la seconde réponse avec les mêmes contrôles. Si elle échoue,
-   afficher une erreur ou un avertissement détaillé dans Gradio et laisser
-   le résultat JSON vide. **Aucune troisième tentative n'est lancée.**
+4. Revalider la seconde réponse. Si sa structure est valide mais ses calculs
+   restent incohérents, afficher son JSON avec les avertissements détaillés.
+   Si elle est inutilisable ou si cette seconde inférence échoue, conserver
+   le premier JSON structurellement valide avec ses avertissements et le motif
+   d'échec de la correction. En l'absence de tout JSON structurellement valide,
+   afficher l'erreur et laisser le résultat vide.
+   **Aucune troisième tentative n'est lancée.**
 
 Les erreurs de chargement, réponses tronquées et dépassements du contexte
-ne déclenchent pas cette correction. Le contexte reste limité sans troncature
-silencieuse, y compris pendant la seconde passe.
+ne déclenchent pas cette correction. Si ces erreurs surviennent pendant la
+seconde passe, elles n'effacent pas le premier résultat structurellement valide.
+Le contexte reste limité sans troncature silencieuse, y compris pendant la
+seconde passe.
 
 Sur ZeroGPU, seules les opérations de chargement et de génération du modèle
 sont exécutées dans `predict_invoice`, décorée avec `@spaces.GPU`. La

@@ -210,10 +210,15 @@ def get_extractor() -> LoRAInference:
     )
 
 
-def validate_invoice_json(raw: str) -> dict:
-    invoice = Invoice.model_validate(parse_object(raw))
+def validate_invoice_json(raw: str, *, arithmetic_warnings: list[str] | None = None) -> dict:
+    invoice = Invoice.model_validate(
+        parse_object(raw),
+        context={"validate_arithmetic": arithmetic_warnings is None},
+    )
     payload = invoice.model_dump(mode="json")
     json.dumps(payload, allow_nan=False)
+    if arithmetic_warnings is not None:
+        arithmetic_warnings.extend(invoice.arithmetic_warnings())
     return payload
 
 
@@ -222,7 +227,7 @@ def predict_invoice(row: dict, messages: list[dict]) -> dict:
     return get_extractor().predict(row, messages=messages)
 
 
-def extract_invoice(text: str) -> dict:
+def extract_invoice(text: str, *, warnings: list[str] | None = None) -> dict:
     messages = [
         {"role": "system", "content": LIVE_SYSTEM_PROMPT},
         {"role": "user", "content": f"{INSTRUCTION}\n\n{FEW_SHOT_INVOICE}"},
@@ -233,10 +238,18 @@ def extract_invoice(text: str) -> dict:
     prediction = predict_invoice(row, messages)
     if prediction["finish_reason"] != "stop":
         raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
+    previous_payload = None
+    previous_warnings = []
     try:
         return validate_invoice_json(prediction["raw"])
     except (ValidationError, ValueError) as exc:
         LOGGER.warning("Invoice response failed validation; retrying once (%s)", type(exc).__name__)
+        try:
+            previous_payload = validate_invoice_json(
+                prediction["raw"], arithmetic_warnings=previous_warnings,
+            )
+        except (ValidationError, ValueError) as structure_error:
+            LOGGER.debug("No structurally valid fallback (%s)", type(structure_error).__name__)
         messages = [
             *messages,
             {"role": "assistant", "content": prediction["raw"]},
@@ -251,10 +264,25 @@ def extract_invoice(text: str) -> dict:
                 ),
             },
         ]
-    prediction = predict_invoice(row, messages)
-    if prediction["finish_reason"] != "stop":
-        raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
-    return validate_invoice_json(prediction["raw"])
+    current_warnings = []
+    try:
+        prediction = predict_invoice(row, messages)
+        if prediction["finish_reason"] != "stop":
+            raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
+        payload = validate_invoice_json(prediction["raw"], arithmetic_warnings=current_warnings)
+    except (OSError, ValueError, RuntimeError, ImportError, gr.Error) as exc:
+        if previous_payload is None:
+            raise
+        payload = previous_payload
+        current_warnings = [
+            *previous_warnings,
+            f"Auto-correction impossible : {exc}. Le premier JSON structurellement valide est conservé.",
+        ]
+    if current_warnings:
+        LOGGER.warning("Invoice displayed with warnings: %s", "; ".join(current_warnings))
+        if warnings is not None:
+            warnings.extend(current_warnings)
+    return payload
 
 
 def run_extraction(filename: str | None):
@@ -264,7 +292,8 @@ def run_extraction(filename: str | None):
         text = document_text(str(path))
         yield None, "Préparation des poids du modèle… Téléchargement au premier lancement si nécessaire."
         resolve_adapter_path()
-        payload = extract_invoice(text)
+        warnings = []
+        payload = extract_invoice(text, warnings=warnings)
     except ValidationError as exc:
         details = "; ".join(
             f"{'.'.join(map(str, error['loc'])) or 'facture'} : {error['msg']}"
@@ -272,9 +301,8 @@ def run_extraction(filename: str | None):
         )
         LOGGER.warning("Invoice validation rejected: %s", details)
         yield None, (
-            "**Avertissement — JSON rejeté : données invalides ou incohérence arithmétique.** "
-            f"{details} Vérifiez les quantités, prix et totaux sur la facture. "
-            "Aucun JSON invalide n'est affiché. Aucune correction arithmétique forcée n'est appliquée."
+            "**Avertissement — JSON rejeté : structure ou valeurs invalides.** "
+            f"{details} Les champs requis et les valeurs finies restent obligatoires."
         )
         return
     except (OSError, ValueError, RuntimeError, ImportError,
@@ -282,7 +310,15 @@ def run_extraction(filename: str | None):
         LOGGER.exception("Invoice extraction failed")
         yield None, f"Échec de l'extraction : {exc}"
         return
-    yield payload, "Extraction terminée — JSON validé par Pydantic, cohérence des montants HT contrôlée."
+    if warnings:
+        details = "\n".join(f"- {warning}" for warning in warnings)
+        yield payload, (
+            "**Avertissement — vérification manuelle nécessaire.**\n\n"
+            "Le JSON reste disponible : sa structure est valide, mais des anomalies subsistent.\n\n"
+            f"{details}\n\nAucune valeur n'a été recalculée de force."
+        )
+    else:
+        yield payload, "Extraction terminée — JSON validé par Pydantic, cohérence des montants HT contrôlée."
 
 
 def build_app() -> gr.Blocks:
@@ -311,11 +347,12 @@ def build_app() -> gr.Blocks:
                 preview = gr.Image(label="Aperçu de la facture", type="pil", interactive=False)
             with gr.Column():
                 status = gr.Markdown("Importez une facture ou choisissez un exemple.")
-                result = gr.JSON(label="Résultat de l'extraction — JSON validé")
+                result = gr.JSON(label="Résultat de l'extraction — JSON structuré")
                 gr.Markdown(
-                    "**À vérifier avant utilisation :** Pydantic contrôle la structure et la cohérence "
-                    "des montants HT (tolérance de 0,02), pas l'exactitude des données extraites. "
+                    "**À vérifier avant utilisation :** Pydantic valide la structure et les valeurs finies. "
+                    "Les écarts sur les montants HT (tolérance de 0,02) sont signalés sans bloquer le JSON. "
                     "Une seule nouvelle inférence est tentée si le JSON échoue à la validation. "
+                    "Si nécessaire, le dernier JSON structurellement valide reste affiché avec avertissement. "
                     "Cette démo utilise l'OCR puis le modèle LoRA ; "
                     "elle ne renvoie pas les réponses du dataset.\n\n"
                     "**Confidentialité :** utilisez de préférence des factures fictives ou anonymisées. "
