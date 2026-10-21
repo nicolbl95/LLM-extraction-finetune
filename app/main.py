@@ -11,12 +11,14 @@ import spaces
 import gradio as gr
 import pymupdf
 import pytesseract
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import HfHubHTTPError
 from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from evaluate_finetuned import Invoice, LoRAInference, parse_object
+from evaluate_finetuned import Invoice, LoRAInference, check_adapter, parse_object
 
 LOGGER = logging.getLogger(__name__)
 MAX_BYTES = 20 * 1024 * 1024
@@ -30,6 +32,18 @@ EXAMPLES = [
 DEFAULT_ADAPTER = (
     ROOT / "results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter"
 )
+DEFAULT_ADAPTER_REPO = "nicolbl95/llm-extraction-weights"
+ADAPTER_FILES = [
+    "adapter_config.json",
+    "adapter_model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "vocab.json",
+    "merges.txt",
+    "chat_template.jinja",
+]
 
 
 def checked_path(filename: str | None) -> Path:
@@ -115,10 +129,45 @@ def document_text(filename: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def get_extractor() -> LoRAInference:
+def resolve_adapter_path() -> Path:
     adapter = Path(os.environ.get("INVOICE_ADAPTER_PATH", str(DEFAULT_ADAPTER))).expanduser()
     if not adapter.is_absolute():
         adapter = ROOT / adapter
+    try:
+        check_adapter(adapter)
+    except FileNotFoundError:
+        repo_id = os.environ.get("INVOICE_ADAPTER_REPO", DEFAULT_ADAPTER_REPO).strip()
+        if not repo_id:
+            raise RuntimeError(
+                "Poids locaux absents ou incomplets. Configurez INVOICE_ADAPTER_REPO "
+                "avec un dépôt Hub contenant les adaptateurs LoRA et le tokenizer."
+            ) from None
+        LOGGER.info("Downloading LoRA adapter and tokenizer from %s", repo_id)
+        try:
+            adapter = Path(snapshot_download(
+                repo_id=repo_id,
+                revision=os.environ.get("INVOICE_ADAPTER_REVISION", "main"),
+                allow_patterns=ADAPTER_FILES,
+            ))
+        except HfHubHTTPError as exc:
+            raise RuntimeError(
+                f"Impossible de télécharger les poids depuis {repo_id}. "
+                "Vérifiez le dépôt, INVOICE_ADAPTER_REVISION et le secret HF_TOKEN "
+                "si le dépôt est privé."
+            ) from exc
+        try:
+            check_adapter(adapter)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"Le dépôt {repo_id} ne contient pas tous les fichiers requis : "
+                "adapter_config.json, adapter_model.safetensors et tokenizer_config.json."
+            ) from exc
+    return adapter
+
+
+@lru_cache(maxsize=1)
+def get_extractor() -> LoRAInference:
+    adapter = resolve_adapter_path()
     device = os.environ.get("INVOICE_DEVICE", "cuda")
     if device not in {"cpu", "cuda"}:
         raise ValueError("INVOICE_DEVICE doit valoir cpu ou cuda.")
@@ -147,7 +196,10 @@ def run_extraction(filename: str | None):
     yield None, "Extraction en cours… Le premier chargement du modèle peut prendre plusieurs minutes."
     try:
         path = checked_path(filename)
-        payload = extract_invoice(document_text(str(path)))
+        text = document_text(str(path))
+        yield None, "Préparation des poids du modèle… Téléchargement au premier lancement si nécessaire."
+        resolve_adapter_path()
+        payload = extract_invoice(text)
     except (OSError, ValueError, RuntimeError, ImportError,
             pytesseract.TesseractError, Image.DecompressionBombError) as exc:
         LOGGER.exception("Invoice extraction failed")

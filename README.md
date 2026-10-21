@@ -56,17 +56,28 @@ python app/main.py
 Ouvrir <http://localhost:7860>. Le modèle est chargé à la première extraction,
 pas au démarrage de l'interface. Par défaut, les adaptateurs locaux du run
 `results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter`
-sont chargés sur CUDA en 4 bits. Les poids ne sont pas suivis dans Git.
+sont chargés sur CUDA en 4 bits s'ils sont présents et complets. Sinon, les
+adaptateurs et le tokenizer sont téléchargés automatiquement depuis
+[nicolbl95/llm-extraction-weights](https://huggingface.co/nicolbl95/llm-extraction-weights)
+et conservés dans le cache Hugging Face. Les poids ne sont pas suivis dans
+le dépôt de l'application.
 
 | Variable | Valeur par défaut | Rôle |
 | --- | --- | --- |
 | `INVOICE_ADAPTER_PATH` | Chemin du run ci-dessus | Dossier des adaptateurs et du tokenizer, absolu ou relatif au dépôt |
+| `INVOICE_ADAPTER_REPO` | `nicolbl95/llm-extraction-weights` | Dépôt Hub utilisé lorsque les poids locaux sont absents ou incomplets |
+| `INVOICE_ADAPTER_REVISION` | `main` | Branche, tag ou hash de commit du dépôt des poids |
+| `HF_TOKEN` | Non défini | Secret de lecture pour un dépôt Hub privé ; inutile pour le dépôt public |
 | `INVOICE_DEVICE` | `cuda` | `cuda` (4 bits) ou `cpu` (float32, RAM et latence importantes) |
 | `PORT` | `7860` | Port du serveur Gradio |
 
+Le chemin retourné par `snapshot_download` est transmis au backend LoRA après
+vérification des fichiers. Le dépôt des poids doit contenir à sa racine
+`adapter_config.json`, `adapter_model.safetensors`, `tokenizer_config.json`
+et les fichiers du tokenizer (notamment `tokenizer.json` et le template de chat).
 Le modèle de base indiqué par les adaptateurs est téléchargé via Transformers
-si nécessaire. L'extraction échoue explicitement si les poids, l'OCR, CUDA ou
-la validation ne sont pas disponibles ; aucun résultat fictif n'est substitué.
+si nécessaire. Un téléchargement échoué ou un dépôt incomplet produit une
+erreur explicite ; aucun modèle non fine-tuné ni résultat simulé n'est substitué.
 
 ### Hébergement sur Hugging Face Spaces
 
@@ -89,15 +100,17 @@ déployé. Publier les sources, `requirements.txt`, `packages.txt` et
 split test : France `invoice-0406`, UK `invoice-0110`, US `invoice-0435`.
 Ils ne dépendent pas du dossier `data/invoices/`, ignoré par Git.
 
-Prévoir un **Space GPU** et rendre les adaptateurs/tokenizer disponibles dans
-le Space (y compris `adapter_config.json` et `adapter_model.safetensors`),
-puis configurer `INVOICE_ADAPTER_PATH`. Un Space CPU reste possible avec
+Prévoir un **Space GPU**. Aucun poids n'a besoin d'être inclus dans le dépôt
+du Space : ils sont téléchargés depuis le dépôt Hub configuré. Pour un dépôt
+privé, ajouter `HF_TOKEN` dans les **Secrets** du Space ; ne pas l'écrire dans
+le code ou le README. Un Space CPU reste possible avec
 `INVOICE_DEVICE=cpu`, suffisamment de RAM et une latence plus élevée.
 Sur **ZeroGPU**, sélectionner ce matériel dans les paramètres du Space et
 conserver `INVOICE_DEVICE=cuda`. Le paquet `spaces` est inclus dans les
 dépendances et `extract_invoice` porte le décorateur `@spaces.GPU` :
 le chargement du modèle et la génération ont lieu dans la réservation GPU,
-tandis que l'OCR reste hors de cette réservation. Le décorateur est sans
+tandis que l'OCR et le téléchargement des adaptateurs restent hors de cette
+réservation. Le décorateur est sans
 effet hors de ZeroGPU, ce qui préserve le lancement local et les GPU dédiés.
 Le lien ci-dessus pointe vers le Space cible
 `nicolbl95/LLM-extraction-finetune`.

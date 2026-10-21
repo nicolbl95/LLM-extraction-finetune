@@ -15,6 +15,8 @@ from app import main
 
 class AppTests(unittest.TestCase):
     def setUp(self):
+        main.resolve_adapter_path.cache_clear()
+        self.addCleanup(main.resolve_adapter_path.cache_clear)
         self.directory = tempfile.TemporaryDirectory(dir=main.ROOT / "app")
         self.addCleanup(self.directory.cleanup)
         self.folder = Path(self.directory.name)
@@ -182,13 +184,102 @@ class AppTests(unittest.TestCase):
         self.addCleanup(main.get_extractor.cache_clear)
         with patch.dict(os.environ, {
             "INVOICE_ADAPTER_PATH": "custom/adapter", "INVOICE_DEVICE": "cpu",
-        }), patch.object(main, "LoRAInference") as backend:
+        }), patch.object(main, "resolve_adapter_path", return_value=main.ROOT / "custom/adapter"), \
+                patch.object(main, "LoRAInference") as backend:
             main.get_extractor()
             main.get_extractor()
         backend.assert_called_once_with(
             adapter_path=main.ROOT / "custom/adapter", device="cpu",
             load_in_4bit=False, n_ctx=4096, max_tokens=2048,
         )
+
+    def make_adapter(self):
+        folder = self.folder / "downloaded-adapter"
+        folder.mkdir()
+        (folder / "adapter_config.json").write_text(json.dumps({
+            "peft_type": "LORA", "base_model_name_or_path": "test/base-model",
+        }))
+        (folder / "adapter_model.safetensors").write_bytes(b"test weights")
+        (folder / "tokenizer_config.json").write_text("{}")
+        return folder
+
+    def test_complete_local_adapter_does_not_download(self):
+        folder = self.make_adapter()
+        with patch.dict(os.environ, {"INVOICE_ADAPTER_PATH": str(folder)}), \
+                patch.object(main, "snapshot_download") as download:
+            self.assertEqual(main.resolve_adapter_path(), folder)
+        download.assert_not_called()
+
+    def test_missing_local_weights_download_to_resolved_cache_path_once(self):
+        folder = self.make_adapter()
+        with patch.dict(os.environ, {
+            "INVOICE_ADAPTER_PATH": str(self.folder / "missing"),
+            "INVOICE_ADAPTER_REPO": "test/invoice-adapter",
+            "INVOICE_ADAPTER_REVISION": "pinned-revision",
+        }), patch.object(main, "snapshot_download", return_value=str(folder)) as download:
+            self.assertEqual(main.resolve_adapter_path(), folder)
+            self.assertEqual(main.resolve_adapter_path(), folder)
+        download.assert_called_once_with(
+            repo_id="test/invoice-adapter", revision="pinned-revision",
+            allow_patterns=main.ADAPTER_FILES,
+        )
+
+    def test_incomplete_local_adapter_downloads_remote_replacement(self):
+        folder = self.make_adapter()
+        partial = self.folder / "partial"
+        partial.mkdir()
+        (partial / "adapter_config.json").write_text("{}")
+        with patch.dict(os.environ, {"INVOICE_ADAPTER_PATH": str(partial)}), \
+                patch.object(main, "snapshot_download", return_value=str(folder)) as download:
+            self.assertEqual(main.resolve_adapter_path(), folder)
+        download.assert_called_once()
+
+    def test_invalid_local_adapter_is_not_silently_replaced(self):
+        folder = self.make_adapter()
+        (folder / "adapter_config.json").write_text('{"peft_type":"OTHER"}')
+        with patch.dict(os.environ, {"INVOICE_ADAPTER_PATH": str(folder)}), \
+                patch.object(main, "snapshot_download") as download:
+            with self.assertRaisesRegex(ValueError, "LoRA"):
+                main.resolve_adapter_path()
+        download.assert_not_called()
+
+    def test_missing_repo_incomplete_repo_and_download_errors_are_explicit(self):
+        with patch.dict(os.environ, {
+            "INVOICE_ADAPTER_PATH": str(self.folder / "missing"),
+            "INVOICE_ADAPTER_REPO": "",
+        }), patch.object(main, "snapshot_download") as download:
+            with self.assertRaisesRegex(RuntimeError, "Configurez INVOICE_ADAPTER_REPO"):
+                main.resolve_adapter_path()
+        download.assert_not_called()
+        with patch.dict(os.environ, {
+            "INVOICE_ADAPTER_PATH": str(self.folder / "missing"),
+            "INVOICE_ADAPTER_REPO": "test/empty-repository",
+        }), patch.object(main, "snapshot_download", return_value=str(self.folder)):
+            with self.assertRaisesRegex(RuntimeError, "fichiers requis"):
+                main.resolve_adapter_path()
+        with patch.dict(os.environ, {
+            "INVOICE_ADAPTER_PATH": str(self.folder / "missing"),
+            "INVOICE_ADAPTER_REPO": "test/private-repository",
+        }), patch.object(
+            main, "snapshot_download",
+            side_effect=main.HfHubHTTPError("Forbidden", response=MagicMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HF_TOKEN"):
+                main.resolve_adapter_path()
+
+    def test_document_and_adapter_preparation_precede_gpu_inference(self):
+        sequence = MagicMock()
+        with patch.object(main, "document_text", sequence.document_text), \
+                patch.object(main, "resolve_adapter_path", sequence.resolve_adapter_path), \
+                patch.object(main, "extract_invoice", sequence.extract_invoice):
+            sequence.document_text.return_value = "OCR text"
+            sequence.extract_invoice.return_value = self.gold
+            updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
+        self.assertEqual(
+            [entry[0] for entry in sequence.mock_calls],
+            ["document_text", "resolve_adapter_path", "extract_invoice"],
+        )
+        self.assertEqual(updates[-1][0], self.gold)
 
     def test_gradio_interface_builds_without_loading_model(self):
         with patch.object(main, "get_extractor") as backend:
