@@ -26,9 +26,18 @@ structurée complexe ; une supériorité sur des modèles plus volumineux reste
   d'extraction ; contrôle du JSON strict et validation du schéma après
   génération pour les entités, montants HT/TTC et tableaux d'articles.
   Le pipeline n'impose pas de JSON Schema au décodage.
+- **Garde-fous & Auto-correction :** validation Pydantic stricte et contrôles
+  arithmétiques avec `Decimal`, tolérance de **0,02** et arrondi
+  `ROUND_HALF_UP`. Une seule passe corrective relit les données sources ;
+  les incohérences persistantes sont signalées, sans ajustement forcé.
 - **Pipeline de Données :** génération synthétique multilingue et multidevise,
   diversification procédurale des contenus et mises en page (data augmentation),
   partitionnement Train/Val/Test reproductible et contrôles de chevauchement.
+- **Rôle des jeux de données (Split 80/10/10) :** le script Python crée les
+  exemples ; Qwen apprend sur **Train (480)**, est suivi sur
+  **Validation (60)**, l'« examen blanc », puis évalué sur
+  **Test (60)**, l'« examen final » réservé à des exemples non utilisés
+  pour l'apprentissage ni le réglage.
 - **Évaluation & Métriques :** benchmark personnalisé, Exact Match Rate,
   JSON Validity Rate et rapports `metrics.json`, avec prédictions détaillées
   et ventilation par région, devise, format et template.
@@ -66,6 +75,26 @@ structurée complexe ; une supériorité sur des modèles plus volumineux reste
 - **Fiabilité :** contrat Pydantic v2, scoring du JSON strict, erreurs
   explicites et provenance par hashes. Les splits sont disjoints par ID et
   texte ; les templates restent partagés entre les sous-ensembles.
+
+### Méthodologie : génération et apprentissage
+
+**Le script crée les exercices ; le modèle apprend à les résoudre.**
+`data/generate_dataset.py` fabrique les factures et leurs cibles JSON par des
+règles Python explicites. `src/split_data.py` les répartit en trois jeux
+disjoints ; aucun apprentissage n'a lieu pendant cette génération.
+Lors du fine-tuning, Qwen ajuste ses adaptateurs à partir des couples
+texte/JSON : il apprend des régularités d'extraction, pas l'exécution du
+script ni une garantie de raisonnement arithmétique exact.
+
+| Fichier | Part / exemples | Rôle pédagogique et technique |
+| --- | --- | --- |
+| `data/train.jsonl` | **80 % / 480** | **Apprentissage des règles** : exemples corrigés utilisés pour calculer la perte et mettre à jour les adaptateurs. |
+| `data/val.jsonl` | **10 % / 60** | **Examen blanc** : mesure la perte sans mise à jour des poids ; aide à surveiller le surapprentissage et à guider les choix d'entraînement, sans garantir son absence. |
+| `data/test.jsonl` | **10 % / 60** | **Examen final scellé vis-à-vis du réglage** : réservé à la mesure finale, jamais utilisé pour les gradients ni pour choisir les hyperparamètres. |
+
+Les exemples de test sont inédits pour l'apprentissage, mais partagent les
+familles de templates du dataset : cette évaluation ne démontre pas à elle
+seule une généralisation à des structures entièrement nouvelles.
 
 ### Organisation du projet
 
