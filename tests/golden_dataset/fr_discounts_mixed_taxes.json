@@ -1,0 +1,27 @@
+{
+  "id": "fr_discounts_mixed_taxes",
+  "locale": "fr-FR",
+  "tags": ["decimal_quantities", "special_characters", "discounts", "multiple_taxes"],
+  "invoice_text": "FACTURE FR-GOLD-002\nFournisseur : Éditions L'œuvre & Services SAS\nDate : 22/10/2026\nDevise : EUR\nMaintenance — contrat n° 42 | Quantité : 4,2 | PU catalogue HT : 50,00 € | Remise : 10 % | PU net HT : 45,00 € | Total HT : 189,00 € | TVA : 20 %\nLivre « Cœur & réseaux » | Quantité : 2 | PU catalogue HT : 30,00 € | Remise : 10 % | PU net HT : 27,00 € | Total HT : 54,00 € | TVA : 5,5 %\nAffranchissement (exonéré) | Quantité : 1 | PU net HT : 8,50 € | Total HT : 8,50 € | TVA : 0 %\nTotal HT : 251,50 €\nTVA 20 % sur 189,00 € : 37,80 €\nTVA 5,5 % sur 54,00 € : 2,97 €\nTVA 0 % sur 8,50 € : 0,00 €\nTotal TTC : 292,27 €",
+  "response_json": "{\"supplier_name\":\"Éditions L'œuvre & Services SAS\",\"invoice_date\":\"2026-10-22\",\"total_ht\":251.5,\"total_ttc\":292.27,\"line_items\":[{\"description\":\"Maintenance — contrat n° 42\",\"quantity\":4.2,\"unit_price\":45.0,\"total_ht\":189.0},{\"description\":\"Livre « Cœur & réseaux »\",\"quantity\":2.0,\"unit_price\":27.0,\"total_ht\":54.0},{\"description\":\"Affranchissement (exonéré)\",\"quantity\":1.0,\"unit_price\":8.5,\"total_ht\":8.5}]}",
+  "expected": {
+    "supplier_name": "Éditions L'œuvre & Services SAS",
+    "invoice_date": "2026-10-22",
+    "total_ht": 251.5,
+    "total_ttc": 292.27,
+    "line_items": [
+      {"description": "Maintenance — contrat n° 42", "quantity": 4.2, "unit_price": 45.0, "total_ht": 189.0},
+      {"description": "Livre « Cœur & réseaux »", "quantity": 2.0, "unit_price": 27.0, "total_ht": 54.0},
+      {"description": "Affranchissement (exonéré)", "quantity": 1.0, "unit_price": 8.5, "total_ht": 8.5}
+    ]
+  },
+  "taxes": [
+    {"base": "189.00", "rate": "20", "amount": "37.80"},
+    {"base": "54.00", "rate": "5.5", "amount": "2.97"},
+    {"base": "8.50", "rate": "0", "amount": "0.00"}
+  ],
+  "discounts": [
+    {"line_index": 0, "list_unit_price": "50.00", "percent": "10"},
+    {"line_index": 1, "list_unit_price": "30.00", "percent": "10"}
+  ]
+}

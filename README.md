@@ -317,6 +317,34 @@ python src/evaluate_finetuned.py --check-data-only
 python -m unittest discover -s tests -v
 ```
 
+### Golden Dataset de non-régression
+
+Les quatre cas synthétiques de [tests/golden_dataset/](tests/golden_dataset/)
+couvrent les quantités `7,2` et `4,2`, les accents et caractères spéciaux,
+les prix nets après remise, les taxes multiples et exonérations, ainsi que
+les formats FR/EUR, UK/GBP et US/USD avec séparateurs de milliers.
+Chaque fixture versionne le texte de facture, une réponse JSON de référence
+figée et le résultat attendu, plus les détails de taxes et remises vérifiables.
+
+[tests/test_golden_dataset.py](tests/test_golden_dataset.py) est découvert
+automatiquement par `unittest`. Il exécute le pipeline réel de prompt,
+validation Pydantic et auto-correction avec un backend d'inférence simulé,
+puis compare tous les champs aux attentes par égalité exacte, sans tolérance
+sur les nombres, les textes ou l'ordre des articles. Les cas négatifs couvrent
+les quantités décalées, une différence d'un centime et les erreurs cohérentes
+mathématiquement qui échappent au seul schéma Pydantic.
+
+```bash
+python -m unittest discover -s tests -p test_golden_dataset.py -v
+```
+
+Ces tests restent hors ligne, sans OCR, téléchargement de poids ni GPU.
+Les réponses figées ne sont pas des mesures de qualité du modèle : cette
+brique sécurise le pipeline logiciel et ne remplace pas une évaluation des
+vraies prédictions. Pour ajouter un cas, conserver séparément le texte source,
+la réponse brute et le JSON attendu revu ; ne pas régénérer les attentes depuis
+la sortie courante du modèle.
+
 Pour **régénérer** les données et les images :
 
 ```bash
