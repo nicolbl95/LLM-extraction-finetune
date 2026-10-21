@@ -27,6 +27,7 @@ LOGGER = logging.getLogger(__name__)
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 10
 MAX_PIXELS = 25_000_000
+PROCESSING_STATUS = "Analyse des données, détection des erreurs"
 EXAMPLES = [
     ("France · EUR", ROOT / "app/examples/france.png"),
     ("Royaume-Uni · GBP", ROOT / "app/examples/uk.png"),
@@ -52,6 +53,12 @@ LIVE_SYSTEM_PROMPT = (
     "Lis et transcris littéralement chaque nombre de la facture, sans inventer, "
     "fusionner ni déplacer des chiffres. Préserve exactement les quantités décimales : "
     "7,2 dans la facture devient 7.2 dans le JSON, jamais 142 ni 72. "
+    "La virgule française entre les chiffres est un séparateur décimal : conserve "
+    "la partie entière et tous les chiffres après la virgule, sans concaténation. "
+    "Ainsi 4,2 devient 4.2, jamais 42 ni 4.02. "
+    "Associe chaque quantité à son propre prix unitaire net après remise sur la même ligne, "
+    "sans mélanger les colonnes ou les articles. Ne déduis jamais une quantité ou un prix "
+    "par division des totaux : utilise exclusivement les nombres du texte de la facture réelle. "
     "Utilise le point comme séparateur décimal JSON. "
     "Exemple numérique : quantité 7,2 × prix unitaire 12,50 = montant HT 90,00 ; "
     "le JSON doit donc contenir quantity=7.2, unit_price=12.5 et total_ht=90.0. "
@@ -250,6 +257,21 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None) -> dict:
             )
         except (ValidationError, ValueError) as structure_error:
             LOGGER.debug("No structurally valid fallback (%s)", type(structure_error).__name__)
+        arithmetic_focus = ""
+        if previous_warnings:
+            arithmetic_focus = (
+                "Priorité de correction arithmétique : relis d'abord les champs quantity et "
+                "unit_price des lignes concernées dans le texte de la facture réelle. "
+                "Corrige en priorité les quantités et prix unitaires mal transcrits, uniquement "
+                "si les valeurs sources le confirment. Respecte exactement la virgule décimale : "
+                "7,2 devient 7.2 (jamais 142 ou 72) et 4,2 devient 4.2 (jamais 42). "
+                "Ne déduis pas ces champs par division des totaux. Vérifie ensuite les montants "
+                "de ligne et le total HT global en les relisant dans la facture ; ne les recalcule "
+                "pas pour masquer une erreur de quantité ou de prix.\n"
+                "Anomalies arithmétiques à examiner :\n"
+                + "\n".join(previous_warnings)
+                + "\n\n"
+            )
         messages = [
             *messages,
             {"role": "assistant", "content": prediction["raw"]},
@@ -257,6 +279,7 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None) -> dict:
                 "role": "user",
                 "content": (
                     f"Le JSON précédent est invalide pour la raison suivante :\n{exc}\n\n"
+                    f"{arithmetic_focus}"
                     "Corrige-le en respectant strictement les valeurs de la facture réelle "
                     "ci-dessus, en particulier les quantités décimales. Ne modifie pas les "
                     "montants pour simplement faire passer la validation et n'utilise pas "
@@ -286,11 +309,11 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None) -> dict:
 
 
 def run_extraction(filename: str | None):
-    yield None, "Extraction en cours… Le premier chargement du modèle peut prendre plusieurs minutes."
+    yield None, PROCESSING_STATUS
     try:
         path = checked_path(filename)
         text = document_text(str(path))
-        yield None, "Analyse des données et détection des erreurs.."
+        yield None, PROCESSING_STATUS
         resolve_adapter_path()
         warnings = []
         payload = extract_invoice(text, warnings=warnings)

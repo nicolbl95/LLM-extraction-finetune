@@ -150,6 +150,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual([item["role"] for item in messages], ["system", "user", "assistant", "user"])
         self.assertIn("7,2", messages[0]["content"])
         self.assertIn("jamais 142", messages[0]["content"])
+        self.assertIn("4,2 devient 4.2", messages[0]["content"])
+        self.assertIn("tous les chiffres après la virgule", messages[0]["content"])
+        self.assertIn("Ne déduis jamais une quantité ou un prix", messages[0]["content"])
         self.assertIn("7,2", messages[1]["content"])
         example = main.Invoice.model_validate_json(messages[2]["content"])
         self.assertEqual(example.line_items[0].quantity, 7.2)
@@ -195,7 +198,41 @@ class AppTests(unittest.TestCase):
         self.assertEqual(corrected_messages[-2], {"role": "assistant", "content": raw})
         self.assertIn(str(validation.exception), corrected_messages[-1]["content"])
         self.assertIn("valeurs de la facture réelle", corrected_messages[-1]["content"])
+        self.assertIn("Priorité de correction arithmétique", corrected_messages[-1]["content"])
+        self.assertIn("relis d'abord les champs quantity et unit_price", corrected_messages[-1]["content"])
+        self.assertIn("7,2 devient 7.2 (jamais 142 ou 72)", corrected_messages[-1]["content"])
+        self.assertIn("Anomalies arithmétiques à examiner", corrected_messages[-1]["content"])
         self.assertEqual(first.args, second.args)
+
+    def test_arithmetic_retry_prioritizes_unit_price_for_a_french_decimal_quantity(self):
+        corrected = {
+            **self.gold, "total_ht": 84.0, "total_ttc": 100.8,
+            "line_items": [
+                {"description": "Service", "quantity": 4.2, "unit_price": 20.0, "total_ht": 84.0}
+            ],
+        }
+        invalid = {
+            **corrected, "line_items": [{**corrected["line_items"][0], "unit_price": 200.0}],
+        }
+        model = MagicMock()
+        model.predict.side_effect = [
+            {"raw": json.dumps(invalid), "finish_reason": "stop"},
+            {"raw": json.dumps(corrected), "finish_reason": "stop"},
+        ]
+        text = "Service | quantité 4,2 | PU net HT 20,00 | HT 84,00 | TTC 100,80"
+        warnings = []
+        with patch.object(main, "get_extractor", return_value=model), \
+                self.assertLogs(main.LOGGER, level="WARNING"):
+            self.assertEqual(main.extract_invoice(text, warnings=warnings), corrected)
+        self.assertEqual(model.predict.call_count, 2)
+        self.assertEqual(warnings, [])
+        messages = model.predict.call_args.kwargs["messages"]
+        self.assertIn(text, messages[-3]["content"])
+        self.assertIn("quantity et unit_price", messages[-1]["content"])
+        self.assertIn("4,2 devient 4.2 (jamais 42)", messages[-1]["content"])
+        self.assertIn("Ne déduis pas ces champs par division", messages[-1]["content"])
+        self.assertIn("Ligne 1", messages[-1]["content"])
+        self.assertIn("ecart absolu = 756", messages[-1]["content"])
 
     def test_self_correction_handles_missing_fields_and_malformed_json(self):
         missing_date = {key: value for key, value in self.gold.items() if key != "invoice_date"}
@@ -215,6 +252,7 @@ class AppTests(unittest.TestCase):
                 messages = model.predict.call_args.kwargs["messages"]
                 self.assertEqual(messages[-2]["content"], raw)
                 self.assertIn(str(validation.exception), messages[-1]["content"])
+                self.assertNotIn("Priorité de correction arithmétique", messages[-1]["content"])
 
     def test_no_retry_for_model_failures_or_truncated_responses(self):
         model = MagicMock()
@@ -473,8 +511,9 @@ class AppTests(unittest.TestCase):
             sequence.document_text.return_value = "OCR text"
             sequence.extract_invoice.return_value = self.gold
             updates = main.run_extraction(str(main.EXAMPLES[0][1]))
-            self.assertIsNone(next(updates)[0])
-            self.assertEqual(next(updates), (None, "Analyse des données et détection des erreurs.."))
+            self.assertEqual(next(updates), (None, "Analyse des données, détection des erreurs"))
+            sequence.document_text.assert_not_called()
+            self.assertEqual(next(updates), (None, "Analyse des données, détection des erreurs"))
             sequence.resolve_adapter_path.assert_not_called()
             sequence.extract_invoice.assert_not_called()
             last_update = next(updates)
