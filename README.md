@@ -21,6 +21,25 @@ structurée complexe ; une supériorité sur des modèles plus volumineux reste
 > nécessite encore un OCR ou un modèle vision-langage ; aucune API d'upload
 > n'est implémentée.
 
+## 🛠️ Stack Technique & Méthodologies
+
+- **LLM & Fine-Tuning :** Qwen2.5-3B-Instruct, Unsloth pour l'optimisation
+  mémoire/vitesse, adaptation LoRA avec PEFT et quantification 4 bits
+  du modèle de base (QLoRA).
+- **Structuration & Validation :** Pydantic v2 pour définir le contrat
+  d'extraction ; contrôle du JSON strict et validation du schéma après
+  génération pour les entités, montants HT/TTC et tableaux d'articles.
+  Le pipeline n'impose pas de JSON Schema au décodage.
+- **Pipeline de Données :** génération synthétique multilingue et multidevise,
+  diversification procédurale des contenus et mises en page (data augmentation),
+  partitionnement Train/Val/Test reproductible et contrôles de chevauchement.
+- **Évaluation & Métriques :** benchmark personnalisé, Exact Match Rate,
+  JSON Validity Rate et rapports `metrics.json`, avec prédictions détaillées
+  et ventilation par région, devise, format et template.
+- **Environnement & Tooling :** PyTorch, Hugging Face Transformers et Datasets,
+  VS Code / GitHub Codespaces pour le développement et Google Colab pour
+  l'entraînement GPU.
+
 ## 🏗️ Architecture
 
 ```text
