@@ -36,6 +36,10 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "quantity \\* unit_price"):
             Invoice.model_validate(self.invoice(line_items=[self.line(quantity=25)]))
 
+    def test_hallucinated_quantity_error_preserves_original_operands(self):
+        with self.assertRaisesRegex(ValidationError, r"142\.0 \* 95\.07"):
+            LineItem.model_validate(self.line(quantity=142, unit_price=95.07, total_ht=684.50))
+
     def test_line_tolerance_accepts_exactly_two_cents_without_correction(self):
         for total in (12.48, 12.5, 12.52):
             with self.subTest(total=total):

@@ -27,8 +27,23 @@ TEST_PATH = ROOT / "data" / "test.jsonl"
 LOCALE_CURRENCIES = {"fr-FR": "EUR", "en-GB": "GBP", "en-US": "USD"}
 BASE_MODEL = "unsloth/Qwen2.5-3B-Instruct"
 
-# Doit rester identique au prompt d'entraînement du notebook fine_tune_unsloth.ipynb.
-SYSTEM_PROMPT = "Tu es un extracteur de données. Réponds uniquement par un objet JSON valide."
+# Conserve l'instruction d'entraînement et ajoute les garde-fous d'inférence.
+SYSTEM_PROMPT = (
+    "Tu es un extracteur de données. Réponds uniquement par un objet JSON valide.\n"
+    "Ne jamais confondre les en-têtes de colonnes ou les libellés de sous-totaux "
+    "(ex: 'Sous-total') avec la description d'un article. "
+    "Copier littéralement le texte exact des descriptions sans omettre de lettres. "
+    "Préserve les quantités décimales et associe chaque quantité à son prix unitaire "
+    "sur la même ligne, sans mélanger les colonnes. "
+    "Exemple fictif de lecture :\n"
+    "Description | Quantité | Prix unitaire HT | Montant HT\n"
+    "Maintenance préventive | 7,2 | 95,07 | 684,50\n"
+    "Sous-total | 684,50\n"
+    'line_items attendu : [{"description": "Maintenance préventive", "quantity": 7.2, '
+    '"unit_price": 95.07, "total_ht": 684.50}]. '
+    "Ni l'en-tête ni 'Sous-total' ne sont des articles. "
+    "Ne recopie aucune valeur de cet exemple fictif dans la facture réelle."
+)
 INSTRUCTION = (
     "Extrais les champs de la facture suivante au format JSON : supplier_name, "
     "invoice_date (AAAA-MM-JJ), total_ht, total_ttc, "
@@ -263,6 +278,7 @@ def correction_messages(messages: list[dict], raw: str, error: Exception,
     arithmetic_focus = ""
     if warnings:
         arithmetic_focus = (
+            "Erreur arithmétique détectée.\n"
             "Priorité de correction arithmétique : relis d'abord les champs quantity et "
             "unit_price des lignes concernées dans le texte de la facture réelle. "
             "Corrige en priorité les quantités et prix unitaires mal transcrits, uniquement "
@@ -271,6 +287,10 @@ def correction_messages(messages: list[dict], raw: str, error: Exception,
             "Ne déduis pas ces champs par division des totaux. Vérifie ensuite les montants "
             "de ligne et le total HT global en les relisant dans la facture ; ne les recalcule "
             "pas pour masquer une erreur de quantité ou de prix.\n"
+            "Corrige la quantité si elle est mal transcrite et ré-extrais la ligne exacte, "
+            "avec sa description complète. Le montant HT d'une ligne se compare au produit "
+            "quantity * unit_price ; seul le cumul des lignes se compare au sous-total "
+            "HT de la facture.\n"
             "Anomalies arithmétiques à examiner :\n"
             + "\n".join(warnings)
             + "\n\n"

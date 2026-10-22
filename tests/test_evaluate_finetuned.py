@@ -21,13 +21,18 @@ class EvaluationTests(unittest.TestCase):
         cls.rows = evaluation.load_test_rows(ROOT / "data" / "test.jsonl")
         cls.gold = cls.rows[0]["output"]
 
-    def test_prompt_matches_training_without_gold_or_metadata(self):
+    def test_prompt_extends_training_without_gold_or_metadata(self):
         namespace = {}
         notebook = json.loads((ROOT / "notebooks" / "fine_tune_unsloth.ipynb").read_text())
         config = next(cell for cell in notebook["cells"] if cell["id"] == "f3275e63")
         with contextlib.redirect_stdout(io.StringIO()):
             exec("".join(config["source"]), namespace)
-        self.assertEqual(evaluation.SYSTEM_PROMPT, namespace["SYSTEM_PROMPT"])
+        self.assertTrue(evaluation.SYSTEM_PROMPT.startswith(namespace["SYSTEM_PROMPT"] + "\n"))
+        self.assertIn("Ne jamais confondre les en-têtes de colonnes", evaluation.SYSTEM_PROMPT)
+        self.assertIn("Copier littéralement le texte exact des descriptions", evaluation.SYSTEM_PROMPT)
+        self.assertIn("Sous-total", evaluation.SYSTEM_PROMPT)
+        self.assertIn('"description": "Maintenance préventive"', evaluation.SYSTEM_PROMPT)
+        self.assertIn("fictif", evaluation.SYSTEM_PROMPT)
         self.assertEqual(evaluation.INSTRUCTION, namespace["INSTRUCTION"])
         messages = evaluation.build_messages(self.rows[0])
         self.assertEqual(len(messages), 2)
@@ -268,6 +273,54 @@ class EvaluationTests(unittest.TestCase):
             "Priorité de correction arithmétique",
             backend.predict.call_args.kwargs["messages"][-1]["content"],
         )
+
+    def test_hallucinated_quantity_retries_with_operands_line_and_invoice_totals(self):
+        corrected = {
+            "supplier_name": "Test supplier", "invoice_date": "2026-10-21",
+            "total_ht": 5716.77, "total_ttc": 6860.12,
+            "line_items": [
+                {"description": "Maintenance préventive", "quantity": 7.2,
+                 "unit_price": 95.07, "total_ht": 684.50},
+                {"description": "Service", "quantity": 1,
+                 "unit_price": 5032.27, "total_ht": 5032.27},
+            ],
+        }
+        invalid = copy.deepcopy(corrected)
+        invalid["line_items"][0]["quantity"] = 142
+        with self.assertRaises(evaluation.ValidationError) as validation:
+            evaluation.Invoice.model_validate(invalid)
+        backend = MagicMock()
+        backend.predict.side_effect = [
+            self.prediction(json.dumps(invalid)), self.prediction(json.dumps(corrected)),
+        ]
+        with self.assertLogs(level="WARNING"):
+            result = evaluation.predict_with_correction(
+                backend, {"id": "test", "input": "Maintenance préventive | 7,2 | 95,07 | 684,50"},
+            )
+        self.assertEqual(backend.predict.call_count, 2)
+        prompt = backend.predict.call_args.kwargs["messages"][-1]["content"]
+        self.assertIn(str(validation.exception), prompt)
+        self.assertIn("Erreur arithmétique détectée", prompt)
+        self.assertIn("142.0 * 95.07", prompt)
+        self.assertIn("684.5", prompt)
+        self.assertIn("5716.77", prompt)
+        self.assertIn("ré-extrais la ligne exacte", prompt)
+        self.assertTrue(evaluation.score(result["raw"], corrected)["exact"])
+        self.assertEqual(result["arithmetic_warnings"], [])
+
+    def test_invoice_sum_mismatch_automatically_triggers_correction(self):
+        invalid = {**self.gold, "total_ht": self.gold["total_ht"] - 10}
+        backend = MagicMock()
+        backend.predict.side_effect = [
+            self.prediction(json.dumps(invalid)), self.prediction(json.dumps(self.gold)),
+        ]
+        with self.assertLogs(level="WARNING"):
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+        self.assertEqual(backend.predict.call_count, 2)
+        prompt = backend.predict.call_args.kwargs["messages"][-1]["content"]
+        self.assertIn("somme des total_ht", prompt)
+        self.assertIn("total_ht global", prompt)
+        self.assertTrue(evaluation.score(result["raw"], self.gold)["exact"])
 
     def test_failed_correction_keeps_structural_fallback_with_explicit_error(self):
         invalid = {**self.gold, "total_ht": self.gold["total_ht"] + 1}

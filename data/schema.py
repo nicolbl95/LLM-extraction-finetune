@@ -24,7 +24,8 @@ class LineItem(BaseModel):
         actual = Decimal(str(self.total_ht))
         if abs(expected - actual) > MONEY_TOLERANCE:
             raise ValueError(
-                f"Incoherence de ligne : quantity * unit_price = {expected}, "
+                f"Incoherence de ligne : quantity * unit_price = "
+                f"{self.quantity} * {self.unit_price} = {expected}, "
                 f"mais total_ht = {actual} ; ecart absolu = {abs(expected - actual)} "
                 f"(tolerance : {MONEY_TOLERANCE})."
             )
@@ -67,7 +68,10 @@ class Invoice(BaseModel):
             try:
                 item.check_arithmetic()
             except ValueError as exc:
-                warnings.append(f"Ligne {index} : {exc}")
+                warnings.append(
+                    f"Ligne {index} : {exc} "
+                    f"Sous-total HT de la facture : {self.total_ht}."
+                )
         try:
             self.check_arithmetic()
         except ValueError as exc:

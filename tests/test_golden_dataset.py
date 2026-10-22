@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app import main
+from evaluate_finetuned import parse_object
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden_dataset"
 CENT = Decimal("0.01")
@@ -17,7 +18,7 @@ class GoldenDatasetTests(unittest.TestCase):
         paths = sorted(GOLDEN_DIR.glob("*.json"))
         if not paths:
             raise AssertionError("Golden dataset fixtures are missing")
-        cls.cases = [main.parse_object(path.read_text(encoding="utf-8")) for path in paths]
+        cls.cases = [parse_object(path.read_text(encoding="utf-8")) for path in paths]
 
     def test_fixture_coverage_and_unique_ids(self):
         self.assertGreaterEqual(len(self.cases), 4)

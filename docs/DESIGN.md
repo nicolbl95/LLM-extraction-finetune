@@ -10,7 +10,23 @@ ni mélange des colonnes. Les quantités et prix ne doivent pas être déduits
 par division des totaux. Un exemple few-shot fictif complet illustre le calcul
 `7,2 × 12,50 = 90,00`, soit `quantity=7.2`, `unit_price=12.5`, `total_ht=90.0`.
 Les valeurs de cet exemple ne doivent pas être recopiées dans la facture réelle.
-Le prompt d'évaluation, identique à celui de l'entraînement, reste inchangé.
+Le prompt système partagé par l'évaluation et l'application conserve l'instruction
+d'entraînement, puis ajoute des garde-fous d'inférence : copie littérale des
+descriptions sans lettres omises, exclusion des en-têtes et des libellés
+« Sous-total » des articles. Un exemple fictif de tableau montre une description
+complète et une quantité décimale, sans transformer le sous-total en article.
+Le notebook d'entraînement reste inchangé ; les anciens scores ne mesurent donc
+pas ce nouveau prompt.
+
+## Validation arithmétique partagée
+
+Les modèles Pydantic v2 de [data/schema.py](../data/schema.py) appliquent des
+`@model_validator(mode="after")` : chaque produit `quantity * unit_price`
+est arrondi au centime (`ROUND_HALF_UP`, comme le générateur), puis comparé au
+`total_ht` de la ligne ; la somme des montants HT est comparée au `total_ht`
+global. La tolérance absolue est de 0,02 inclus, calculée avec `Decimal`.
+Les montants extraits ne sont pas réécrits ou arrondis pour masquer un écart ;
+les valeurs non finies sont rejetées avant les calculs.
 
 ## Évaluation du modèle brut et correction
 
@@ -23,9 +39,15 @@ décodage sans échantillonnage et le scoring sont communs aux deux modes.
 
 `--self-correct` est facultatif pour préserver les évaluations à une passe.
 Il utilise les mêmes fonctions de validation et de construction du message
-correctif que l'application, mais conserve le prompt système d'entraînement,
-sans le few-shot de l'interface. Une seule correction est autorisée après un
+correctif que l'application, ainsi que les nouveaux garde-fous du prompt partagé,
+sans le dialogue few-shot supplémentaire de l'interface. Une seule correction est autorisée après un
 échec JSON/Pydantic ; aucun résultat cible n'est transmis au modèle.
+Une incohérence de ligne ou de somme déclenche cette seconde passe lorsque
+`--self-correct` est activé. Le message transmet l'erreur Pydantic exacte et,
+pour une ligne incohérente, la quantité, le prix unitaire, le produit calculé,
+le montant HT extrait et le sous-total global. Il demande une relecture de la
+ligne source, sans inventer une quantité par division ni confondre le total
+d'une ligne avec celui de la facture.
 
 Le rapport conserve les réponses brutes de chaque passe, les erreurs et
 avertissements, les compteurs de tokens cumulés, ainsi que

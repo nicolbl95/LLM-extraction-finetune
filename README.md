@@ -163,7 +163,9 @@ Le dossier existant `results/evaluation-3` conserve le rapport fourni ; chaque
 sous-dossier, sans écraser les scores déclarés.
 La baseline écrit ses propres `metrics.json` et `predictions.jsonl`, sans
 remplacer le rapport Regex. `--self-correct` réutilise la validation et le
-prompt correctif de la démo, sans son prompt système enrichi ni son few-shot.
+prompt correctif de la démo. Le prompt système partagé exclut les en-têtes et
+sous-totaux des articles et impose la copie littérale des descriptions, avec un
+exemple fictif ; le dialogue few-shot supplémentaire reste propre à la démo.
 Les deux réponses et les scores avant/après correction sont tracés ; une
 incohérence arithmétique persistante reste un échec de validation du benchmark.
 Pour une comparaison contrôlée, appliquer aussi `--self-correct` au run LoRA,
