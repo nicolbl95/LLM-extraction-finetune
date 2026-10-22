@@ -232,7 +232,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("4,2 devient 4.2 (jamais 42)", messages[-1]["content"])
         self.assertIn("Ne déduis pas ces champs par division", messages[-1]["content"])
         self.assertIn("Ligne 1", messages[-1]["content"])
-        self.assertIn("ecart absolu = 756", messages[-1]["content"])
+        self.assertIn("Écart absolu : 756", messages[-1]["content"])
 
     def test_self_correction_handles_missing_fields_and_malformed_json(self):
         missing_date = {key: value for key, value in self.gold.items() if key != "invoice_date"}
@@ -308,7 +308,7 @@ class AppTests(unittest.TestCase):
                     actual = main.extract_invoice("invoice", warnings=warnings)
                 self.assertEqual(actual, first)
                 self.assertEqual(model.predict.call_count, 2)
-                self.assertTrue(any("ecart absolu" in message for message in warnings))
+                self.assertTrue(any("Écart absolu" in message for message in warnings))
                 self.assertTrue(any("Auto-correction impossible" in message for message in warnings))
 
     def test_model_error_is_not_hidden_without_a_valid_fallback(self):
@@ -336,11 +336,11 @@ class AppTests(unittest.TestCase):
         self.assertEqual(actual, payload)
         self.assertEqual(len(warnings), 3)
         self.assertIn("Ligne 1", warnings[0])
-        self.assertIn("ecart absolu = 900", warnings[0])
+        self.assertIn("Écart absolu : 900", warnings[0])
         self.assertIn("Ligne 2", warnings[1])
-        self.assertIn("ecart absolu = 1", warnings[1])
+        self.assertIn("Écart absolu : 1", warnings[1])
         self.assertIn("Total HT de la facture", warnings[2])
-        self.assertIn("ecart absolu = 81", warnings[2])
+        self.assertIn("Écart absolu : 81", warnings[2])
         with self.assertRaises(main.ValidationError):
             main.validate_invoice_json(json.dumps(payload))
 
@@ -377,9 +377,9 @@ class AppTests(unittest.TestCase):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
                 self.assertEqual(updates[-1][0], payload)
                 self.assertIn("Avertissement", updates[-1][1])
-                self.assertIn("Incoherence", updates[-1][1])
+                self.assertIn("Incohérence", updates[-1][1])
                 self.assertIn("vérification manuelle", updates[-1][1])
-                self.assertIn("ecart absolu", updates[-1][1])
+                self.assertIn("Écart absolu", updates[-1][1])
                 self.assertNotIn("cohérence des montants HT contrôlée", updates[-1][1])
                 self.assertEqual(model.predict.call_count, 2)
 

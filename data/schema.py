@@ -22,12 +22,13 @@ class LineItem(BaseModel):
         except InvalidOperation as exc:
             raise ValueError("Montant de ligne non representable au centime.") from exc
         actual = Decimal(str(self.total_ht))
-        if abs(expected - actual) > MONEY_TOLERANCE:
+        difference = abs(expected - actual)
+        if difference > MONEY_TOLERANCE:
             raise ValueError(
-                f"Incoherence de ligne : quantity * unit_price = "
-                f"{self.quantity} * {self.unit_price} = {expected}, "
-                f"mais total_ht = {actual} ; ecart absolu = {abs(expected - actual)} "
-                f"(tolerance : {MONEY_TOLERANCE})."
+                f"Incohérence sur la ligne '{self.description}' : "
+                f"quantity ({self.quantity}) * unit_price ({self.unit_price}) = {expected}, "
+                f"mais total_ht indiqué = {actual}. Écart absolu : {difference}. "
+                f"Tolérance : {MONEY_TOLERANCE}."
             )
 
     @model_validator(mode="after")
@@ -49,11 +50,12 @@ class Invoice(BaseModel):
     def check_arithmetic(self) -> None:
         expected = sum((Decimal(str(item.total_ht)) for item in self.line_items), Decimal(0))
         actual = Decimal(str(self.total_ht))
-        if abs(expected - actual) > MONEY_TOLERANCE:
+        difference = abs(expected - actual)
+        if difference > MONEY_TOLERANCE:
             raise ValueError(
-                f"Incoherence de facture : somme des total_ht des lignes = {expected}, "
-                f"mais total_ht global = {actual} ; ecart absolu = {abs(expected - actual)} "
-                f"(tolerance : {MONEY_TOLERANCE})."
+                f"Incohérence de facture : somme des total_ht des lignes = {expected}, "
+                f"mais total_ht global attendu = {actual}. Écart absolu : {difference}. "
+                f"Tolérance : {MONEY_TOLERANCE}."
             )
 
     @model_validator(mode="after")

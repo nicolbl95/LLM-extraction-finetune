@@ -243,7 +243,10 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(initial_messages, evaluation.build_messages(row))
         self.assertEqual(corrected_messages[:-2], initial_messages)
         self.assertEqual(corrected_messages[-2]["content"], initial["raw"])
-        self.assertIn("Le JSON précédent est invalide", corrected_messages[-1]["content"])
+        self.assertTrue(corrected_messages[-1]["content"].startswith(
+            "La précédente extraction a échoué à la validation du schéma Pydantic "
+            "pour les raisons suivantes :\n"
+        ))
         self.assertEqual(result["raw"], corrected["raw"])
         self.assertEqual(result["attempt_count"], 2)
         self.assertEqual(result["completion_tokens"], 20)
@@ -299,9 +302,19 @@ class EvaluationTests(unittest.TestCase):
             )
         self.assertEqual(backend.predict.call_count, 2)
         prompt = backend.predict.call_args.kwargs["messages"][-1]["content"]
-        self.assertIn(str(validation.exception), prompt)
+        self.assertTrue(prompt.startswith(
+            "La précédente extraction a échoué à la validation du schéma Pydantic "
+            f"pour les raisons suivantes :\n{validation.exception}\n\n"
+        ))
+        self.assertTrue(prompt.endswith(
+            "Relis attentivement la facture fournie (en faisant particulièrement attention "
+            "aux décimales des prix unitaires, aux quantités et aux totaux de lignes), "
+            "corrige l'erreur de calcul ou d'extraction, et renvoie un JSON rigoureusement valide."
+        ))
         self.assertIn("Erreur arithmétique détectée", prompt)
-        self.assertIn("142.0 * 95.07", prompt)
+        self.assertIn("Incohérence sur la ligne 'Maintenance préventive'", prompt)
+        self.assertIn("quantity (142.0) * unit_price (95.07) = 13499.94", prompt)
+        self.assertIn("Écart absolu : 12815.44", prompt)
         self.assertIn("684.5", prompt)
         self.assertIn("5716.77", prompt)
         self.assertIn("ré-extrais la ligne exacte", prompt)
@@ -321,6 +334,26 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("somme des total_ht", prompt)
         self.assertIn("total_ht global", prompt)
         self.assertTrue(evaluation.score(result["raw"], self.gold)["exact"])
+
+    def test_corrective_prompt_preserves_all_pydantic_line_errors(self):
+        invalid = copy.deepcopy(self.gold)
+        item = invalid["line_items"][0]
+        item["quantity"] += 10
+        invalid["line_items"] = [item, {**item, "description": "Second article"}]
+        with self.assertRaises(evaluation.ValidationError) as validation:
+            evaluation.Invoice.model_validate(invalid)
+        backend = MagicMock()
+        backend.predict.side_effect = [
+            self.prediction(json.dumps(invalid)), self.prediction(json.dumps(self.gold)),
+        ]
+        with self.assertLogs(level="WARNING"):
+            evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+        prompt = backend.predict.call_args.kwargs["messages"][-1]["content"]
+        self.assertEqual(backend.predict.call_count, 2)
+        self.assertIn(str(validation.exception), prompt)
+        self.assertIn("line_items.0", prompt)
+        self.assertIn("line_items.1", prompt)
+        self.assertIn("Incohérence sur la ligne 'Second article'", prompt)
 
     def test_failed_correction_keeps_structural_fallback_with_explicit_error(self):
         invalid = {**self.gold, "total_ht": self.gold["total_ht"] + 1}

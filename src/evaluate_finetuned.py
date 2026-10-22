@@ -301,12 +301,15 @@ def correction_messages(messages: list[dict], raw: str, error: Exception,
         {
             "role": "user",
             "content": (
-                f"Le JSON précédent est invalide pour la raison suivante :\n{error}\n\n"
+                "La précédente extraction a échoué à la validation du schéma Pydantic "
+                f"pour les raisons suivantes :\n{error}\n\n"
                 f"{arithmetic_focus}"
-                "Corrige-le en respectant strictement les valeurs de la facture réelle "
-                "ci-dessus, en particulier les quantités décimales. Ne modifie pas les "
+                "Respecte strictement les valeurs de la facture réelle ci-dessus. Ne modifie pas les "
                 "montants pour simplement faire passer la validation et n'utilise pas "
-                "les valeurs de l'exemple fictif. Réponds uniquement par le JSON complet corrigé."
+                "les valeurs de l'exemple fictif. Réponds uniquement par le JSON complet corrigé.\n\n"
+                "Relis attentivement la facture fournie (en faisant particulièrement attention "
+                "aux décimales des prix unitaires, aux quantités et aux totaux de lignes), "
+                "corrige l'erreur de calcul ou d'extraction, et renvoie un JSON rigoureusement valide."
             ),
         },
     ]

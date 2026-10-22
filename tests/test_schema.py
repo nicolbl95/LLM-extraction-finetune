@@ -33,12 +33,27 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(line.total_ht, 0.03)
 
     def test_decimal_point_hallucination_is_rejected(self):
-        with self.assertRaisesRegex(ValidationError, "quantity \\* unit_price"):
+        with self.assertRaisesRegex(ValidationError, r"quantity \(25\.0\) \* unit_price \(5\.0\)"):
             Invoice.model_validate(self.invoice(line_items=[self.line(quantity=25)]))
 
     def test_hallucinated_quantity_error_preserves_original_operands(self):
-        with self.assertRaisesRegex(ValidationError, r"142\.0 \* 95\.07"):
+        with self.assertRaises(ValidationError) as validation:
             LineItem.model_validate(self.line(quantity=142, unit_price=95.07, total_ht=684.50))
+        self.assertEqual(
+            validation.exception.errors()[0]["msg"],
+            "Value error, Incohérence sur la ligne 'Service' : "
+            "quantity (142.0) * unit_price (95.07) = 13499.94, "
+            "mais total_ht indiqué = 684.5. Écart absolu : 12815.44. Tolérance : 0.02.",
+        )
+
+    def test_invoice_error_reports_calculated_sum_expected_total_and_difference(self):
+        with self.assertRaises(ValidationError) as validation:
+            Invoice.model_validate(self.invoice(total_ht=10))
+        self.assertEqual(
+            validation.exception.errors()[0]["msg"],
+            "Value error, Incohérence de facture : somme des total_ht des lignes = 12.5, "
+            "mais total_ht global attendu = 10.0. Écart absolu : 2.5. Tolérance : 0.02.",
+        )
 
     def test_line_tolerance_accepts_exactly_two_cents_without_correction(self):
         for total in (12.48, 12.5, 12.52):
@@ -46,7 +61,7 @@ class SchemaTests(unittest.TestCase):
                 self.assertEqual(LineItem.model_validate(self.line(total_ht=total)).total_ht, total)
         for total in (12.479999, 12.520001, 12.47, 12.53):
             with self.subTest(total=total):
-                with self.assertRaisesRegex(ValidationError, "Incoherence de ligne"):
+                with self.assertRaisesRegex(ValidationError, "Incohérence sur la ligne"):
                     LineItem.model_validate(self.line(total_ht=total))
 
     def test_half_up_rounding_matches_dataset_at_tolerance_boundary(self):

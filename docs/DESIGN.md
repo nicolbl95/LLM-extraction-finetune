@@ -45,7 +45,14 @@ sans le dialogue few-shot supplémentaire de l'interface. Une seule correction e
 Une incohérence de ligne ou de somme déclenche cette seconde passe lorsque
 `--self-correct` est activé. Le message transmet l'erreur Pydantic exacte et,
 pour une ligne incohérente, la quantité, le prix unitaire, le produit calculé,
-le montant HT extrait et le sous-total global. Il demande une relecture de la
+le montant HT extrait et le sous-total global. Le diagnostic nomme également
+la description de l'article et l'écart absolu ; une erreur de somme affiche
+la somme calculée, le total global attendu et leur écart, avec la tolérance.
+Le prompt correctif commence par « La précédente extraction a échoué à la
+validation du schéma Pydantic pour les raisons suivantes : », suivi de
+l'erreur intégrale, sans troncature. Il se termine par une demande de relecture
+attentive des décimales, quantités et totaux de lignes, puis d'un JSON
+rigoureusement valide. Il demande une relecture de la
 ligne source, sans inventer une quantité par division ni confondre le total
 d'une ligne avec celui de la facture.
 
