@@ -2,7 +2,7 @@ pydantic>=2,<3
 pandas
 requests
 datasets
-huggingface_hub
+huggingface_hub<0.25.0
 reportlab>=4.4
 PyMuPDF>=1.26
 spaces
