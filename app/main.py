@@ -134,7 +134,7 @@ def preview_document(filename: str | None):
                 message = f"Aperçu : page 1 sur {document.page_count}. Toutes les pages seront analysées."
         else:
             image = open_image(path)
-            message = "Facture prête. Cliquez sur « Extraire les données »."
+            message = ""
         return image, None, message
     except (OSError, ValueError, RuntimeError, Image.DecompressionBombError) as exc:
         LOGGER.exception("Invoice preview failed")
@@ -305,9 +305,9 @@ def run_extraction(filename: str | None):
 
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(title="Extraction standardisée de factures") as demo:
+    with gr.Blocks(title="Extraction standardisée de données de factures") as demo:
         gr.Markdown(
-            "# Extraction standardisée de factures\n"
+            "# Extraction standardisée de données de factures\n"
             "Transformez vos factures françaises, britanniques et américaines "
             "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
             "des données importantes standardisées."
@@ -320,10 +320,11 @@ def build_app() -> gr.Blocks:
                     type="filepath",
                 )
                 gr.Markdown("PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais")
+                gr.Markdown("Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽")
                 gr.Examples(
                     examples=[[str(path)] for _, path in EXAMPLES],
                     inputs=[upload],
-                    label="Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽",
+                    label="",
                     example_labels=[label for label, _ in EXAMPLES],
                     cache_examples=False,
                 )

@@ -56,7 +56,7 @@ class AppTests(unittest.TestCase):
             image, result, status = main.preview_document(str(path))
             self.assertIsInstance(image, Image.Image)
             self.assertIsNone(result)
-            self.assertIn("prête", status)
+            self.assertEqual(status, "")
 
     def test_pdf_reads_every_page_without_ocr_and_previews_first(self):
         path = self.make_pdf(["First invoice page", "Second invoice page"])
@@ -536,24 +536,36 @@ class AppTests(unittest.TestCase):
         self.assertIn("json", types)
         self.assertEqual(types.count("row"), 1)
         self.assertEqual(types.count("column"), 2)
-        self.assertEqual(demo.config["title"], "Extraction standardisée de factures")
+        self.assertEqual(demo.config["title"], "Extraction standardisée de données de factures")
         examples = [
             component for component in demo.config["components"] if component["type"] == "dataset"
         ]
-        self.assertEqual(
-            examples[0]["props"]["label"],
-            "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽",
-        )
+        self.assertEqual(examples[0]["props"]["label"], "")
         markdown = [
             component["props"]["value"] for component in demo.config["components"]
             if component["type"] == "markdown"
         ]
         self.assertEqual(
             markdown[0],
-            "# Extraction standardisée de factures\n"
+            "# Extraction standardisée de données de factures\n"
             "Transformez vos factures françaises, britanniques et américaines "
             "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
             "des données importantes standardisées.",
+        )
+        self.assertEqual(
+            markdown[1:3],
+            [
+                "PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais",
+                "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽",
+            ],
+        )
+        help_components = [
+            component["props"] for component in demo.config["components"]
+            if component["type"] == "markdown" and component["props"]["value"] in markdown[1:3]
+        ]
+        self.assertEqual(
+            {key: value for key, value in help_components[0].items() if key != "value"},
+            {key: value for key, value in help_components[1].items() if key != "value"},
         )
         self.assertNotIn("Importez une facture ou choisissez un exemple.", markdown)
         self.assertEqual(markdown[-1], "")
