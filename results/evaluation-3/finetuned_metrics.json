@@ -1,0 +1,6 @@
+{
+  "status": "success",
+  "adapter_path": "results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter",
+  "json_validity_rate": 1.0,
+  "exact_match_rate": 0.95
+}

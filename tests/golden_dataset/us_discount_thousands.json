@@ -1,0 +1,23 @@
+{
+  "id": "us_discount_thousands",
+  "locale": "en-US",
+  "tags": ["decimal_quantities", "special_characters", "discounts", "thousands_separator"],
+  "invoice_text": "INVOICE US-GOLD-004\nSupplier: O'Neil & Co., LLC\nInvoice date: 10/24/2026\nCurrency: USD\nCalibration / lot #A-17 | Quantity: 4.2 | List unit price: $1,250.00 | Discount: 20% | Net unit price: $1,000.00 | Net amount: $4,200.00\nSensor \"Pro\" (2-pack) | Quantity: 2 | Net unit price: $49.95 | Net amount: $99.90\nSubtotal: $4,299.90\nSales tax 8.875% on $4,299.90: $381.62\nTotal due: $4,681.52",
+  "response_json": "{\"supplier_name\":\"O'Neil & Co., LLC\",\"invoice_date\":\"2026-10-24\",\"total_ht\":4299.9,\"total_ttc\":4681.52,\"line_items\":[{\"description\":\"Calibration / lot #A-17\",\"quantity\":4.2,\"unit_price\":1000.0,\"total_ht\":4200.0},{\"description\":\"Sensor \\\"Pro\\\" (2-pack)\",\"quantity\":2.0,\"unit_price\":49.95,\"total_ht\":99.9}]}",
+  "expected": {
+    "supplier_name": "O'Neil & Co., LLC",
+    "invoice_date": "2026-10-24",
+    "total_ht": 4299.9,
+    "total_ttc": 4681.52,
+    "line_items": [
+      {"description": "Calibration / lot #A-17", "quantity": 4.2, "unit_price": 1000.0, "total_ht": 4200.0},
+      {"description": "Sensor \"Pro\" (2-pack)", "quantity": 2.0, "unit_price": 49.95, "total_ht": 99.9}
+    ]
+  },
+  "taxes": [
+    {"base": "4299.90", "rate": "8.875", "amount": "381.62"}
+  ],
+  "discounts": [
+    {"line_index": 0, "list_unit_price": "1250.00", "percent": "20"}
+  ]
+}

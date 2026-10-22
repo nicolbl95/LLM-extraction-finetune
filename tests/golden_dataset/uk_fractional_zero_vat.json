@@ -1,0 +1,23 @@
+{
+  "id": "uk_fractional_zero_vat",
+  "locale": "en-GB",
+  "tags": ["decimal_quantities", "special_characters", "multiple_taxes"],
+  "invoice_text": "INVOICE GB-GOLD-003\nSupplier: King's Cross Digital Ltd\nInvoice date: 23 October 2026\nCurrency: GBP\nDesign & layout (phase #2) | Quantity: 7.2 | Net unit price: £37.50 | Net amount: £270.00 | VAT: 20%\nPrinted handbook: A/B testing | Quantity: 3 | Net unit price: £12.00 | Net amount: £36.00 | VAT: 0%\nExpress delivery | Quantity: 1 | Net unit price: £5.00 | Net amount: £5.00 | VAT: 20%\nTotal excl. tax: £311.00\nVAT (20%) on £275.00: £55.00\nVAT (0%) on £36.00: £0.00\nInvoice total: £366.00",
+  "response_json": "{\"supplier_name\":\"King's Cross Digital Ltd\",\"invoice_date\":\"2026-10-23\",\"total_ht\":311.0,\"total_ttc\":366.0,\"line_items\":[{\"description\":\"Design & layout (phase #2)\",\"quantity\":7.2,\"unit_price\":37.5,\"total_ht\":270.0},{\"description\":\"Printed handbook: A/B testing\",\"quantity\":3.0,\"unit_price\":12.0,\"total_ht\":36.0},{\"description\":\"Express delivery\",\"quantity\":1.0,\"unit_price\":5.0,\"total_ht\":5.0}]}",
+  "expected": {
+    "supplier_name": "King's Cross Digital Ltd",
+    "invoice_date": "2026-10-23",
+    "total_ht": 311.0,
+    "total_ttc": 366.0,
+    "line_items": [
+      {"description": "Design & layout (phase #2)", "quantity": 7.2, "unit_price": 37.5, "total_ht": 270.0},
+      {"description": "Printed handbook: A/B testing", "quantity": 3.0, "unit_price": 12.0, "total_ht": 36.0},
+      {"description": "Express delivery", "quantity": 1.0, "unit_price": 5.0, "total_ht": 5.0}
+    ]
+  },
+  "taxes": [
+    {"base": "275.00", "rate": "20", "amount": "55.00"},
+    {"base": "36.00", "rate": "0", "amount": "0.00"}
+  ],
+  "discounts": []
+}

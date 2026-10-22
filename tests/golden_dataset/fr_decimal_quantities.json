@@ -1,0 +1,21 @@
+{
+  "id": "fr_decimal_quantities",
+  "locale": "fr-FR",
+  "tags": ["decimal_quantities", "special_characters"],
+  "invoice_text": "FACTURE FR-GOLD-001\nFournisseur : Atelier Équinoxe & Fils\nDate : 21/10/2026\nDevise : EUR\nConseil « stratégie » — phase A | Quantité : 7,2 | Prix unitaire HT : 12,50 € | Total HT : 90,00 €\nRévision cœur de réseau | Quantité : 4,2 | Prix unitaire HT : 19,95 € | Total HT : 83,79 €\nTotal HT : 173,79 €\nTVA 20 % sur 173,79 € : 34,76 €\nTotal TTC : 208,55 €",
+  "response_json": "{\"supplier_name\":\"Atelier Équinoxe & Fils\",\"invoice_date\":\"2026-10-21\",\"total_ht\":173.79,\"total_ttc\":208.55,\"line_items\":[{\"description\":\"Conseil « stratégie » — phase A\",\"quantity\":7.2,\"unit_price\":12.5,\"total_ht\":90.0},{\"description\":\"Révision cœur de réseau\",\"quantity\":4.2,\"unit_price\":19.95,\"total_ht\":83.79}]}",
+  "expected": {
+    "supplier_name": "Atelier Équinoxe & Fils",
+    "invoice_date": "2026-10-21",
+    "total_ht": 173.79,
+    "total_ttc": 208.55,
+    "line_items": [
+      {"description": "Conseil « stratégie » — phase A", "quantity": 7.2, "unit_price": 12.5, "total_ht": 90.0},
+      {"description": "Révision cœur de réseau", "quantity": 4.2, "unit_price": 19.95, "total_ht": 83.79}
+    ]
+  },
+  "taxes": [
+    {"base": "173.79", "rate": "20", "amount": "34.76"}
+  ],
+  "discounts": []
+}

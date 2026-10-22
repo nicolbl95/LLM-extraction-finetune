@@ -1,0 +1,81 @@
+from datetime import date
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+
+MONEY_TOLERANCE = Decimal("0.02")
+
+
+class LineItem(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    description: str
+    quantity: float
+    unit_price: float
+    total_ht: float
+
+    def check_arithmetic(self) -> None:
+        try:
+            expected = (Decimal(str(self.quantity)) * Decimal(str(self.unit_price))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+        except InvalidOperation as exc:
+            raise ValueError("Montant de ligne non representable au centime.") from exc
+        actual = Decimal(str(self.total_ht))
+        difference = abs(expected - actual)
+        if difference > MONEY_TOLERANCE:
+            raise ValueError(
+                f"Incohérence sur la ligne '{self.description}' : "
+                f"quantity ({self.quantity}) * unit_price ({self.unit_price}) = {expected}, "
+                f"mais total_ht indiqué = {actual}. Écart absolu : {difference}. "
+                f"Tolérance : {MONEY_TOLERANCE}."
+            )
+
+    @model_validator(mode="after")
+    def validate_line_total(self, info: ValidationInfo) -> "LineItem":
+        if not (isinstance(info.context, dict) and info.context.get("validate_arithmetic") is False):
+            self.check_arithmetic()
+        return self
+
+
+class Invoice(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    supplier_name: str
+    invoice_date: date
+    total_ht: float
+    total_ttc: float
+    line_items: list[LineItem] = Field(default_factory=list)
+
+    def check_arithmetic(self) -> None:
+        expected = sum((Decimal(str(item.total_ht)) for item in self.line_items), Decimal(0))
+        actual = Decimal(str(self.total_ht))
+        difference = abs(expected - actual)
+        if difference > MONEY_TOLERANCE:
+            raise ValueError(
+                f"Incohérence de facture : somme des total_ht des lignes = {expected}, "
+                f"mais total_ht global attendu = {actual}. Écart absolu : {difference}. "
+                f"Tolérance : {MONEY_TOLERANCE}."
+            )
+
+    @model_validator(mode="after")
+    def validate_invoice_total(self, info: ValidationInfo) -> "Invoice":
+        if not (isinstance(info.context, dict) and info.context.get("validate_arithmetic") is False):
+            self.check_arithmetic()
+        return self
+
+    def arithmetic_warnings(self) -> list[str]:
+        warnings = []
+        for index, item in enumerate(self.line_items, start=1):
+            try:
+                item.check_arithmetic()
+            except ValueError as exc:
+                warnings.append(
+                    f"Ligne {index} : {exc} "
+                    f"Sous-total HT de la facture : {self.total_ht}."
+                )
+        try:
+            self.check_arithmetic()
+        except ValueError as exc:
+            warnings.append(f"Total HT de la facture : {exc}")
+        return warnings
