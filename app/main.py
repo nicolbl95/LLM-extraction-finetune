@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from evaluate_finetuned import (
-    INSTRUCTION, SYSTEM_PROMPT, Invoice, LoRAInference, check_adapter, parse_object,
+    INSTRUCTION, SYSTEM_PROMPT, Invoice, LoRAInference, check_adapter,
+    correction_messages, validate_invoice_json,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -217,18 +218,6 @@ def get_extractor() -> LoRAInference:
     )
 
 
-def validate_invoice_json(raw: str, *, arithmetic_warnings: list[str] | None = None) -> dict:
-    invoice = Invoice.model_validate(
-        parse_object(raw),
-        context={"validate_arithmetic": arithmetic_warnings is None},
-    )
-    payload = invoice.model_dump(mode="json")
-    json.dumps(payload, allow_nan=False)
-    if arithmetic_warnings is not None:
-        arithmetic_warnings.extend(invoice.arithmetic_warnings())
-    return payload
-
-
 @spaces.GPU
 def predict_invoice(row: dict, messages: list[dict]) -> dict:
     return get_extractor().predict(row, messages=messages)
@@ -257,36 +246,7 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None) -> dict:
             )
         except (ValidationError, ValueError) as structure_error:
             LOGGER.debug("No structurally valid fallback (%s)", type(structure_error).__name__)
-        arithmetic_focus = ""
-        if previous_warnings:
-            arithmetic_focus = (
-                "Priorité de correction arithmétique : relis d'abord les champs quantity et "
-                "unit_price des lignes concernées dans le texte de la facture réelle. "
-                "Corrige en priorité les quantités et prix unitaires mal transcrits, uniquement "
-                "si les valeurs sources le confirment. Respecte exactement la virgule décimale : "
-                "7,2 devient 7.2 (jamais 142 ou 72) et 4,2 devient 4.2 (jamais 42). "
-                "Ne déduis pas ces champs par division des totaux. Vérifie ensuite les montants "
-                "de ligne et le total HT global en les relisant dans la facture ; ne les recalcule "
-                "pas pour masquer une erreur de quantité ou de prix.\n"
-                "Anomalies arithmétiques à examiner :\n"
-                + "\n".join(previous_warnings)
-                + "\n\n"
-            )
-        messages = [
-            *messages,
-            {"role": "assistant", "content": prediction["raw"]},
-            {
-                "role": "user",
-                "content": (
-                    f"Le JSON précédent est invalide pour la raison suivante :\n{exc}\n\n"
-                    f"{arithmetic_focus}"
-                    "Corrige-le en respectant strictement les valeurs de la facture réelle "
-                    "ci-dessus, en particulier les quantités décimales. Ne modifie pas les "
-                    "montants pour simplement faire passer la validation et n'utilise pas "
-                    "les valeurs de l'exemple fictif. Réponds uniquement par le JSON complet corrigé."
-                ),
-            },
-        ]
+        messages = correction_messages(messages, prediction["raw"], exc, previous_warnings)
     current_warnings = []
     try:
         prediction = predict_invoice(row, messages)

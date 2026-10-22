@@ -157,6 +157,8 @@ class EvaluationTests(unittest.TestCase):
         torch.inference_mode = contextlib.nullcontext
         transformers = types.ModuleType("transformers")
         transformers.AutoModelForCausalLM = MagicMock()
+        transformers.AutoModelForCausalLM.from_pretrained.return_value.peft_config = None
+        transformers.AutoModelForCausalLM.from_pretrained.return_value.config._commit_hash = "resolved-test-revision"
         transformers.AutoTokenizer = MagicMock()
         transformers.BitsAndBytesConfig = MagicMock()
         peft = types.ModuleType("peft")
@@ -186,6 +188,160 @@ class EvaluationTests(unittest.TestCase):
             (adapter / "adapter_model.safetensors").unlink()
             with self.assertRaisesRegex(FileNotFoundError, "adapter_model"):
                 evaluation.check_adapter(adapter)
+
+    def test_raw_base_is_nf4_without_peft_or_adapter_tokenizer(self):
+        modules = self.mocked_dependencies()
+        with patch.dict(sys.modules, modules):
+            inference = evaluation.BaseInference("cuda", True, 4096, 2048)
+        transformers = modules["transformers"]
+        args, kwargs = transformers.AutoModelForCausalLM.from_pretrained.call_args
+        self.assertEqual(args, ("unsloth/Qwen2.5-3B-Instruct",))
+        self.assertIn("quantization_config", kwargs)
+        transformers.BitsAndBytesConfig.assert_called_once_with(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype="bf16", bnb_4bit_use_double_quant=True,
+        )
+        modules["peft"].PeftModel.from_pretrained.assert_not_called()
+        self.assertIs(inference.model, transformers.AutoModelForCausalLM.from_pretrained.return_value)
+        transformers.AutoTokenizer.from_pretrained.assert_called_once_with(
+            evaluation.BASE_MODEL, trust_remote_code=False,
+        )
+        self.assertFalse(inference.metadata["adapter_applied"])
+        self.assertNotIn("adapter_path", inference.metadata)
+        self.assertEqual(inference.metadata["resolved_base_revision"], "resolved-test-revision")
+        self.assertIs(evaluation.BaseInference.predict, evaluation.LoRAInference.predict)
+
+    def test_raw_base_rejects_accidental_adapters_and_unavailable_cuda(self):
+        modules = self.mocked_dependencies()
+        modules["transformers"].AutoModelForCausalLM.from_pretrained.return_value.peft_config = {"unexpected": {}}
+        with patch.dict(sys.modules, modules), self.assertRaisesRegex(ValueError, "unexpectedly attached"):
+            evaluation.BaseInference("cuda", True, 4096, 2048)
+        modules["torch"].cuda.is_available.return_value = False
+        with patch.dict(sys.modules, modules), self.assertRaisesRegex(RuntimeError, "CUDA is unavailable"):
+            evaluation.BaseInference("cuda", True, 4096, 2048)
+
+    def prediction(self, raw, finish_reason="stop"):
+        return {"raw": raw, "finish_reason": finish_reason,
+                "completion_tokens": 10, "prompt_tokens": 20}
+
+    def test_correction_uses_original_prompt_error_and_no_gold(self):
+        backend = MagicMock()
+        initial = self.prediction('{"supplier_name":')
+        corrected = self.prediction(json.dumps(self.gold))
+        backend.predict.side_effect = [initial, corrected]
+        row = {"id": "unit-test", "input": "Original invoice"}
+        with self.assertLogs(level="WARNING"):
+            result = evaluation.predict_with_correction(backend, row)
+        self.assertEqual(backend.predict.call_count, 2)
+        initial_messages = backend.predict.call_args_list[0].kwargs["messages"]
+        corrected_messages = backend.predict.call_args_list[1].kwargs["messages"]
+        self.assertEqual(initial_messages, evaluation.build_messages(row))
+        self.assertEqual(corrected_messages[:-2], initial_messages)
+        self.assertEqual(corrected_messages[-2]["content"], initial["raw"])
+        self.assertIn("Le JSON précédent est invalide", corrected_messages[-1]["content"])
+        self.assertEqual(result["raw"], corrected["raw"])
+        self.assertEqual(result["attempt_count"], 2)
+        self.assertEqual(result["completion_tokens"], 20)
+        self.assertEqual(result["prompt_tokens"], 40)
+        self.assertEqual(result["attempts"], [initial, corrected])
+        self.assertFalse(result["arithmetic_warnings"])
+        with self.assertLogs(level="WARNING"):
+            backend.predict.side_effect = [initial, corrected]
+            rows = evaluation.evaluate_rows(self.rows[:1], lambda row: evaluation.predict_with_correction(backend, row))
+        report = evaluation.build_report(rows, "unit-test-only")
+        self.assertEqual(report["initial_json_validity_rate"], 0)
+        self.assertEqual(report["json_validity_rate"], 1)
+        self.assertEqual(report["correction_rate"], 1)
+
+    def test_correction_arithmetic_warnings_remain_failures_for_scoring(self):
+        invalid = copy.deepcopy(self.gold)
+        invalid["line_items"][0]["quantity"] += 5
+        raw = json.dumps(invalid)
+        backend = MagicMock()
+        backend.predict.side_effect = [self.prediction(raw), self.prediction(raw)]
+        with self.assertLogs(level="WARNING"):
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+        self.assertEqual(backend.predict.call_count, 2)
+        self.assertTrue(result["arithmetic_warnings"])
+        self.assertFalse(evaluation.score(result["raw"], invalid)["valid"])
+        self.assertIn(
+            "Priorité de correction arithmétique",
+            backend.predict.call_args.kwargs["messages"][-1]["content"],
+        )
+
+    def test_failed_correction_keeps_structural_fallback_with_explicit_error(self):
+        invalid = {**self.gold, "total_ht": self.gold["total_ht"] + 1}
+        raw = json.dumps(invalid)
+        for second in (self.prediction("broken"), self.prediction("cut", "length"),
+                       RuntimeError("generation failed")):
+            backend = MagicMock()
+            backend.predict.side_effect = [self.prediction(raw), second]
+            with self.subTest(second=second), self.assertLogs(level="WARNING"):
+                result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+            self.assertEqual(result["raw"], raw)
+            self.assertEqual(result["attempt_count"], 2)
+            self.assertTrue(result["validation_errors"] or result["operational_error"])
+            self.assertTrue(result["arithmetic_warnings"])
+            self.assertEqual(backend.predict.call_count, 2)
+            if isinstance(second, dict) and second["finish_reason"] == "length":
+                scored = {
+                    **result, **evaluation.score(result["raw"], self.gold),
+                    **{key: self.rows[0][key] for key in ("format", "locale", "currency", "template_id")},
+                    "latency_ms": 1,
+                }
+                report = evaluation.build_report([scored], "test")
+                self.assertEqual(report["truncation_rate"], 0)
+                self.assertEqual(report["truncated_attempt_rate"], 1)
+
+    def test_two_invalid_responses_never_trigger_a_third_pass(self):
+        backend = MagicMock()
+        backend.predict.side_effect = [self.prediction("broken first"), self.prediction("broken second")]
+        with self.assertLogs(level="WARNING"):
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+        self.assertEqual(backend.predict.call_count, 2)
+        self.assertEqual(result["raw"], "broken second")
+        self.assertFalse(evaluation.score(result["raw"], self.gold)["exact"])
+        self.assertTrue(result["validation_errors"])
+
+    def test_no_correction_after_valid_output_or_truncation(self):
+        for initial in (self.prediction(json.dumps(self.gold)), self.prediction("cut", "length")):
+            backend = MagicMock()
+            backend.predict.return_value = initial
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+            backend.predict.assert_called_once()
+            self.assertFalse(result["correction_attempted"])
+            self.assertEqual(result["attempt_count"], 1)
+
+    def test_base_only_cli_is_disjoint_from_adapter_and_cpu(self):
+        for args in (["--base-only", "--adapter-path", "no-adapter"], ["--base-only", "--device", "cpu"]):
+            with patch.object(sys, "argv", ["evaluate_finetuned.py", *args]), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                evaluation.main()
+
+    def test_base_only_full_split_cli_persists_real_backend_contract(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            output = Path(directory) / "baseline-qwen"
+            golds = {row["id"]: row["output"] for row in self.rows}
+            argv = ["evaluate_finetuned.py", "--base-only", "--self-correct",
+                    "--output-dir", str(output), "--warmup", "0"]
+            with patch.object(sys, "argv", argv), patch.object(evaluation, "BaseInference") as backend, \
+                    patch.object(evaluation, "LoRAInference") as lora, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                backend.return_value.metadata = {"model": "mock-base-unit-test", "adapter_applied": False}
+                backend.return_value.predict.side_effect = (
+                    lambda row, *, messages: self.prediction(json.dumps(golds[row["id"]]))
+                )
+                evaluation.main()
+            backend.assert_called_once_with("cuda", True, 4096, 2048)
+            lora.assert_not_called()
+            self.assertEqual(backend.return_value.predict.call_count, 60)
+            report = json.loads((output / "metrics.json").read_text())
+            self.assertTrue(report["full_test"])
+            self.assertEqual(report["num_examples"], 60)
+            self.assertFalse(report["adapter_applied"])
+            self.assertTrue(report["generation"]["self_correction"])
+            self.assertEqual(report["test_sha256"], evaluation.file_hash(ROOT / "data/test.jsonl"))
+            self.assertEqual(len((output / "predictions.jsonl").read_text().splitlines()), 60)
 
     def test_lora_generation_slices_prompt_and_checks_budget(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:

@@ -1,4 +1,4 @@
-"""Evaluate LoRA or GGUF invoice extraction, with auditable per-invoice outputs."""
+"""Evaluate base, LoRA or GGUF invoice extraction with auditable outputs."""
 
 import argparse
 import hashlib
@@ -25,6 +25,7 @@ from schema import Invoice
 
 TEST_PATH = ROOT / "data" / "test.jsonl"
 LOCALE_CURRENCIES = {"fr-FR": "EUR", "en-GB": "GBP", "en-US": "USD"}
+BASE_MODEL = "unsloth/Qwen2.5-3B-Instruct"
 
 # Doit rester identique au prompt d'entraînement du notebook fine_tune_unsloth.ipynb.
 SYSTEM_PROMPT = "Tu es un extracteur de données. Réponds uniquement par un objet JSON valide."
@@ -81,31 +82,17 @@ def check_adapter(adapter_path: Path) -> dict:
     return config
 
 
-class LoRAInference:
-    def __init__(self, adapter_path: Path, device: str, load_in_4bit: bool,
-                 n_ctx: int, max_tokens: int):
-        config = check_adapter(adapter_path)
+class BaseInference:
+    def __init__(self, device: str, load_in_4bit: bool, n_ctx: int, max_tokens: int,
+                 *, model_name: str = BASE_MODEL, revision: str | None = None,
+                 tokenizer_path: str | None = None):
         if load_in_4bit and device != "cuda":
             raise ValueError("4-bit inference requires CUDA in this pipeline")
-        manifest_path = adapter_path.parent / "training_manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
-        trained_context = manifest.get("training_args", {}).get("max_length")
-        if trained_context and n_ctx > trained_context:
-            raise ValueError(f"Requested context {n_ctx} exceeds trained context {trained_context}")
         import torch
-        from peft import PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         if device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA is unavailable. Use a GPU runtime; CPU requires enough RAM for the base model.")
-        same_base = manifest.get("base_model") == config["base_model_name_or_path"]
-        if manifest.get("base_model") and not same_base:
-            logging.warning(
-                "Training model name %s differs from PEFT's saved base %s (Unsloth may resolve aliases). "
-                "Loading the PEFT-declared base; verify the training provenance.",
-                manifest["base_model"], config["base_model_name_or_path"],
-            )
-        revision = config.get("revision") or (manifest.get("base_model_revision") if same_base else None)
         dtype = torch.bfloat16 if device == "cuda" and torch.cuda.is_bf16_supported() else torch.float16 if device == "cuda" else torch.float32
         kwargs = {"device_map": {"": device}, "torch_dtype": dtype, "trust_remote_code": False}
         if revision:
@@ -115,22 +102,25 @@ class LoRAInference:
                 load_in_4bit=True, bnb_4bit_quant_type="nf4",
                 bnb_4bit_compute_dtype=dtype, bnb_4bit_use_double_quant=True,
             )
-        base = AutoModelForCausalLM.from_pretrained(config["base_model_name_or_path"], **kwargs)
-        self.model = PeftModel.from_pretrained(base, str(adapter_path), is_trainable=False)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+        if getattr(self.model, "peft_config", None):
+            raise ValueError("Base-model loading unexpectedly attached PEFT adapters")
         self.model.eval()
-        self.tokenizer = AutoTokenizer.from_pretrained(str(adapter_path), trust_remote_code=False)
+        tokenizer_kwargs = {"trust_remote_code": False}
+        if tokenizer_path is None and revision:
+            tokenizer_kwargs["revision"] = revision
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path or model_name, **tokenizer_kwargs)
         if not self.tokenizer.chat_template:
-            raise ValueError("The saved tokenizer has no training chat template")
+            raise ValueError("The tokenizer has no chat template")
         self.torch = torch
         self.device = device
         self.n_ctx = n_ctx
         self.max_tokens = max_tokens
         self.metadata = {
-            "model": "finetuned_lora", "adapter_path": str(adapter_path),
-            "adapter_config_sha256": file_hash(adapter_path / "adapter_config.json"),
-            "adapter_weights_sha256": file_hash(adapter_path / "adapter_model.safetensors"),
-            "base_model": config["base_model_name_or_path"], "base_model_revision": revision,
-            "training_manifest": manifest, "device": device, "load_in_4bit": load_in_4bit,
+            "model": "qwen_base", "adapter_applied": False,
+            "base_model": model_name, "base_model_revision": revision,
+            "resolved_base_revision": getattr(self.model.config, "_commit_hash", None),
+            "device": device, "load_in_4bit": load_in_4bit,
             "gpu": torch.cuda.get_device_name(0) if device == "cuda" else None,
         }
 
@@ -170,6 +160,41 @@ class LoRAInference:
             "completion_tokens": count, "prompt_tokens": prompt_tokens,
             "finish_reason": "stop" if stopped else "length" if count >= self.max_tokens else "other",
         }
+
+
+class LoRAInference(BaseInference):
+    def __init__(self, adapter_path: Path, device: str, load_in_4bit: bool,
+                 n_ctx: int, max_tokens: int):
+        config = check_adapter(adapter_path)
+        manifest_path = adapter_path.parent / "training_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+        trained_context = manifest.get("training_args", {}).get("max_length")
+        if trained_context and n_ctx > trained_context:
+            raise ValueError(f"Requested context {n_ctx} exceeds trained context {trained_context}")
+        same_base = manifest.get("base_model") == config["base_model_name_or_path"]
+        if manifest.get("base_model") and not same_base:
+            logging.warning(
+                "Training model name %s differs from PEFT's saved base %s (Unsloth may resolve aliases). "
+                "Loading the PEFT-declared base; verify the training provenance.",
+                manifest["base_model"], config["base_model_name_or_path"],
+            )
+        revision = config.get("revision") or (manifest.get("base_model_revision") if same_base else None)
+        super().__init__(
+            device, load_in_4bit, n_ctx, max_tokens,
+            model_name=config["base_model_name_or_path"], revision=revision,
+            tokenizer_path=str(adapter_path),
+        )
+        from peft import PeftModel
+
+        self.model = PeftModel.from_pretrained(self.model, str(adapter_path), is_trainable=False)
+        self.model.eval()
+        self.metadata.update({
+            "model": "finetuned_lora", "adapter_applied": True,
+            "adapter_path": str(adapter_path),
+            "adapter_config_sha256": file_hash(adapter_path / "adapter_config.json"),
+            "adapter_weights_sha256": file_hash(adapter_path / "adapter_model.safetensors"),
+            "training_manifest": manifest,
+        })
 
 
 def file_hash(path: Path) -> str:
@@ -219,6 +244,108 @@ def parse_object(text: str) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Expected a JSON object")
     return payload
+
+
+def validate_invoice_json(raw: str, *, arithmetic_warnings: list[str] | None = None) -> dict:
+    invoice = Invoice.model_validate(
+        parse_object(raw),
+        context={"validate_arithmetic": arithmetic_warnings is None},
+    )
+    payload = invoice.model_dump(mode="json")
+    json.dumps(payload, allow_nan=False)
+    if arithmetic_warnings is not None:
+        arithmetic_warnings.extend(invoice.arithmetic_warnings())
+    return payload
+
+
+def correction_messages(messages: list[dict], raw: str, error: Exception,
+                        warnings: list[str]) -> list[dict]:
+    arithmetic_focus = ""
+    if warnings:
+        arithmetic_focus = (
+            "Priorité de correction arithmétique : relis d'abord les champs quantity et "
+            "unit_price des lignes concernées dans le texte de la facture réelle. "
+            "Corrige en priorité les quantités et prix unitaires mal transcrits, uniquement "
+            "si les valeurs sources le confirment. Respecte exactement la virgule décimale : "
+            "7,2 devient 7.2 (jamais 142 ou 72) et 4,2 devient 4.2 (jamais 42). "
+            "Ne déduis pas ces champs par division des totaux. Vérifie ensuite les montants "
+            "de ligne et le total HT global en les relisant dans la facture ; ne les recalcule "
+            "pas pour masquer une erreur de quantité ou de prix.\n"
+            "Anomalies arithmétiques à examiner :\n"
+            + "\n".join(warnings)
+            + "\n\n"
+        )
+    return [
+        *messages,
+        {"role": "assistant", "content": raw},
+        {
+            "role": "user",
+            "content": (
+                f"Le JSON précédent est invalide pour la raison suivante :\n{error}\n\n"
+                f"{arithmetic_focus}"
+                "Corrige-le en respectant strictement les valeurs de la facture réelle "
+                "ci-dessus, en particulier les quantités décimales. Ne modifie pas les "
+                "montants pour simplement faire passer la validation et n'utilise pas "
+                "les valeurs de l'exemple fictif. Réponds uniquement par le JSON complet corrigé."
+            ),
+        },
+    ]
+
+
+def predict_with_correction(inference: BaseInference, row: dict) -> dict:
+    messages = build_messages(row)
+    initial = inference.predict(row, messages=messages)
+    attempts = [initial]
+    selected = initial
+    errors = []
+    operational_error = None
+    correction_attempted = False
+    if initial["finish_reason"] == "stop":
+        try:
+            validate_invoice_json(initial["raw"])
+        except (ValidationError, ValueError) as exc:
+            correction_attempted = True
+            logging.warning("%s: validation failed; attempting one correction: %s", row["id"], exc)
+            errors.append(str(exc))
+            warnings = []
+            try:
+                validate_invoice_json(initial["raw"], arithmetic_warnings=warnings)
+                initial_structure_valid = True
+            except (ValidationError, ValueError) as structure_error:
+                logging.debug("%s: no structurally valid fallback: %s", row["id"], structure_error)
+                initial_structure_valid = False
+            messages = correction_messages(messages, initial["raw"], exc, warnings)
+            try:
+                corrected = inference.predict(row, messages=messages)
+                attempts.append(corrected)
+                if corrected["finish_reason"] == "stop":
+                    validate_invoice_json(corrected["raw"], arithmetic_warnings=[])
+                    selected = corrected
+                else:
+                    operational_error = f"Correction incomplete: {corrected['finish_reason']}"
+                    logging.warning("%s: %s", row["id"], operational_error)
+                    if not initial_structure_valid:
+                        selected = corrected
+            except (OSError, ValueError, RuntimeError, ImportError) as correction_error:
+                logging.warning("%s: correction failed: %s", row["id"], correction_error)
+                errors.append(str(correction_error))
+                if len(attempts) == 1:
+                    operational_error = str(correction_error)
+                elif not initial_structure_valid:
+                    selected = attempts[-1]
+    warnings = []
+    try:
+        validate_invoice_json(selected["raw"], arithmetic_warnings=warnings)
+    except (ValidationError, ValueError) as final_error:
+        errors.append(str(final_error))
+    return {
+        **selected, "attempts": attempts, "attempt_count": 2 if correction_attempted else 1,
+        "correction_attempted": correction_attempted,
+        "validation_errors": errors, "arithmetic_warnings": warnings,
+        "operational_error": operational_error,
+        "completion_tokens": sum(attempt["completion_tokens"] for attempt in attempts),
+        "prompt_tokens": sum(attempt["prompt_tokens"] for attempt in attempts),
+    }
 
 
 def extract_json(raw: str) -> dict | None:
@@ -303,6 +430,15 @@ def build_report(results: list[dict], model_file: str) -> dict:
             "exact_match_rate": metric_rate([r["exact"] for r in subset]),
             "recovered_exact_match_rate": metric_rate([r["recovered_exact"] for r in subset]),
             "truncation_rate": metric_rate([r["finish_reason"] == "length" for r in subset]),
+            "truncated_attempt_rate": metric_rate([
+                any(attempt["finish_reason"] == "length" for attempt in r.get("attempts", [r]))
+                for r in subset
+            ]),
+            "correction_rate": metric_rate([r.get("correction_attempted", False) for r in subset]),
+            "initial_json_validity_rate": metric_rate([
+                r.get("initial_score", r)["strict_json"] for r in subset
+            ]),
+            "initial_exact_match_rate": metric_rate([r.get("initial_score", r)["exact"] for r in subset]),
         }
 
     groups = {}
@@ -368,6 +504,8 @@ def evaluate_rows(rows: list[dict], predict: Callable[[dict], dict],
             **prediction, "latency_ms": latency_ms,
             **score(prediction["raw"], row["output"]),
         })
+        if prediction.get("attempts"):
+            results[-1]["initial_score"] = score(prediction["attempts"][0]["raw"], row["output"])
     return results
 
 
@@ -376,6 +514,7 @@ def main() -> None:
     models = parser.add_mutually_exclusive_group()
     models.add_argument("--model-path", type=Path, help="GGUF model file (legacy backend)")
     models.add_argument("--adapter-path", type=Path, help="Extracted results/<RUN_NAME>/lora_adapter directory")
+    models.add_argument("--base-only", action="store_true", help="Raw Qwen baseline, always CUDA NF4, no adapter")
     parser.add_argument("--test-path", type=Path, default=TEST_PATH)
     parser.add_argument("--output-dir", type=Path, help="New directory for metrics and per-invoice predictions")
     parser.add_argument("--check-data-only", action="store_true", help="Validate inputs/artifacts without loading a model")
@@ -384,6 +523,7 @@ def main() -> None:
     parser.add_argument("--n-ctx", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--self-correct", action="store_true", help="One correction using the demo's shared validation/prompt (Transformers only)")
     parser.add_argument("--limit", type=int, help="Smoke test on the first N examples, not a full evaluation")
     args = parser.parse_args()
 
@@ -391,8 +531,12 @@ def main() -> None:
         parser.error("Require n_ctx > max_new_tokens > 0 and warmup >= 0")
     if args.limit is not None and not 1 <= args.limit <= 60:
         parser.error("--limit must be between 1 and 60")
-    if not args.check_data_only and not (args.adapter_path or args.model_path):
-        parser.error("--adapter-path or --model-path required for inference")
+    if not args.check_data_only and not (args.adapter_path or args.model_path or args.base_only):
+        parser.error("--adapter-path, --base-only or --model-path required for inference")
+    if args.base_only and args.device != "cuda":
+        parser.error("--base-only requires CUDA for the requested 4-bit baseline")
+    if args.self_correct and args.model_path:
+        parser.error("--self-correct is supported only for Transformers base/LoRA models")
     rows = load_test_rows(args.test_path)
     provenance_checked = []
     if args.adapter_path:
@@ -423,11 +567,18 @@ def main() -> None:
         predict, synchronize = inference.predict, inference.synchronize
         metadata = inference.metadata
         model_file = str(args.adapter_path)
+    elif args.base_only:
+        inference = BaseInference(args.device, True, args.n_ctx, args.max_new_tokens)
+        predict, synchronize = inference.predict, inference.synchronize
+        metadata = inference.metadata
+        model_file = BASE_MODEL
     else:
         llm = load_model(args.model_path, args.n_ctx)
         predict = lambda row: generate(llm, row, args.max_new_tokens)
         metadata = {"model": "finetuned_gguf", "model_sha256": file_hash(args.model_path)}
         model_file = str(args.model_path)
+    if args.self_correct:
+        predict = lambda row: predict_with_correction(inference, row)
     if args.limit:
         rows = rows[:args.limit]
     for _ in range(args.warmup):
@@ -439,7 +590,8 @@ def main() -> None:
         "test_sha256": file_hash(args.test_path), "full_test": len(rows) == 60,
         "training_hashes_verified": provenance_checked,
         "generation": {"n_ctx": args.n_ctx, "max_new_tokens": args.max_new_tokens,
-                       "do_sample": False, "warmup_requests_excluded": args.warmup},
+                       "do_sample": False, "warmup_requests_excluded": args.warmup,
+                       "self_correction": args.self_correct, "max_correction_attempts": 1 if args.self_correct else 0},
         "timing": "Synchronized request latency including tokenization, generation and decoding; excludes model loading and warmup.",
         "tolerance": TOLERANCE,
     }

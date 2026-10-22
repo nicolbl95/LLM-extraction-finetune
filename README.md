@@ -78,7 +78,7 @@ Lecture littérale des chiffres : [détails du prompt système](docs/DESIGN.md).
 | Système | JSON valide | Exact Match | Source |
 | --- | ---: | ---: | --- |
 | Baseline Regex (rapport historique) | 46,67 % | 43,33 % | [src/evaluate_baseline.py](src/evaluate_baseline.py) |
-| Qwen2.5-3B-Instruct brut (sans fine-tuning) | à mesurer | à mesurer | — |
+| Qwen2.5-3B-Instruct brut (sans fine-tuning) | à mesurer | à mesurer | [mode `--base-only`](src/evaluate_finetuned.py) |
 | Qwen2.5-3B + QLoRA (v3) | 100 % (déclaré) | 95 % (déclaré) | [results/evaluation-3/finetuned_metrics.json](results/evaluation-3/finetuned_metrics.json) |
 
 Valeurs Regex reprises du [rapport existant](results/baseline_metrics.json).
@@ -88,8 +88,10 @@ effectif évalué, ni hash du test, ni latence, ni détail par segment :
 les deux taux sont repris tels que déclarés, sans extrapolation.
 
 Baseline à produire : évaluer le modèle de base avec le même prompt et le
-même test set (60 exemples), sans adaptateur. Ce mode n'est pas proposé
-actuellement par le CLI LoRA ; ne pas assimiler la baseline Regex à Qwen brut.
+même test set (60 exemples), sans adaptateur. Le mode `--base-only` charge
+`unsloth/Qwen2.5-3B-Instruct` en NF4 sur CUDA, sans charger ni fusionner de LoRA.
+Le lancement local est bloqué par l'absence de PyTorch et de GPU NVIDIA :
+aucun score mesuré n'est disponible ; la baseline Regex reste distincte.
 
 L'évaluateur distingue JSON strict, validité du schéma et exactitude métier ;
 les articles sont comparés dans leur ordre. Sa tolérance numérique de
@@ -137,12 +139,22 @@ python src/evaluate_finetuned.py --check-data-only
 
 ADAPTER="results/<run>/lora_adapter"  # chemin vers les adaptateurs téléchargés
 python src/evaluate_finetuned.py --adapter-path "$ADAPTER" --load-in-4bit --output-dir results/evaluation-3/nouveau-run
+
+# Baseline brute : mêmes instructions et scoring, une correction maximum.
+python src/evaluate_finetuned.py --base-only --self-correct --output-dir results/baseline-qwen-v3
 ```
 
 Remplacer `<run>` par le dossier téléchargé et `nouveau-run` par un nom inédit.
 Le dossier existant `results/evaluation-3` conserve le rapport fourni ; chaque
 évaluation écrit `metrics.json` et `predictions.jsonl` dans un nouveau
 sous-dossier, sans écraser les scores déclarés.
+La baseline écrit ses propres `metrics.json` et `predictions.jsonl`, sans
+remplacer le rapport Regex. `--self-correct` réutilise la validation et le
+prompt correctif de la démo, sans son prompt système enrichi ni son few-shot.
+Les deux réponses et les scores avant/après correction sont tracés ; une
+incohérence arithmétique persistante reste un échec de validation du benchmark.
+Pour une comparaison contrôlée, appliquer aussi `--self-correct` au run LoRA,
+ou l'omettre des deux runs ; le rapport v3 synthétique ne précise pas ce réglage.
 
 ### Organisation du projet
 

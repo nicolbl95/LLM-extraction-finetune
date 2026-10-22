@@ -12,6 +12,35 @@ par division des totaux. Un exemple few-shot fictif complet illustre le calcul
 Les valeurs de cet exemple ne doivent pas être recopiées dans la facture réelle.
 Le prompt d'évaluation, identique à celui de l'entraînement, reste inchangé.
 
+## Évaluation du modèle brut et correction
+
+Le mode `--base-only` de `src/evaluate_finetuned.py` charge uniquement
+`unsloth/Qwen2.5-3B-Instruct` avec une quantification NF4 sur CUDA. Il n'importe
+pas PEFT pour ce chargement et rejette un modèle auquel des adaptateurs
+auraient été attachés automatiquement. Le tokenizer provient du modèle de
+base ; le modèle LoRA garde son tokenizer sauvegardé. Le contexte, le
+décodage sans échantillonnage et le scoring sont communs aux deux modes.
+
+`--self-correct` est facultatif pour préserver les évaluations à une passe.
+Il utilise les mêmes fonctions de validation et de construction du message
+correctif que l'application, mais conserve le prompt système d'entraînement,
+sans le few-shot de l'interface. Une seule correction est autorisée après un
+échec JSON/Pydantic ; aucun résultat cible n'est transmis au modèle.
+
+Le rapport conserve les réponses brutes de chaque passe, les erreurs et
+avertissements, les compteurs de tokens cumulés, ainsi que
+`initial_json_validity_rate`, `initial_exact_match_rate` et `correction_rate`.
+Le timing comprend la correction lorsqu'elle est activée. Une seconde passe
+tronquée ou en erreur est signalée explicitement ; le premier JSON
+structurellement valide est conservé s'il existe. Les écarts arithmétiques
+restent des échecs de schéma dans les métriques, même si l'interface permet
+leur affichage avec avertissement. `truncation_rate` décrit la réponse retenue,
+`truncated_attempt_rate` signale aussi les troncatures des tentatives écartées.
+
+Les résultats mesurés ne sont écrits qu'après évaluation des entrées demandées.
+Un lancement bloqué avant génération ne produit pas de métriques et ne doit
+pas être remplacé par les résultats des modèles simulés des tests logiciels.
+
 ## Organisation détaillée des artefacts
 
 Inventaire de conception déplacé depuis le README ; les poids et archives
