@@ -148,6 +148,39 @@ class AppTests(unittest.TestCase):
                 self.assertGreater(len(text), 100)
                 self.assertTrue("invoice" in text.lower() or "facture" in text.lower())
 
+    def test_uk_example_quota_fallback_reports_number_and_multirate_controls(self):
+        if not shutil.which("tesseract"):
+            self.skipTest("Tesseract is not installed")
+        text = main.document_text(str(main.EXAMPLES[1][1]))
+        diagnostics = {}
+        with patch.object(
+            main, "predict_invoice",
+            side_effect=main.gr.Error("ZeroGPU quota exceeded; try again in 36 min"),
+        ):
+            payload = main.extract_invoice(text, diagnostics=diagnostics)
+        reference = next(
+            row["output"] for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+            if row["id"] == "invoice-0110"
+        )
+        self.assertEqual(payload, reference)
+        report = diagnostics["report"]
+        self.assertIn("GB-2025-00110", report)
+        self.assertIn("Ligne 1", report)
+        self.assertIn("Sous-total", report)
+        self.assertIn("TVA 0 %", report)
+        self.assertIn("TVA 20 %", report)
+        self.assertIn("HT + taxes lues", report)
+        self.assertIn("Échéance", report)
+        self.assertIn("Devise lue : GBP", report)
+        self.assertEqual(report.count("Devise"), 1)
+        self.assertIn("Nouvel essai possible dans 36 min.", report)
+        self.assertTrue(report.startswith("**✅ Facture cohérente"))
+        for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
+            self.assertNotIn(forbidden, report)
+        self.assertTrue(payload["line_items"])
+        self.assertEqual(diagnostics["model_info"]["passes_requested"], 1)
+        self.assertEqual(diagnostics["model_info"]["passes_succeeded"], 0)
+
     def test_validated_result_uses_model_not_dataset(self):
         model = MagicMock()
         model.predict.return_value = {"raw": json.dumps(self.gold), "finish_reason": "stop"}
