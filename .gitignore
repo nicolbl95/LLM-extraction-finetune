@@ -20,6 +20,26 @@ data/templates/
 # Cache Python genere localement
 __pycache__/
 *.pyc
+
+# Environnements virtuels et caches de tests locaux
+.venv/
+.venv*/
+venv/
+.pytest_cache/
+
+# Logs, caches OCR et paquets de revue generes pendant les validations
+results/*.log
+results/ocr-experiment-cache/
+results/report-previews/
+results/review-themes/
+results/*.patch
+
+# JSON bruts d'execution/diagnostic susceptibles de contenir le texte OCR
+results/*diagnostic*.json
+results/*stress*.json
+results/*latency*.json
+results/*threshold*.json
+results/ocr-*.json
 data/templates/5.png
 data/templates/
 data/templates/

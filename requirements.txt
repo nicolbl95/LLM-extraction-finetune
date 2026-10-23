@@ -6,8 +6,10 @@ huggingface_hub
 reportlab>=4.4
 PyMuPDF>=1.26
 spaces
-Pillow<11.0
+Pillow>=11.0,<13.0
 pytesseract>=0.3.13,<0.4
+opencv-python-headless>=4.10,<5
+numpy>=2,<3
 torch>=2.5
 transformers>=4.49,<6
 peft>=0.14
