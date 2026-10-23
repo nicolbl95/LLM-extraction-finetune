@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "data"))
 
 from schema import Invoice, safe_invoice_payload
+from invoice_evidence import from_text
+from invoice_grounding import run_grounded_inference
 
 TEST_PATH = ROOT / "data" / "test.jsonl"
 LOCALE_CURRENCIES = {"fr-FR": "EUR", "en-GB": "GBP", "en-US": "USD"}
@@ -149,6 +151,10 @@ class BaseInference:
             self.torch.cuda.synchronize()
 
     def predict(self, row: dict, *, messages: list[dict] | None = None) -> dict:
+        generation_tokens = row.get("max_new_tokens", self.max_tokens)
+        if not isinstance(generation_tokens, int) or isinstance(generation_tokens, bool) or generation_tokens <= 0:
+            raise ValueError("max_new_tokens must be a positive integer")
+        generation_tokens = min(generation_tokens, self.max_tokens)
         inputs = self.tokenizer.apply_chat_template(
             build_messages(row) if messages is None else messages,
             tokenize=True, add_generation_prompt=True,
@@ -157,14 +163,14 @@ class BaseInference:
         prompt_tokens = inputs["input_ids"].shape[1]
         model_context = getattr(self.model.config, "max_position_embeddings", self.n_ctx)
         context = min(self.n_ctx, model_context)
-        if prompt_tokens + self.max_tokens > context:
+        if prompt_tokens + generation_tokens > context:
             raise ValueError(
                 f"{row.get('id', 'invoice')}: prompt ({prompt_tokens}) + generation budget "
-                f"({self.max_tokens}) exceeds context ({context}); adjust explicit limits, no truncation applied"
+                f"({generation_tokens}) exceeds context ({context}); adjust explicit limits, no truncation applied"
             )
         with self.torch.inference_mode():
             output = self.model.generate(
-                **inputs, max_new_tokens=self.max_tokens, do_sample=False, use_cache=True,
+                **inputs, max_new_tokens=generation_tokens, do_sample=False, temperature=0.0, use_cache=True,
                 pad_token_id=(self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None
                               else self.tokenizer.eos_token_id),
             )
@@ -178,7 +184,7 @@ class BaseInference:
         return {
             "raw": self.tokenizer.decode(generated, skip_special_tokens=True),
             "completion_tokens": count, "prompt_tokens": prompt_tokens,
-            "finish_reason": "stop" if stopped else "length" if count >= self.max_tokens else "other",
+            "finish_reason": "stop" if stopped else "length" if count >= generation_tokens else "other",
         }
 
 
@@ -284,7 +290,7 @@ def finalize_invoice_json(raw: str, *, warnings: list[str],
     if initial_error is not None:
         try:
             Invoice.model_validate(source)
-            state = "corrigée lors de la seconde passe"
+            state = "récupérée lors de la seconde passe"
         except ValidationError:
             state = "détectée, non résolue ou non vérifiable après la seconde passe"
         warnings.append(f"Passe 1 — anomalie {state} :\n{initial_error}")
@@ -341,79 +347,11 @@ def correction_messages(messages: list[dict], raw: str, error: Exception,
 
 
 def predict_with_correction(inference: BaseInference, row: dict) -> dict:
-    messages = build_messages(row)
-    initial = inference.predict(row, messages=messages)
-    attempts = [initial]
-    selected = initial
-    errors = []
-    operational_error = None
-    correction_attempted = False
-    initial_error = None
-    if initial["finish_reason"] == "stop":
-        try:
-            validate_invoice_json(initial["raw"])
-        except (ValidationError, ValueError) as exc:
-            initial_error = str(exc)
-            correction_attempted = True
-            logging.warning("%s: validation failed; attempting one correction: %s", row["id"], exc)
-            errors.append(str(exc))
-            warnings = []
-            try:
-                validate_invoice_json(initial["raw"], arithmetic_warnings=warnings)
-                initial_object_valid = True
-            except (ValidationError, ValueError) as structure_error:
-                logging.debug("%s: no structurally valid fallback: %s", row["id"], structure_error)
-                try:
-                    parse_object(initial["raw"])
-                    initial_object_valid = True
-                except ValueError:
-                    initial_object_valid = False
-            initial_error = "\n".join([initial_error, *warnings])
-            messages = correction_messages(messages, initial["raw"], exc, warnings)
-            try:
-                corrected = inference.predict(row, messages=messages)
-                attempts.append(corrected)
-                if corrected["finish_reason"] == "stop":
-                    parse_object(corrected["raw"])
-                    selected = corrected
-                else:
-                    operational_error = f"Correction incomplete: {corrected['finish_reason']}"
-                    logging.warning("%s: %s", row["id"], operational_error)
-                    if not initial_object_valid:
-                        selected = corrected
-            except (OSError, ValueError, RuntimeError, ImportError) as correction_error:
-                logging.warning("%s: correction failed: %s", row["id"], correction_error)
-                errors.append(str(correction_error))
-                operational_error = str(correction_error)
-                if len(attempts) > 1 and not initial_object_valid:
-                    selected = attempts[-1]
-    warnings = []
-    result_warnings = []
-    payload = None
-    try:
-        validate_invoice_json(selected["raw"], arithmetic_warnings=warnings)
-    except (ValidationError, ValueError) as final_error:
-        errors.append(str(final_error))
-    if selected["finish_reason"] == "stop":
-        try:
-            payload = finalize_invoice_json(
-                selected["raw"], warnings=result_warnings, initial_error=initial_error,
-            )
-        except ValueError as final_error:
-            if initial_error:
-                result_warnings.append(f"Passe 1 — anomalie non résolue :\n{initial_error}")
-            result_warnings.append(f"JSON inutilisable : {final_error}")
-    if operational_error:
-        result_warnings.append(f"Auto-correction impossible : {operational_error}")
-    return {
-        **selected, "attempts": attempts, "attempt_count": 2 if correction_attempted else 1,
-        "correction_attempted": correction_attempted,
-        "validation_errors": errors, "arithmetic_warnings": warnings,
-        "payload": payload, "warnings": result_warnings,
-        "operational_error": operational_error,
-        "completion_tokens": sum(attempt["completion_tokens"] for attempt in attempts),
-        "prompt_tokens": sum(attempt["prompt_tokens"] for attempt in attempts),
-    }
+    evidence = from_text(row["input"])
+    return run_grounded_inference(
+        evidence, row, build_messages(row),
+        lambda row, messages: inference.predict(row, messages=messages),
+    )
 
 
 def extract_json(raw: str) -> dict | None:
@@ -647,6 +585,12 @@ def main() -> None:
         model_file = str(args.model_path)
     if args.self_correct:
         predict = lambda row: predict_with_correction(inference, row)
+    else:
+        predict_once = predict
+        predict = lambda row: run_grounded_inference(
+            from_text(row["input"]), row, build_messages(row),
+            lambda row, messages: predict_once(row), allow_correction=False,
+        )
     if args.limit:
         rows = rows[:args.limit]
     for _ in range(args.warmup):

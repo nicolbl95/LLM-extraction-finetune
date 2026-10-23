@@ -1,0 +1,36 @@
+[
+  {
+    "id": "invoice-0435",
+    "invoice": "US-2023-00435",
+    "provenance": "Synthetic reconstruction of user-reported capture values, not a locally recorded model generation",
+    "mutations": {
+      "line_items.0.unit_price": 29.68,
+      "line_items.0.total_ht": 445.2,
+      "line_items.2.quantity": 54,
+      "line_items.2.unit_price": 77.68,
+      "line_items.2.total_ht": 4210.32,
+      "line_items.4.quantity": 2,
+      "line_items.4.total_ht": 66.64
+    }
+  },
+  {
+    "id": "invoice-0110",
+    "invoice": "GB-2025-00110",
+    "provenance": "Synthetic replay of the errors specified in the issue, not captured model output",
+    "mutations": {
+      "supplier_name": "Oak Studio LId",
+      "line_items.0.quantity": "5,91217",
+      "line_items.0.unit_price": 75.797
+    }
+  },
+  {
+    "id": "invoice-0406",
+    "invoice": "FR-2025-00406",
+    "provenance": "Synthetic replay of the errors specified in the issue, not captured model output",
+    "mutations": {
+      "line_items.0.description": "Clavier sans il",
+      "line_items.1.quantity": 142,
+      "line_items.3.description": "Édition de logo"
+    }
+  }
+]

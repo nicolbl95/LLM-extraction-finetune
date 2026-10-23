@@ -229,6 +229,19 @@ class EvaluationTests(unittest.TestCase):
         return {"raw": raw, "finish_reason": finish_reason,
                 "completion_tokens": 10, "prompt_tokens": 20}
 
+    def evidence_text(self, payload=None, *, missing_quantity=False):
+        payload = payload or self.gold
+        rows = "\n".join(
+            f"{item['description']} | {'' if missing_quantity and index == 0 else item['quantity']} | "
+            f"{item['unit_price']} | {item['total_ht']}"
+            for index, item in enumerate(payload["line_items"])
+        )
+        return (
+            f"Supplier: {payload['supplier_name']}\nInvoice date: {payload['invoice_date']}\nCurrency: GBP\n"
+            "Description | Quantity | Net unit price | Net amount\n" + rows
+            + f"\nSubtotal: {payload['total_ht']}\nInvoice total: {payload['total_ttc']}"
+        )
+
     def test_final_result_nulls_inconsistent_line_and_dependent_invoice_total(self):
         payload = copy.deepcopy(self.gold)
         payload["line_items"][0]["quantity"] += 100
@@ -318,45 +331,40 @@ class EvaluationTests(unittest.TestCase):
             self.prediction(json.dumps(invalid)), self.prediction(json.dumps(self.gold)),
         ]
         with self.assertLogs(level="WARNING"):
-            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": self.evidence_text()})
         self.assertEqual(result["payload"], self.gold)
         history = "\n".join(result["warnings"])
-        self.assertIn("corrigée lors de la seconde passe", history)
-        self.assertIn("Incohérence sur la ligne", history)
-        self.assertIn("somme des total_ht", history)
-        self.assertEqual(backend.predict.call_count, 2)
+        self.assertIn("récupéré (corroboré par OCR)", history)
+        self.assertIn("Ligne 1", history)
+        self.assertIn("Écart global initial", history)
+        self.assertEqual(backend.predict.call_count, 1)
 
     def test_correction_uses_original_prompt_error_and_no_gold(self):
         backend = MagicMock()
         initial = self.prediction('{"supplier_name":')
         corrected = self.prediction(json.dumps(self.gold))
         backend.predict.side_effect = [initial, corrected]
-        row = {"id": "unit-test", "input": "Original invoice"}
+        row = {"id": "unit-test", "input": self.evidence_text()}
         with self.assertLogs(level="WARNING"):
             result = evaluation.predict_with_correction(backend, row)
-        self.assertEqual(backend.predict.call_count, 2)
+        self.assertEqual(backend.predict.call_count, 1)
         initial_messages = backend.predict.call_args_list[0].kwargs["messages"]
-        corrected_messages = backend.predict.call_args_list[1].kwargs["messages"]
         self.assertEqual(initial_messages, evaluation.build_messages(row))
-        self.assertEqual(corrected_messages[:-2], initial_messages)
-        self.assertEqual(corrected_messages[-2]["content"], initial["raw"])
-        self.assertTrue(corrected_messages[-1]["content"].startswith(
-            "La précédente extraction a échoué à la validation du schéma Pydantic "
-            "pour les raisons suivantes :\n"
-        ))
-        self.assertEqual(result["raw"], corrected["raw"])
-        self.assertEqual(result["attempt_count"], 2)
-        self.assertEqual(result["completion_tokens"], 20)
-        self.assertEqual(result["prompt_tokens"], 40)
-        self.assertEqual(result["attempts"], [initial, corrected])
-        self.assertFalse(result["arithmetic_warnings"])
+        self.assertEqual(result["raw"], initial["raw"])
+        self.assertEqual(result["payload"], self.gold)
+        self.assertEqual(result["attempt_count"], 1)
+        self.assertEqual(result["completion_tokens"], 10)
+        self.assertEqual(result["prompt_tokens"], 20)
+        self.assertEqual(result["attempts"], [initial])
+        self.assertTrue(result["operational_error"])
         with self.assertLogs(level="WARNING"):
             backend.predict.side_effect = [initial, corrected]
             rows = evaluation.evaluate_rows(self.rows[:1], lambda row: evaluation.predict_with_correction(backend, row))
         report = evaluation.build_report(rows, "unit-test-only")
         self.assertEqual(report["initial_json_validity_rate"], 0)
-        self.assertEqual(report["json_validity_rate"], 1)
-        self.assertEqual(report["correction_rate"], 1)
+        self.assertEqual(report["json_validity_rate"], 0)
+        self.assertEqual(report["correction_rate"], 0)
+        self.assertEqual(rows[0]["payload"], self.gold)
 
     def test_correction_arithmetic_warnings_remain_failures_for_scoring(self):
         invalid = copy.deepcopy(self.gold)
@@ -365,17 +373,16 @@ class EvaluationTests(unittest.TestCase):
         backend = MagicMock()
         backend.predict.side_effect = [self.prediction(raw), self.prediction(raw)]
         with self.assertLogs(level="WARNING"):
-            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+            result = evaluation.predict_with_correction(backend, {
+                "id": "test", "input": self.evidence_text(missing_quantity=True),
+            })
         self.assertEqual(backend.predict.call_count, 2)
         self.assertTrue(result["arithmetic_warnings"])
-        self.assertIsNone(result["payload"]["total_ht"])
+        self.assertEqual(result["payload"]["total_ht"], self.gold["total_ht"])
         self.assertIsNone(result["payload"]["line_items"][0]["quantity"])
         self.assertTrue(any("line_items.0.quantity" in warning for warning in result["warnings"]))
         self.assertFalse(evaluation.score(result["raw"], invalid)["valid"])
-        self.assertIn(
-            "Priorité de correction arithmétique",
-            backend.predict.call_args.kwargs["messages"][-1]["content"],
-        )
+        self.assertTrue(result["correction_attempted"])
 
     def test_hallucinated_quantity_retries_with_operands_line_and_invoice_totals(self):
         corrected = {
@@ -398,30 +405,13 @@ class EvaluationTests(unittest.TestCase):
         ]
         with self.assertLogs(level="WARNING"):
             result = evaluation.predict_with_correction(
-                backend, {"id": "test", "input": "Maintenance préventive | 7,2 | 95,07 | 684,50"},
+                backend, {"id": "test", "input": self.evidence_text(corrected)},
             )
-        self.assertEqual(backend.predict.call_count, 2)
-        prompt = backend.predict.call_args.kwargs["messages"][-1]["content"]
-        self.assertTrue(prompt.startswith(
-            "La précédente extraction a échoué à la validation du schéma Pydantic "
-            f"pour les raisons suivantes :\n{validation.exception}\n\n"
-        ))
-        self.assertTrue(prompt.endswith(
-            "Relis attentivement la facture fournie (en faisant particulièrement attention "
-            "aux décimales des prix unitaires, aux quantités et aux totaux de lignes), "
-            "corrige l'erreur de calcul ou d'extraction, et renvoie un JSON rigoureusement valide."
-        ))
-        self.assertIn("Erreur arithmétique détectée", prompt)
-        self.assertIn("Incohérence sur la ligne 'Maintenance préventive'", prompt)
-        self.assertIn("quantity (142.0) * unit_price (95.07) = 13499.94", prompt)
-        self.assertIn("Écart absolu : 12815.44", prompt)
-        self.assertIn("684.5", prompt)
-        self.assertIn("5716.77", prompt)
-        self.assertIn("ré-extrais la ligne exacte", prompt)
-        self.assertTrue(evaluation.score(result["raw"], corrected)["exact"])
-        self.assertEqual(result["arithmetic_warnings"], [])
+        self.assertEqual(backend.predict.call_count, 1)
+        self.assertFalse(evaluation.score(result["raw"], corrected)["exact"])
+        self.assertTrue(result["arithmetic_warnings"])
         self.assertEqual(result["payload"], corrected)
-        self.assertTrue(any("corrigée lors de la seconde passe" in warning for warning in result["warnings"]))
+        self.assertTrue(any("récupéré (corroboré par OCR)" in warning for warning in result["warnings"]))
 
     def test_invoice_sum_mismatch_automatically_triggers_correction(self):
         invalid = {**self.gold, "total_ht": self.gold["total_ht"] - 10}
@@ -430,12 +420,11 @@ class EvaluationTests(unittest.TestCase):
             self.prediction(json.dumps(invalid)), self.prediction(json.dumps(self.gold)),
         ]
         with self.assertLogs(level="WARNING"):
-            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
-        self.assertEqual(backend.predict.call_count, 2)
-        prompt = backend.predict.call_args.kwargs["messages"][-1]["content"]
-        self.assertIn("somme des total_ht", prompt)
-        self.assertIn("total_ht global", prompt)
-        self.assertTrue(evaluation.score(result["raw"], self.gold)["exact"])
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": self.evidence_text()})
+        self.assertEqual(backend.predict.call_count, 1)
+        self.assertIn("Écart global initial", "\n".join(result["warnings"]))
+        self.assertEqual(result["payload"], self.gold)
+        self.assertFalse(evaluation.score(result["raw"], self.gold)["exact"])
 
     def test_corrective_prompt_preserves_all_pydantic_line_errors(self):
         invalid = copy.deepcopy(self.gold)
@@ -444,14 +433,8 @@ class EvaluationTests(unittest.TestCase):
         invalid["line_items"] = [item, {**item, "description": "Second article"}]
         with self.assertRaises(evaluation.ValidationError) as validation:
             evaluation.Invoice.model_validate(invalid)
-        backend = MagicMock()
-        backend.predict.side_effect = [
-            self.prediction(json.dumps(invalid)), self.prediction(json.dumps(self.gold)),
-        ]
-        with self.assertLogs(level="WARNING"):
-            evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
-        prompt = backend.predict.call_args.kwargs["messages"][-1]["content"]
-        self.assertEqual(backend.predict.call_count, 2)
+        messages = evaluation.correction_messages([], json.dumps(invalid), validation.exception, [])
+        prompt = messages[-1]["content"]
         self.assertIn(str(validation.exception), prompt)
         self.assertIn("line_items.0", prompt)
         self.assertIn("line_items.1", prompt)
@@ -465,7 +448,9 @@ class EvaluationTests(unittest.TestCase):
             backend = MagicMock()
             backend.predict.side_effect = [self.prediction(raw), second]
             with self.subTest(second=second), self.assertLogs(level="WARNING"):
-                result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+                result = evaluation.predict_with_correction(backend, {
+                    "id": "test", "input": self.evidence_text(missing_quantity=True),
+                })
             self.assertEqual(result["raw"], raw)
             self.assertEqual(result["attempt_count"], 2)
             self.assertTrue(result["validation_errors"] or result["operational_error"])
@@ -486,12 +471,12 @@ class EvaluationTests(unittest.TestCase):
         backend.predict.side_effect = [self.prediction("broken first"), self.prediction("broken second")]
         with self.assertLogs(level="WARNING"):
             result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
-        self.assertEqual(backend.predict.call_count, 2)
-        self.assertEqual(result["raw"], "broken second")
+        self.assertEqual(backend.predict.call_count, 1)
+        self.assertEqual(result["raw"], "broken first")
         self.assertFalse(evaluation.score(result["raw"], self.gold)["exact"])
         self.assertTrue(result["validation_errors"])
-        self.assertIsNone(result["payload"])
-        self.assertTrue(any("JSON inutilisable" in warning for warning in result["warnings"]))
+        self.assertIsNone(result["payload"]["total_ht"])
+        self.assertTrue(result["operational_error"])
 
     def test_failed_correction_recovers_valid_fields_of_an_initial_partial_object(self):
         invalid = {key: value for key, value in self.gold.items() if key != "supplier_name"}
@@ -499,15 +484,17 @@ class EvaluationTests(unittest.TestCase):
         backend = MagicMock()
         backend.predict.side_effect = [self.prediction(raw), self.prediction("broken JSON")]
         with self.assertLogs(level="WARNING"):
-            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+            result = evaluation.predict_with_correction(backend, {
+                "id": "test", "input": self.evidence_text().replace(f"Supplier: {self.gold['supplier_name']}", ""),
+            })
         self.assertEqual(result["raw"], raw)
         self.assertIsNone(result["payload"]["supplier_name"])
         self.assertEqual(result["payload"]["line_items"], self.gold["line_items"])
         self.assertEqual(result["payload"]["total_ht"], self.gold["total_ht"])
         self.assertTrue(any("supplier_name" in warning for warning in result["warnings"]))
-        self.assertTrue(any("Auto-correction impossible" in warning for warning in result["warnings"]))
+        self.assertFalse(result["correction_attempted"])
         self.assertFalse(evaluation.score(raw, self.gold)["valid"])
-        self.assertEqual(backend.predict.call_count, 2)
+        self.assertEqual(backend.predict.call_count, 1)
 
     def test_no_correction_after_valid_output_or_truncation(self):
         for initial in (self.prediction(json.dumps(self.gold)), self.prediction("cut", "length")):
@@ -549,7 +536,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(report["test_sha256"], evaluation.file_hash(ROOT / "data/test.jsonl"))
             self.assertEqual(len((output / "predictions.jsonl").read_text().splitlines()), 60)
 
-    def test_cli_persists_safe_payload_and_raw_failures_without_inflating_metrics(self):
+    def test_cli_persists_grounded_payload_and_raw_failures_without_inflating_metrics(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             output = Path(directory) / "partial-results"
             invalid = copy.deepcopy(self.gold)
@@ -567,9 +554,8 @@ class EvaluationTests(unittest.TestCase):
             record = json.loads((output / "predictions.jsonl").read_text())
             report = json.loads((output / "metrics.json").read_text())
             self.assertEqual(record["raw"], raw)
-            self.assertEqual([attempt["raw"] for attempt in record["attempts"]], [raw, raw])
-            self.assertIsNone(record["payload"]["total_ht"])
-            self.assertIsNone(record["payload"]["line_items"][0]["quantity"])
+            self.assertEqual([attempt["raw"] for attempt in record["attempts"]], [raw])
+            self.assertEqual(record["payload"], self.gold)
             self.assertTrue(record["warnings"])
             self.assertFalse(record["valid"])
             self.assertEqual(report["json_validity_rate"], 1)
@@ -597,6 +583,7 @@ class EvaluationTests(unittest.TestCase):
             inference.tokenizer.decode.assert_called_once_with([5, 6, 2], skip_special_tokens=True)
             self.assertEqual(inference.model.generate.call_args.kwargs["pad_token_id"], 0)
             self.assertIs(inference.model.generate.call_args.kwargs["do_sample"], False)
+            self.assertEqual(inference.model.generate.call_args.kwargs["temperature"], 0.0)
             self.assertEqual(
                 inference.tokenizer.apply_chat_template.call_args.args[0],
                 evaluation.build_messages({"input": "invoice", "id": "test"}),

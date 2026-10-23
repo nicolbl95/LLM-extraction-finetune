@@ -91,10 +91,10 @@ class GoldenDatasetTests(unittest.TestCase):
                     {"raw": case["response_json"], "finish_reason": "stop"},
                 ]
                 with patch.object(main, "get_extractor", return_value=model), \
-                        self.assertLogs(main.LOGGER, level="WARNING"):
+                        self.assertLogs(level="WARNING"):
                     actual = main.extract_invoice(case["invoice_text"])
                 self.assertEqual(actual, case["expected"])
-                self.assertEqual(model.predict.call_count, 2)
+                self.assertEqual(model.predict.call_count, 1)
 
     def test_exact_golden_comparison_detects_errors_even_when_schema_accepts_them(self):
         for case in self.cases:
