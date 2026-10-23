@@ -7,7 +7,7 @@ from ocr_config import OCR_CONFIG
 
 def signature(evidence: DocumentEvidence) -> tuple:
     return (
-        evidence.supplier, evidence.invoice_date,
+        evidence.supplier, evidence.invoice_number, evidence.invoice_date,
         tuple((folded(row.description), tuple(
             (key, tuple(sorted({number.value for number in row.cells.get(key, [])})))
             for key in ("quantity", "unit_price", "total_ht")

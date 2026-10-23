@@ -68,11 +68,13 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
     result.ocr_cross_checked = True
     result.quality_issues = []
     result.issues = []
-    for key in ("supplier", "invoice_date"):
+    for key in ("supplier", "invoice_number", "invoice_date"):
         def metadata(evidence):
             candidate = getattr(evidence, key)
             if candidate is None:
                 return []
+            if key == "invoice_number":
+                return [candidate]
             relevant = [
                 line for line in evidence.lines
                 if ("supplier" in folded(line.text) or "fournisseur" in folded(line.text))

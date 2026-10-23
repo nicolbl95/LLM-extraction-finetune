@@ -1,8 +1,9 @@
 """Frozen tuning-selected OCR pipeline; never reads stress references or metrics."""
 
 import logging
+import re
 
-from invoice_evidence import UnreadableOCR, from_tsv
+from invoice_evidence import UnreadableOCR, from_tsv, invoice_number_from_text
 from ocr_consensus import build_consensus
 from ocr_preprocessing import deskew, transform
 from ocr_quality import assess_ocr
@@ -58,12 +59,29 @@ def recover_image(image, reader, *, budget=None):
         completed[family].add(psm)
         budget.remaining()
     primary = assess_ocr(first_readings[0], first_readings[1])
+    has_invoice_heading = any(
+        re.search(r"^\s*(?:invoice|facture)(?!\s+(?:date|total))\b", line.text, re.I)
+        for evidence in first_readings
+        for line in evidence.lines
+    )
+    invoice_numbers = [evidence.invoice_number for evidence in first_readings]
+    needs_header_confirmation = len(set(invoice_numbers)) != 1 or not all(invoice_numbers)
+    confirm_header = needs_header_confirmation and (has_invoice_heading or bool(primary.quality_issues))
+    if has_invoice_heading and needs_header_confirmation and not primary.quality_issues:
+        primary.quality_issues.append("Numéro de facture non lu.")
+
+    def record_ocr_metadata(evidence):
+        evidence.ocr_pages = 1
+        evidence.preprocessing_used = list(readings)
+        return evidence
+
     if not primary.quality_issues:
-        return primary
+        return record_ocr_metadata(primary)
     # assess_ocr adds refusal annotations; consensus needs the original evidence.
     for evidence in first_readings:
         evidence.quality_issues = []
         evidence.issues = []
+    header_candidates = []
     for family in FAMILIES:
         budget.remaining()
         if family == "scale3" and rotated.width * rotated.height * 9 > OCR_CONFIG.max_pixels:
@@ -78,12 +96,33 @@ def recover_image(image, reader, *, budget=None):
             if psm in completed.get(family, set()):
                 continue
             budget.remaining()
+            header_psm = (
+                6 if family == "deskew" and psm == 6 else
+                11 if family == "clahe" and psm == 4 else None
+            )
+            if confirm_header and header_psm is not None:
+                crop = prepared.crop(
+                    (0, 0, prepared.width, max(1, int(prepared.height * .22)))
+                )
+                header = from_tsv(reader(crop, header_psm))
+                header_candidates.append(
+                    header.invoice_number or invoice_number_from_text(header.text)
+                )
+                budget.remaining()
+                continue
             data = reader(prepared, psm)
             budget.remaining()
             if family == "crop":
                 data = table_crop(data, prepared, reader)
             readings[family].append(from_tsv(data))
             budget.remaining()
+    if (
+        confirm_header and len(header_candidates) == 2 and header_candidates[0]
+        and header_candidates[0] == header_candidates[1]
+    ):
+        for entries in readings.values():
+            for evidence in entries:
+                evidence.invoice_number = header_candidates[0]
     if not any(evidence.tokens for entries in readings.values() for evidence in entries):
         raise UnreadableOCR("Aucun texte détecté après les prétraitements OCR.")
-    return build_consensus(readings, confidence=CONFIDENCE)
+    return record_ocr_metadata(build_consensus(readings, confidence=CONFIDENCE))

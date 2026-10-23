@@ -118,12 +118,17 @@ class DocumentEvidence:
     numbers: list[Number] = field(default_factory=list)
     supplier: str | None = None
     supplier_raw: str | None = None
+    invoice_number: str | None = None
     invoice_date: str | None = None
     issues: list[str] = field(default_factory=list)
     available: bool = True
     source_kind: str = "text"
     ocr_cross_checked: bool = False
     quality_issues: list[str] = field(default_factory=list)
+    ocr_calls: int = 0
+    ocr_pages: int = 0
+    ocr_elapsed_seconds: float = 0
+    preprocessing_used: list[str] = field(default_factory=list)
 
 
 class EvidenceText(str):
@@ -159,6 +164,16 @@ MONTHS = {
         ("october", "octobre"), ("november", "novembre"), ("december", "decembre"),
     ), 1) for word in words
 }
+
+
+def invoice_number_from_text(text: str) -> str | None:
+    match = re.search(r"\b(FR|GB|US)[ -]+(\d{4})[ -]+(\d(?:[ \d]*\d)?)\b", text, re.I)
+    if not match:
+        return None
+    suffix = re.sub(r"\s+", "", match.group(3))
+    if not 3 <= len(suffix) <= 12:
+        return None
+    return f"{match.group(1).upper()}-{match.group(2)}-{suffix}"
 
 
 def union_box(tokens: list[Token]) -> tuple[float, float, float, float]:
@@ -226,13 +241,15 @@ def combine_pages(pages: list[DocumentEvidence], *, contains_ocr: bool = False) 
     """Merge selected evidence, never reparse raw OCR tokens past its quality gate."""
     result = DocumentEvidence("", None, [], [], source_kind="consensus" if contains_ocr else "pdf")
     result.ocr_cross_checked = contains_ocr
-    suppliers, dates, locales = set(), set(), set()
+    suppliers, invoice_numbers, dates, locales = set(), set(), set(), set()
     texts = []
     for index, source in enumerate(pages):
         evidence = deepcopy(source)
         texts.append(evidence.text)
         if evidence.supplier:
             suppliers.add(evidence.supplier)
+        if evidence.invoice_number:
+            invoice_numbers.add(evidence.invoice_number)
         if evidence.invoice_date:
             dates.add(evidence.invoice_date)
         if evidence.locale:
@@ -256,9 +273,17 @@ def combine_pages(pages: list[DocumentEvidence], *, contains_ocr: bool = False) 
         )
         result.quality_issues.extend(evidence.quality_issues)
         result.issues.extend(evidence.issues)
+        result.ocr_calls += evidence.ocr_calls
+        result.ocr_pages += evidence.ocr_pages
+        result.ocr_elapsed_seconds += evidence.ocr_elapsed_seconds
+        result.preprocessing_used.extend(
+            family for family in evidence.preprocessing_used
+            if family not in result.preprocessing_used
+        )
     result.text = "\n\n".join(texts)
     result.supplier = next(iter(suppliers)) if len(suppliers) == 1 else None
     result.supplier_raw = result.supplier
+    result.invoice_number = next(iter(invoice_numbers)) if len(invoice_numbers) == 1 else None
     result.invoice_date = next(iter(dates)) if len(dates) == 1 else None
     result.locale = next(iter(locales)) if len(locales) == 1 else None
     return result
@@ -277,6 +302,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             "en-US" if re.search(r"\bUSD\b|\$", text) else None
         )
     evidence = DocumentEvidence(text, locale, tokens, lines)
+    evidence.invoice_number = invoice_number_from_text(text)
     columns: dict[str, int] = {}
     starts: dict[str, float] = {}
     header_page = -1
