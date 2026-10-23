@@ -3,6 +3,9 @@
 import json
 import logging
 import os
+import re
+import shutil
+import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -20,9 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from evaluate_finetuned import (
-    INSTRUCTION, SYSTEM_PROMPT, Invoice, LoRAInference, check_adapter,
-    correction_messages, finalize_invoice_json, parse_object, validate_invoice_json,
+    INSTRUCTION, SYSTEM_PROMPT, Invoice as Invoice, LoRAInference, check_adapter,
+    validate_invoice_json as validate_invoice_json,
 )
+from invoice_evidence import DocumentEvidence, EvidenceText, Token, UnreadableOCR, combine_pages, from_text, from_tokens
+from invoice_grounding import run_grounded_inference
+from ocr_recovery import recover_image
+from ocr_budget import ProcessingBudget
+from ocr_config import OCR_CONFIG
 
 LOGGER = logging.getLogger(__name__)
 MAX_BYTES = 20 * 1024 * 1024
@@ -141,29 +149,69 @@ def preview_document(filename: str | None):
         return None, None, f"Impossible de lire la facture : {exc}"
 
 
-def ocr_image(image: Image.Image) -> str:
+def ocr_image(image: Image.Image, *, budget: ProcessingBudget | None = None) -> str:
+    budget = budget or ProcessingBudget()
+    check_pixels(image.width * 2, image.height * 2)
+    def reader(prepared, psm):
+        timeout = min(OCR_CONFIG.call_seconds, budget.remaining())
+        try:
+            data = pytesseract.image_to_data(
+                prepared, lang="fra+eng", config=f"--psm {psm}",
+                output_type=pytesseract.Output.DICT, timeout=timeout,
+            )
+        except RuntimeError as exc:
+            if str(exc) == "Tesseract process timeout" and budget.expired:
+                LOGGER.exception("Document OCR deadline exhausted during Tesseract")
+                budget.remaining()
+            raise
+        budget.remaining()
+        return data
     try:
-        text = pytesseract.image_to_string(image, lang="fra+eng", timeout=60)
+        evidence = recover_image(image, reader, budget=budget)
     except pytesseract.TesseractNotFoundError as exc:
         raise RuntimeError(
             "OCR indisponible : installez Tesseract et les langues fra/eng (voir packages.txt)."
         ) from exc
-    if not text.strip():
-        raise ValueError("Aucun texte détecté. Utilisez une facture nette et lisible.")
-    return text.strip()
+    except RuntimeError as exc:
+        if str(exc) != "Tesseract process timeout":
+            raise
+        LOGGER.exception("OCR preprocessing exceeded the Tesseract time budget; evidence remains unverified")
+        raise UnreadableOCR(
+            "Délai OCR dépassé : preuves insuffisantes, aucun chiffre n'est confirmé."
+        ) from exc
+    return EvidenceText(evidence)
 
 
-def document_text(filename: str) -> str:
+def document_text(filename: str, *, budget: ProcessingBudget | None = None) -> str:
+    budget = budget or ProcessingBudget()
+    budget.remaining()
     path = checked_path(filename)
     if path.suffix.lower() != ".pdf":
-        return ocr_image(open_image(path))
+        return ocr_image(open_image(path), budget=budget)
     with pymupdf.open(path) as document:
         check_pdf(document)
         pages = []
-        for page in document:
+        had_ocr = False
+        for page_number, page in enumerate(document):
+            budget.remaining()
             text = page.get_text("text").strip()
-            pages.append(text or ocr_image(render_page(page)))
-    return "\n\n".join(pages)
+            if text:
+                tokens = [
+                    Token(word[4], page_number, tuple(word[:4]))
+                    for word in page.get_text("words")
+                ]
+                evidence = from_tokens(tokens)
+                evidence.text = text
+                pages.append(evidence)
+            else:
+                had_ocr = True
+                scanned = ocr_image(render_page(page), budget=budget)
+                evidence = scanned.evidence if isinstance(scanned, EvidenceText) else from_text(scanned)
+                pages.append(evidence)
+            budget.remaining()
+    evidence = combine_pages(pages, contains_ocr=had_ocr)
+    budget.remaining()
+    return EvidenceText(evidence)
 
 
 @lru_cache(maxsize=1)
@@ -218,74 +266,57 @@ def get_extractor() -> LoRAInference:
     )
 
 
-@spaces.GPU
+def gpu_duration(row: dict, messages: list[dict]) -> int:
+    characters = sum(len(message["content"]) for message in messages)
+    return min(30, max(8, 8 + characters // 600)) if row.get("correction") else min(60, max(15, 15 + characters // 800))
+
+
+@spaces.GPU(duration=gpu_duration)
 def predict_invoice(row: dict, messages: list[dict]) -> dict:
     return get_extractor().predict(row, messages=messages)
 
 
-def extract_invoice(text: str, *, warnings: list[str] | None = None) -> dict:
+def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics: dict | None = None) -> dict:
     messages = [
         {"role": "system", "content": LIVE_SYSTEM_PROMPT},
         {"role": "user", "content": f"{INSTRUCTION}\n\n{FEW_SHOT_INVOICE}"},
         {"role": "assistant", "content": json.dumps(FEW_SHOT_RESULT, ensure_ascii=False)},
         {"role": "user", "content": f"{INSTRUCTION}\n\n{text}"},
     ]
-    row = {"id": "live-upload", "input": text}
-    prediction = predict_invoice(row, messages)
-    if prediction["finish_reason"] != "stop":
-        raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
-    previous_warnings = []
-    current_warnings = []
-    try:
-        validate_invoice_json(prediction["raw"])
-    except (ValidationError, ValueError) as exc:
-        initial_error = str(exc)
-        initial_raw = prediction["raw"]
-        LOGGER.warning("Invoice response failed validation; retrying once (%s)", type(exc).__name__)
-        try:
-            validate_invoice_json(
-                prediction["raw"], arithmetic_warnings=previous_warnings,
-            )
-        except (ValidationError, ValueError) as structure_error:
-            LOGGER.debug("No structurally valid fallback (%s)", type(structure_error).__name__)
-        initial_error = "\n".join([initial_error, *previous_warnings])
-        messages = correction_messages(messages, prediction["raw"], exc, previous_warnings)
-        try:
-            corrected = predict_invoice(row, messages)
-            if corrected["finish_reason"] != "stop":
-                raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
-            parse_object(corrected["raw"])
-            prediction = corrected
-        except (OSError, ValueError, RuntimeError, ImportError, gr.Error) as correction_error:
-            try:
-                parse_object(initial_raw)
-            except ValueError:
-                raise correction_error
-            current_warnings.append(
-                f"Auto-correction impossible : {correction_error}. "
-                "La première réponse est utilisée uniquement pour les champs récupérables."
-            )
-        payload = finalize_invoice_json(
-            prediction["raw"], warnings=current_warnings, initial_error=initial_error,
-        )
-    else:
-        payload = finalize_invoice_json(prediction["raw"], warnings=current_warnings)
-    if current_warnings:
-        LOGGER.warning("Invoice displayed with warnings: %s", "; ".join(current_warnings))
-        if warnings is not None:
-            warnings.extend(current_warnings)
-    return payload
+    row = {"id": "live-upload", "input": str(text)}
+    evidence = text.evidence if isinstance(text, EvidenceText) else from_text(text)
+    result = run_grounded_inference(
+        evidence, row, messages, lambda row, messages: predict_invoice(row, messages),
+        recoverable_errors=(OSError, ValueError, RuntimeError, ImportError, gr.Error),
+    )
+    if warnings is not None:
+        warnings.extend(result["warnings"])
+    if diagnostics is not None:
+        diagnostics.update(result)
+        diagnostics.update(ocr_available=evidence.available, ocr_lines=len(evidence.lines))
+    return result["payload"]
 
 
-def run_extraction(filename: str | None):
+def run_extraction(filename: str | None, *, diagnostics: dict | None = None):
     yield None, PROCESSING_STATUS
     try:
         path = checked_path(filename)
-        text = document_text(str(path))
+        try:
+            text = document_text(str(path))
+        except UnreadableOCR as exc:
+            LOGGER.warning("OCR ran but evidence is insufficient: %s", exc)
+            text = EvidenceText(DocumentEvidence(
+                "", None, [], [], source_kind="ocr", quality_issues=[str(exc)],
+            ))
+        except (pytesseract.TesseractNotFoundError, pytesseract.TesseractError, RuntimeError) as exc:
+            LOGGER.exception("Document evidence unavailable (%s: %r)", type(exc).__name__, exc)
+            text = EvidenceText(DocumentEvidence(
+                "", None, [], [], available=False, issues=["Preuves OCR indisponibles : extraction non recoupée"],
+            ))
         yield None, PROCESSING_STATUS
-        resolve_adapter_path()
         warnings = []
-        payload = extract_invoice(text, warnings=warnings)
+        analysis = diagnostics if diagnostics is not None else {}
+        payload = extract_invoice(text, warnings=warnings, diagnostics=analysis)
     except ValidationError as exc:
         details = "; ".join(
             f"{'.'.join(map(str, error['loc'])) or 'facture'} : {error['msg']}"
@@ -293,28 +324,67 @@ def run_extraction(filename: str | None):
         )
         LOGGER.warning("Invoice validation rejected: %s", details)
         yield None, (
-            "**Avertissement — JSON rejeté : structure ou valeurs invalides.** "
-            f"{details} Les champs requis et les valeurs finies restent obligatoires."
+            "**Lecture non résolue.** Les données n'ont pas pu être vérifiées ; aucun résultat non fiable n'est conservé."
         )
         return
     except (OSError, ValueError, RuntimeError, ImportError,
             pytesseract.TesseractError, Image.DecompressionBombError) as exc:
         LOGGER.exception("Invoice extraction failed")
-        yield None, f"Échec de l'extraction : {exc}"
+        yield None, "Échec de la lecture du document. Vérifiez le fichier et consultez les détails techniques."
         return
-    if warnings:
-        details = "\n".join(f"- {warning}" for warning in warnings)
-        yield payload, (
-            "**Avertissement — vérification manuelle nécessaire.**\n\n"
-            "Le JSON conserve les champs récupérables. Les champs non fiables sont mis à null ; "
-            "les anomalies corrigées restent signalées dans l'historique.\n\n"
-            f"{details}\n\nAucune valeur n'a été recalculée de force."
-        )
-    else:
-        yield payload, "Extraction terminée — JSON validé par Pydantic, cohérence des montants HT contrôlée."
+    yield payload, analysis.get("report", "Lecture terminée ; contrôles documentaires non disponibles.")
+
+
+def run_extraction_ui(filename: str | None):
+    diagnostics = {}
+    for payload, report in run_extraction(filename, diagnostics=diagnostics):
+        details = (
+            f"Preuves OCR : {'disponibles' if diagnostics.get('ocr_available') else 'indisponibles'} "
+            f"({diagnostics.get('ocr_lines', 0)} lignes lues).\n\n"
+            + "\n\n".join(diagnostics.get("warnings", []))
+            + f"\n\nVersion : {deployed_revision()}"
+            + f"\n\nPolitique OCR : {OCR_CONFIG.version} ({OCR_CONFIG.fingerprint()})"
+        ) if diagnostics else ""
+        yield payload, report, details, diagnostics.get("validation", {"flags": [], "passed": []})
+
+
+def preview_ui(filename: str | None):
+    image, payload, status = preview_document(filename)
+    return image, payload, status, "", {"flags": [], "passed": []}
+
+
+def ocr_availability() -> tuple[bool, str]:
+    if not shutil.which("tesseract"):
+        return False, "Tesseract absent"
+    try:
+        languages = set(pytesseract.get_languages())
+    except (OSError, RuntimeError, pytesseract.TesseractError) as exc:
+        LOGGER.exception("Tesseract availability check failed")
+        return False, f"{type(exc).__name__}: {exc}"
+    missing = {"fra", "eng"} - languages
+    return (not missing, "fra+eng disponibles" if not missing else f"langues absentes : {', '.join(sorted(missing))}")
+
+
+def deployed_revision() -> str:
+    revision = os.environ.get("SPACE_COMMIT_SHA") or os.environ.get("COMMIT_SHA")
+    if revision and re.fullmatch(r"[a-fA-F0-9]{7,40}", revision):
+        return revision
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL, timeout=2,
+        ).strip()
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL, timeout=2,
+        ).strip()
+        return revision + (" (modifications locales non commitées)" if dirty else "")
+    except (OSError, subprocess.SubprocessError) as exc:
+        LOGGER.warning("Deployed revision unavailable (%s: %s)", type(exc).__name__, exc)
+        return "indisponible — métadonnées de déploiement absentes"
 
 
 def build_app() -> gr.Blocks:
+    available, reason = ocr_availability()
+    LOGGER.info("Startup OCR: available=%s; %s; revision=%s", available, reason, deployed_revision())
     with gr.Blocks(title="Extraction standardisée de données de factures") as demo:
         gr.Markdown(
             "# Extraction standardisée de données de factures\n"
@@ -343,12 +413,20 @@ def build_app() -> gr.Blocks:
             with gr.Column():
                 status = gr.Markdown("")
                 result = gr.JSON(label="Résultat de l'extraction — JSON structuré")
+                with gr.Accordion("Détails techniques", open=False):
+                    technical = gr.Markdown("")
+                    validation = gr.JSON(label="validation.flags — hors du schéma standardisé")
+        gr.HTML(
+            f"<footer>Version déployée : <code>{deployed_revision()}</code> · "
+            f"OCR : {'disponible' if available else 'indisponible'}<br>"
+            "Limite connue : les images floues ou inclinées peuvent donner plus de champs non vérifiés.</footer>"
+        )
         upload.change(
-            preview_document, inputs=[upload], outputs=[preview, result, status],
+            preview_ui, inputs=[upload], outputs=[preview, result, status, technical, validation],
             concurrency_limit=1,
         )
         extract.click(
-            run_extraction, inputs=[upload], outputs=[result, status], concurrency_limit=1,
+            run_extraction_ui, inputs=[upload], outputs=[result, status, technical, validation], concurrency_limit=1,
         )
     return demo.queue(default_concurrency_limit=1, max_size=8)
 

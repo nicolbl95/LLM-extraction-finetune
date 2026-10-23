@@ -71,22 +71,180 @@ surapprentissage, sans garantir son absence.
   requis et valeurs finies ; prose, Markdown et clés dupliquées refusés.
   Le pipeline n'impose pas de JSON Schema au décodage.
 - **Arithmétique :** `quantity × unit_price` net et somme HT, calculs `Decimal`,
-  arrondi `ROUND_HALF_UP`, tolérance **0,02**.
-- **Correction :** une seule passe corrective, deux inférences maximum, à partir
-  de la facture, de la réponse et des erreurs ; pas d'ajustement artificiel des
-  totaux. Après correction, les champs irrécupérables sont mis à `null` dans le
-  JSON affiché ; les anomalies initiales (même corrigées) et restantes sont
-  listées au-dessus. Sans objet JSON exploitable, une erreur est affichée.
-  Données, évaluation et tests Golden restent stricts par défaut.
-- **Normalisation prudente :** décimales simples à virgule ou point préservées,
-  formats ambigus rejetés ; espaces et typographie de `Ltd` harmonisés, sans
-  deviner les erreurs OCR d'un fournisseur.
-- **Erreurs opérationnelles :** chargement, troncature ou dépassement de contexte
-  ne déclenchent pas la correction ; aucun contexte n'est tronqué silencieusement.
+  arrondi `ROUND_HALF_UP`, tolérance **0,02**, HT + TVA lue = TTC (plusieurs taux).
+- **Preuves documentaires :** PyMuPDF pour le texte PDF ; OCR Tesseract `fra+eng`
+  en niveaux de gris, TSV avec positions pour les images. Redressement, CLAHE,
+  recadrage du tableau, débruitage et ×3 sont recoupés **par champ**, avec deux
+  segmentations par famille de transformation. Une contradiction ne devient
+  jamais une valeur par défaut. Les zones non recoupées restent `null` et
+  « non vérifiées », sans annuler les autres lignes recoupées.
+- **Latence bornée et politique traçable :** chemin propre en deux lectures
+  distinctes (gris redressé PSM 4 / CLAHE PSM 6), escalade seulement en cas
+  de doute. Budget **45 s par document**, partagé entre pages ; Tesseract
+  reçoit le temps restant. L'arrêt et le rendu peuvent ajouter une petite
+  surcharge, sans lancement d'étapes supplémentaires. Version, confiance 40
+  et familles sont définies uniquement dans `src/ocr_config.py` et empreintées
+  dans les résultats.
+  Ancrage par cellule numérique et descriptions comparées sans casse/accents
+  (seuil **0,9**). Les formats FR/UK/US, espaces insécables et milliers sont
+  interprétés selon la locale, sans supprimer arbitrairement une virgule.
+- **Récupération :** exclusivement des valeurs présentes dans le document,
+  avec une solution unique des contraintes. Les prix nets ne sont pas remisés
+  une seconde fois. Un champ douteux seul peut devenir `null` ; un total HT
+  documentaire corroboré n'est pas effacé à cause d'une quantité mal lue.
+- **Fidélité au document :** une valeur imprimée lisible est conservée même
+  si le calcul de la facture est faux ; l'anomalie est signalée séparément
+  dans `validation.flags`, hors du schéma scoré. Lecture incertaine : `null`.
+- **Seconde passe ciblée :** uniquement les lignes non résolues et leur texte
+  OCR, jamais toute la facture. Si l'OCR suffit, aucune seconde inférence.
+  Budget ZeroGPU dynamique (15–60 s initialement, 8–30 s pour la correction),
+  repli OCR sans GPU et message dédié en cas de quota ; traces complètes en logs.
+- **Rapport avant le JSON :** anomalies de la facture avec justification,
+  contrôles réussis, puis résumé des lectures récupérées/neutralisées.
+  Statuts par champ et erreurs du modèle dans « Détails techniques » replié,
+  jamais confondus avec une erreur de la facture. Hash et disponibilité OCR
+  dans le pied de page. Les réponses brutes restent séparées de l'export sécurisé.
+  Les métriques historiques du modèle ne sont pas remplacées par les résultats OCR.
+- **Contrôles documentaires :** noms répétés, échéance/conditions de paiement,
+  devise/pays, taxes, doublons et identifiants. Calibration sur 60 références :
+  **18 SIRET sur 20 échouent à Luhn** ; ce contrôle est donc informatif.
+  Les autres contrôles d'identifiants n'échouent pas sur les références.
 
 Décodage sans échantillonnage dans [l'évaluateur](src/evaluate_finetuned.py) :
 LoRA `do_sample=False` pour les deux passes éventuelles ; GGUF `temperature=0.0`.
 Lecture littérale des chiffres : [détails du prompt système](docs/DESIGN.md).
+
+Vérifications logicielles et évaluation des rejeux (aucun LLM réel appelé) :
+
+```bash
+python -m pytest -q
+python src/evaluate_grounding.py --replays tests/fixtures/invoice_model_errors.json
+# Appels réels sur les images ; échoue si le modèle ne peut pas générer.
+python src/diagnose_pipeline.py --require-real-model
+```
+
+Le test réel opt-in est exclu par défaut. Il nécessite des poids **locaux**
+explicitement configurés, les dépendances d'inférence et le matériel adapté :
+
+```bash
+INVOICE_SLOW_ADAPTER_PATH=results/<run>/lora_adapter python -m pytest -q -m slow tests/test_grounding_slow.py
+```
+
+Les rejeux sont des erreurs synthétiques décrites dans la demande, non des sorties
+capturées du modèle. Les tests distinguent le texte du dataset du véritable OCR
+des trois images d'exemple ; ils ne constituent pas un benchmark du LLM réel.
+
+### Vérification hors gabarit et préproduction
+
+Le jeu indépendant [tests/stress/](tests/stress/) n'est jamais ajouté aux splits
+d'entraînement/test. Il mesure séparément valeurs fausses conservées, `null` à
+tort, anomalies fantômes et crashs, par cas :
+
+```bash
+python scripts/run_stress_check.py --output results/stress-report.json
+# Mesures isolées, puis consensus figé (les TSV d'expérience sont mis en cache) :
+python scripts/experiment_ocr.py --phase tuning
+python scripts/experiment_ocr.py --phase tuning --consensus
+python scripts/experiment_ocr.py --phase validation --consensus
+python scripts/summarize_ocr_experiments.py
+python scripts/audit_test_changes.py --output docs/TEST_CHANGES.md
+python scripts/render_report_previews.py
+```
+
+**Dénominateur figé : 35 cas, 612 champs** : FR 160, UK 128, US 192,
+layouts/PDF 132. Les seuls champs des images dégradées sont **480**.
+L'ancien total de 600 désignait 34 cas, avant le layout de remise séparée
+(12 champs supplémentaires). Diagnostic avant seuil :
+[ventilation des 416 null](results/null-breakdown.md).
+Les essais réels sont décrits dans [le tableau d'expériences](results/ocr-experiments.md) :
+réglage 21 cas / 372 champs, validation 14 cas / 240 champs, split figé.
+La sélection sur réglage passe de 252 à 94 `null` ; validation de 164 à 61,
+sans chiffre faux conservé ni anomalie fantôme dans ces essais. La vérification
+du chemin applicatif complet est enregistrée séparément dans le JSON de stress.
+La cible de moins de 30 % de `null` image n'est pas revendiquée : **155/480 =
+32,29 %** dans les essais, contre 416/480 avant. Le bruit destructeur et la
+demi-résolution ne justifient aucune invention pour gagner des points.
+Le chemin applicatif réel reproduit ces mesures : **0 valeur fausse,
+0 anomalie fantôme, 0 crash**, y compris 105 profils supplémentaires de
+réponses modèle reconstruites. Avant la passe latence, suite de récupération : **249 tests réussis,
+101 sous-tests, 3 slow exclus** ; pas de LLM réel chargé.
+
+Les transformations d'images sont déterministes (seed 713) ; les mises en page
+sont rédigées indépendamment. Le modèle est **simulé** pour ces tests, l'OCR est
+réel. Le consensus prudent neutralise un champ dès que ses preuves restent
+insuffisantes : consulter le nombre de `null`, pas seulement « zéro valeur
+fausse ». Une même erreur peut survivre à plusieurs transformations et lectures
+Tesseract ; ce recoupement n'est pas une garantie universelle.
+Une contradiction sur une image est donc une lecture à confirmer, **pas**
+automatiquement une erreur imprimée ; les erreurs certaines du texte natif
+restent signalées avec conservation des valeurs.
+Un dépassement explicite du délai Tesseract est traité comme une preuve
+insuffisante et journalisé avec trace, pas comme un chiffre confirmé ni un crash
+du rapport. Les autres erreurs OCR ne sont pas absorbées silencieusement.
+
+Sur une **machine CUDA/Colab** (Python 3.11/3.12 recommandé), depuis la racine :
+
+```bash
+python -m pip install -r requirements-inference.txt
+python scripts/run_real_model_check.py --check-environment
+python scripts/run_real_model_check.py \
+  --adapter-path results/<run>/lora_adapter \
+  --output results/real-model-check.json --load-in-4bit --allow-download
+# Même protocole sur les 24 images dégradées en plus des 3 originales :
+python scripts/run_real_model_check.py \
+  --adapter-path results/<run>/lora_adapter \
+  --output results/real-model-stress.json --load-in-4bit --stress --allow-download
+```
+
+`--allow-download` autorise explicitement le téléchargement du modèle de base
+**sur cette machine seulement** ; sans ce drapeau le mode est hors ligne.
+Le script ne télécharge jamais les adaptateurs : fournir leur répertoire local.
+Il traite les trois images, répète chaque inférence **trois fois**, conserve les
+réponses brutes/finales, égalités avec les références, déterminisme, durées,
+révision du code et matériel. Il utilise le vrai modèle, sans allocation ZeroGPU.
+Un repli OCR seul, une troncature, une erreur GPU ou une différence entre les
+trois sorties ne sont pas une réussite. Aucun vrai modèle n'a été exécuté dans
+l'environnement de développement dépourvu de Torch/Transformers/PEFT.
+Le [notebook Colab minimal](notebooks/real_model_check.ipynb) installe les
+dépendances sur Colab, vérifie le GPU, charge des adaptateurs fournis (ou
+explicitement téléchargés avec autorisation), lance le script et affiche les
+scores. Il est livré sans sorties, **non exécuté ici**. Téléverser la version
+locale complète du projet : les scripts non commités ne sont pas disponibles
+par un simple clone du HEAD distant.
+
+Avant publication : [plan d'une page](docs/DEPLOY.md),
+[audit exhaustif des assertions modifiées](docs/TEST_CHANGES.md).
+Le tag local `backup/pre-document-report-137b643` est une sauvegarde du dernier
+commit, pas de l'arbre non commité. Rien ne doit être publié sans accord.
+
+### Scans réels et revue de latence — sans publication
+
+```bash
+python scripts/evaluate_real_scans.py real-scans/ \
+  --truth real-scans-truth.json --output results/real-scans-review.json
+# Sans vérité terrain : champs neutralisés et anomalies à relire, pas d'exactitude inventée.
+python scripts/evaluate_real_scans.py real-scans/ --output results/real-scans-manual.json
+python scripts/measure_latency.py --output results/latency-local.json
+python scripts/run_stress_check.py --compare results/stress-before-latency.json \
+  --output results/stress-latency-local.json
+python scripts/generate_theme_patches.py
+```
+
+Le [protocole de 5–10 factures indépendantes](docs/REAL_SCANS.md) exige
+anonymisation, vérité terrain manuelle avant l'outil et aucun réglage après
+lecture des résultats. Aucun document réel indépendant n'a été fourni ici.
+Le script de revue n'appelle **aucun modèle** ; la validation Qwen reste
+le protocole GPU séparé ci-dessus. Les mesures CPU réelles, appels OCR,
+limites du p95 à trois échantillons et décision sur les 35 cas sont dans
+[LATENCY.md](results/LATENCY.md). Les quatre patchs par thème sont destinés à
+la revue et doivent être appliqués ensemble, pas comme déploiements autonomes.
+La politique finale conserve **155/612 null**, **0 valeur fausse / 0 fantôme /
+0 crash** sur les 35 cas et les 105 rejeux ; variation des null **0 point**.
+Suite locale finale : **271 tests et 101 sous-tests réussis, 3 slow exclus**.
+Mesures propres : médiane **2,28 s**, avec 2 appels pour deux exemples et
+12 pour l'exemple UK dont la confirmation reste douteuse. Images détruites :
+pire mesuré **45,26 s** ; PDF scanné 10 pages : médiane **24,89 s**, 20 appels.
+Ce ne sont ni des mesures du LLM, ni un engagement de latence du Space.
 
 ## 🎯 Résultats & Benchmark Comparatif
 

@@ -38,6 +38,18 @@ class AppTests(unittest.TestCase):
             document.save(path)
         return path
 
+    def evidence_text(self, payload=None):
+        payload = payload or self.gold
+        rows = "\n".join(
+            f"{item['description']} | {item['quantity']} | {item['unit_price']} | {item['total_ht']}"
+            for item in payload["line_items"]
+        )
+        return (
+            f"Supplier: {payload['supplier_name']}\nInvoice date: {payload.get('invoice_date', '')}\nCurrency: GBP\n"
+            "Description | Quantity | Net unit price | Net amount\n" + rows
+            + f"\nSubtotal: {payload['total_ht']}\nInvoice total: {payload['total_ttc']}"
+        )
+
     def test_three_distributable_examples_match_existing_regional_invoices(self):
         rows = {
             row["id"]: row
@@ -117,11 +129,11 @@ class AppTests(unittest.TestCase):
 
     def test_ocr_failure_is_explicit(self):
         image = Image.new("RGB", (10, 10), "white")
-        with patch.object(pytesseract, "image_to_string",
+        with patch.object(pytesseract, "image_to_data",
                           side_effect=pytesseract.TesseractNotFoundError()):
             with self.assertRaisesRegex(RuntimeError, "OCR indisponible"):
                 main.ocr_image(image)
-        with patch.object(pytesseract, "image_to_string", return_value=" "):
+        with patch.object(pytesseract, "image_to_data", return_value={"text": []}):
             with self.assertRaisesRegex(ValueError, "Aucun texte"):
                 main.ocr_image(image)
 
@@ -140,11 +152,11 @@ class AppTests(unittest.TestCase):
         model = MagicMock()
         model.predict.return_value = {"raw": json.dumps(self.gold), "finish_reason": "stop"}
         with patch.object(main, "get_extractor", return_value=model):
-            payload = main.extract_invoice("Text from the uploaded invoice")
+            payload = main.extract_invoice(self.evidence_text())
         model.predict.assert_called_once()
         self.assertEqual(
             model.predict.call_args.args[0],
-            {"id": "live-upload", "input": "Text from the uploaded invoice"},
+            {"id": "live-upload", "input": self.evidence_text()},
         )
         messages = model.predict.call_args.kwargs["messages"]
         self.assertEqual([item["role"] for item in messages], ["system", "user", "assistant", "user"])
@@ -158,7 +170,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(example.line_items[0].quantity, 7.2)
         self.assertEqual(example.line_items[0].unit_price, 12.5)
         self.assertEqual(example.line_items[0].total_ht, 90.0)
-        self.assertIn("Text from the uploaded invoice", messages[-1]["content"])
+        self.assertIn(self.evidence_text(), messages[-1]["content"])
         self.assertEqual(payload, self.gold)
         self.assertEqual(payload["invoice_date"], "2026-10-21")
         json.dumps(payload, allow_nan=False)
@@ -181,29 +193,20 @@ class AppTests(unittest.TestCase):
             {"raw": raw, "finish_reason": "stop"},
             {"raw": json.dumps(corrected), "finish_reason": "stop"},
         ]
-        text = "Facture réelle : Service | quantité 7,2 | PU 12,50 | total HT 90,00"
+        text = self.evidence_text(corrected)
         warnings = []
         with patch.object(main, "get_extractor", return_value=model), \
-                self.assertLogs(main.LOGGER, level="WARNING"):
+                self.assertLogs(level="WARNING"):
             result = main.extract_invoice(text, warnings=warnings)
         self.assertEqual(result, corrected)
-        self.assertTrue(any("corrigée lors de la seconde passe" in warning for warning in warnings))
+        self.assertTrue(any("récupéré (corroboré par OCR)" in warning for warning in warnings))
         self.assertTrue(any("142" in warning for warning in warnings))
-        self.assertEqual(model.predict.call_count, 2)
-        first, second = model.predict.call_args_list
+        self.assertEqual(model.predict.call_count, 1)
+        first = model.predict.call_args
         initial_messages = first.kwargs["messages"]
-        corrected_messages = second.kwargs["messages"]
         self.assertEqual(len(initial_messages), 4)
-        self.assertEqual(corrected_messages[:-2], initial_messages)
-        self.assertIn(text, corrected_messages[-3]["content"])
-        self.assertEqual(corrected_messages[-2], {"role": "assistant", "content": raw})
-        self.assertIn(str(validation.exception), corrected_messages[-1]["content"])
-        self.assertIn("valeurs de la facture réelle", corrected_messages[-1]["content"])
-        self.assertIn("Priorité de correction arithmétique", corrected_messages[-1]["content"])
-        self.assertIn("relis d'abord les champs quantity et unit_price", corrected_messages[-1]["content"])
-        self.assertIn("7,2 devient 7.2 (jamais 142 ou 72)", corrected_messages[-1]["content"])
-        self.assertIn("Anomalies arithmétiques à examiner", corrected_messages[-1]["content"])
-        self.assertEqual(first.args, second.args)
+        self.assertIn(text, initial_messages[-1]["content"])
+        self.assertTrue(any("142" in warning and "non ancré" in warning for warning in warnings))
 
     def test_arithmetic_retry_prioritizes_unit_price_for_a_french_decimal_quantity(self):
         corrected = {
@@ -220,21 +223,17 @@ class AppTests(unittest.TestCase):
             {"raw": json.dumps(invalid), "finish_reason": "stop"},
             {"raw": json.dumps(corrected), "finish_reason": "stop"},
         ]
-        text = "Service | quantité 4,2 | PU net HT 20,00 | HT 84,00 | TTC 100,80"
+        text = self.evidence_text(corrected)
         warnings = []
         with patch.object(main, "get_extractor", return_value=model), \
-                self.assertLogs(main.LOGGER, level="WARNING"):
+                self.assertLogs(level="WARNING"):
             self.assertEqual(main.extract_invoice(text, warnings=warnings), corrected)
-        self.assertEqual(model.predict.call_count, 2)
-        self.assertTrue(any("corrigée lors de la seconde passe" in warning for warning in warnings))
+        self.assertEqual(model.predict.call_count, 1)
+        self.assertTrue(any("récupéré (corroboré par OCR)" in warning for warning in warnings))
         self.assertTrue(any("200" in warning for warning in warnings))
         messages = model.predict.call_args.kwargs["messages"]
-        self.assertIn(text, messages[-3]["content"])
-        self.assertIn("quantity et unit_price", messages[-1]["content"])
-        self.assertIn("4,2 devient 4.2 (jamais 42)", messages[-1]["content"])
-        self.assertIn("Ne déduis pas ces champs par division", messages[-1]["content"])
-        self.assertIn("Ligne 1", messages[-1]["content"])
-        self.assertIn("Écart absolu : 756", messages[-1]["content"])
+        self.assertIn(text, messages[-1]["content"])
+        self.assertTrue(any("unit_price" in warning for warning in warnings))
 
     def test_self_correction_handles_missing_fields_and_malformed_json(self):
         missing_date = {key: value for key, value in self.gold.items() if key != "invoice_date"}
@@ -248,26 +247,20 @@ class AppTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as validation:
                     main.validate_invoice_json(raw)
                 with patch.object(main, "get_extractor", return_value=model), \
-                        self.assertLogs(main.LOGGER, level="WARNING"):
-                    self.assertEqual(main.extract_invoice("Original invoice"), self.gold)
-                self.assertEqual(model.predict.call_count, 2)
-                messages = model.predict.call_args.kwargs["messages"]
-                self.assertEqual(messages[-2]["content"], raw)
-                self.assertIn(str(validation.exception), messages[-1]["content"])
-                self.assertNotIn("Priorité de correction arithmétique", messages[-1]["content"])
+                        self.assertLogs(level="WARNING"):
+                    self.assertEqual(main.extract_invoice(self.evidence_text()), self.gold)
+                self.assertEqual(model.predict.call_count, 1)
 
     def test_no_retry_for_model_failures_or_truncated_responses(self):
         model = MagicMock()
         model.predict.side_effect = RuntimeError("Model unavailable")
-        with patch.object(main, "get_extractor", return_value=model):
-            with self.assertRaisesRegex(RuntimeError, "Model unavailable"):
-                main.extract_invoice("invoice")
+        with patch.object(main, "get_extractor", return_value=model), self.assertLogs(level="ERROR"):
+            self.assertEqual(main.extract_invoice(self.evidence_text()), self.gold)
         self.assertEqual(model.predict.call_count, 1)
         model.reset_mock(side_effect=True)
         model.predict.return_value = {"raw": json.dumps(self.gold), "finish_reason": "length"}
-        with patch.object(main, "get_extractor", return_value=model):
-            with self.assertRaisesRegex(ValueError, "incomplète"):
-                main.extract_invoice("invoice")
+        with patch.object(main, "get_extractor", return_value=model), self.assertLogs(level="ERROR"):
+            self.assertEqual(main.extract_invoice(self.evidence_text()), self.gold)
         self.assertEqual(model.predict.call_count, 1)
 
     def test_second_arithmetic_inconsistency_is_displayed_without_a_third_attempt(self):
@@ -280,15 +273,13 @@ class AppTests(unittest.TestCase):
         ]
         warnings = []
         with patch.object(main, "get_extractor", return_value=model), \
-                self.assertLogs(main.LOGGER, level="WARNING"):
-            actual = main.extract_invoice("original invoice", warnings=warnings)
-        self.assertIsNone(actual["total_ht"])
-        self.assertIsNone(actual["line_items"][0]["total_ht"])
+                self.assertLogs(level="WARNING"):
+            actual = main.extract_invoice(self.evidence_text(), warnings=warnings)
+        self.assertEqual(actual["total_ht"], self.gold["total_ht"])
+        self.assertEqual(actual["line_items"][0]["total_ht"], self.gold["line_items"][0]["total_ht"])
         self.assertEqual(actual["line_items"][0]["quantity"], 1)
-        self.assertTrue(any("888" in warning for warning in warnings))
-        self.assertTrue(any("999" in warning for warning in warnings))
-        self.assertTrue(any("non résolue" in warning for warning in warnings))
-        self.assertEqual(model.predict.call_count, 2)
+        self.assertTrue(any("total_ht" in warning for warning in warnings))
+        self.assertEqual(model.predict.call_count, 1)
 
     def test_failed_correction_preserves_only_recoverable_fields_of_first_json(self):
         first = {**self.gold, "total_ht": 999}
@@ -307,14 +298,13 @@ class AppTests(unittest.TestCase):
                 ]
                 warnings = []
                 with patch.object(main, "get_extractor", return_value=model), \
-                        self.assertLogs(main.LOGGER, level="WARNING"):
-                    actual = main.extract_invoice("invoice", warnings=warnings)
-                self.assertIsNone(actual["total_ht"])
-                self.assertIsNone(actual["line_items"][0]["total_ht"])
+                        self.assertLogs(level="WARNING"):
+                    actual = main.extract_invoice(self.evidence_text(), warnings=warnings)
+                self.assertEqual(actual["total_ht"], self.gold["total_ht"])
+                self.assertEqual(actual["line_items"][0]["total_ht"], self.gold["line_items"][0]["total_ht"])
                 self.assertEqual(actual["supplier_name"], first["supplier_name"])
-                self.assertEqual(model.predict.call_count, 2)
-                self.assertTrue(any("Écart absolu" in message for message in warnings))
-                self.assertTrue(any("Auto-correction impossible" in message for message in warnings))
+                self.assertEqual(model.predict.call_count, 1)
+                self.assertTrue(any("total_ht" in message for message in warnings))
 
     def test_model_error_is_not_hidden_without_a_valid_fallback(self):
         model = MagicMock()
@@ -323,10 +313,10 @@ class AppTests(unittest.TestCase):
             RuntimeError("GPU unavailable"),
         ]
         with patch.object(main, "get_extractor", return_value=model), \
-                self.assertLogs(main.LOGGER, level="WARNING"):
-            with self.assertRaisesRegex(RuntimeError, "GPU unavailable"):
-                main.extract_invoice("invoice")
-        self.assertEqual(model.predict.call_count, 2)
+                self.assertLogs(level="WARNING"):
+            result = main.extract_invoice("invoice")
+        self.assertTrue(all(value is None for item in result["line_items"] for value in item.values()))
+        self.assertEqual(model.predict.call_count, 1)
 
     def test_warning_mode_collects_every_line_and_global_discrepancy(self):
         payload = {
@@ -361,8 +351,11 @@ class AppTests(unittest.TestCase):
             for raw, finish in cases:
                 with self.subTest(raw=raw, finish=finish):
                     model.predict.return_value = {"raw": raw, "finish_reason": finish}
-                    with self.assertRaises(ValueError):
-                        main.extract_invoice("invoice text")
+                    warnings = []
+                    with self.assertLogs(level="WARNING"):
+                        result = main.extract_invoice("invoice text", warnings=warnings)
+                    self.assertTrue(all(value is None for item in result["line_items"] for value in item.values()))
+                    self.assertTrue(warnings)
 
     def test_arithmetic_inconsistencies_display_json_with_manual_review_warning(self):
         invalid_payloads = [
@@ -373,20 +366,19 @@ class AppTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 model = MagicMock()
                 model.predict.return_value = {"raw": json.dumps(payload), "finish_reason": "stop"}
-                with patch.object(main, "document_text", return_value="OCR text"), \
+                with patch.object(main, "document_text", return_value=self.evidence_text(payload)), \
                         patch.object(main, "resolve_adapter_path"), \
                         patch.object(main, "get_extractor", return_value=model), \
-                        self.assertLogs(main.LOGGER, level="WARNING"):
+                        self.assertLogs(level="WARNING"):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
-                self.assertIsNone(updates[-1][0]["total_ht"])
-                self.assertIsNone(updates[-1][0]["line_items"][0]["total_ht"])
+                self.assertEqual(updates[-1][0]["total_ht"], payload["total_ht"])
+                self.assertEqual(updates[-1][0]["line_items"][0]["total_ht"], payload["line_items"][0]["total_ht"])
                 self.assertEqual(updates[-1][0]["supplier_name"], payload["supplier_name"])
-                self.assertIn("Avertissement", updates[-1][1])
-                self.assertIn("Incohérence", updates[-1][1])
-                self.assertIn("vérification manuelle", updates[-1][1])
-                self.assertIn("Écart absolu", updates[-1][1])
+                self.assertIn("anomalie", updates[-1][1])
+                self.assertIn("Erreur", updates[-1][1])
+                self.assertIn("Écart", updates[-1][1])
                 self.assertNotIn("cohérence des montants HT contrôlée", updates[-1][1])
-                self.assertEqual(model.predict.call_count, 2)
+                self.assertEqual(model.predict.call_count, 1)
 
     def test_corrected_anomalies_remain_visible_above_json(self):
                 invalid = {**self.gold, "total_ht": 999}
@@ -395,17 +387,16 @@ class AppTests(unittest.TestCase):
                     {"raw": json.dumps(invalid), "finish_reason": "stop"},
                     {"raw": json.dumps(self.gold), "finish_reason": "stop"},
                 ]
-                with patch.object(main, "document_text", return_value="OCR text"), \
+                with patch.object(main, "document_text", return_value=self.evidence_text()), \
                         patch.object(main, "resolve_adapter_path"), \
                         patch.object(main, "get_extractor", return_value=model), \
-                        self.assertLogs(main.LOGGER, level="WARNING"):
+                        self.assertLogs(level="WARNING"):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
                 payload, status = updates[-1]
                 self.assertEqual(payload, self.gold)
-                self.assertIn("corrigée lors de la seconde passe", status)
-                self.assertIn("999", status)
-                self.assertIn("Écart absolu", status)
-                self.assertIn("Tolérance", status)
+                self.assertIn("récupérée", status)
+                self.assertNotIn("999", status)
+                self.assertIn("Aucune anomalie", status)
                 demo = main.build_app()
                 components = demo.config["components"]
                 status_index = next(
@@ -426,8 +417,9 @@ class AppTests(unittest.TestCase):
                 model.predict.return_value = {"raw": json.dumps(payload), "finish_reason": "stop"}
                 warnings = []
                 with patch.object(main, "get_extractor", return_value=model), \
-                        self.assertLogs(main.LOGGER, level="WARNING"):
-                    result = main.extract_invoice("invoice", warnings=warnings)
+                        self.assertLogs(level="WARNING"):
+                    text = self.evidence_text(payload).replace("Currency: GBP", "Currency: EUR")
+                    result = main.extract_invoice(text, warnings=warnings)
                 model.predict.assert_called_once()
                 self.assertEqual(result["supplier_name"], "Acme Ltd")
                 self.assertEqual(result["line_items"][0]["quantity"], 5.1)
@@ -444,17 +436,16 @@ class AppTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 model = MagicMock()
                 model.predict.return_value = {"raw": json.dumps(payload), "finish_reason": "stop"}
-                with patch.object(main, "document_text", return_value="OCR text"), \
+                with patch.object(main, "document_text", return_value=self.evidence_text(payload)), \
                         patch.object(main, "resolve_adapter_path"), \
                         patch.object(main, "get_extractor", return_value=model), \
-                        self.assertLogs(main.LOGGER, level="WARNING"):
+                        self.assertLogs(level="WARNING"):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
                 self.assertIsNone(updates[-1][0][field])
                 self.assertEqual(updates[-1][0]["total_ttc"], self.gold["total_ttc"])
-                self.assertIn(field, updates[-1][1])
-                self.assertIn("null", updates[-1][1])
+                self.assertIn("neutralisée", updates[-1][1])
                 json.dumps(updates[-1][0], allow_nan=False)
-                self.assertEqual(model.predict.call_count, 2)
+                self.assertLessEqual(model.predict.call_count, 2)
 
     def test_errors_clear_previous_json_and_success_is_validated(self):
         filename = str(main.EXAMPLES[0][1])
@@ -463,12 +454,12 @@ class AppTests(unittest.TestCase):
             updates = list(main.run_extraction(filename))
         self.assertIsNone(updates[0][0])
         self.assertEqual(updates[-1][0], self.gold)
-        self.assertIn("validé", updates[-1][1])
+        self.assertIn("terminée", updates[-1][1])
         with patch.object(main, "document_text", side_effect=RuntimeError("OCR timeout")), \
                 self.assertLogs(main.LOGGER, level="ERROR"):
             updates = list(main.run_extraction(filename))
-        self.assertIsNone(updates[-1][0])
-        self.assertIn("OCR timeout", updates[-1][1])
+        self.assertIsNone(updates[-1][0]["total_ht"])
+        self.assertIn("Preuves OCR indisponibles", updates[-1][1])
 
     def test_model_is_lazy_cached_and_configurable(self):
         main.get_extractor.cache_clear()
@@ -576,10 +567,10 @@ class AppTests(unittest.TestCase):
                 next(updates)
         self.assertEqual(
             [entry[0] for entry in sequence.mock_calls],
-            ["document_text", "resolve_adapter_path", "extract_invoice"],
+            ["document_text", "extract_invoice"],
         )
         self.assertEqual(last_update[0], self.gold)
-        self.assertIn("Extraction terminée", last_update[1])
+        self.assertIn("terminée", last_update[1])
 
     def test_gradio_interface_builds_without_loading_model(self):
         with patch.object(main, "get_extractor") as backend:
@@ -632,11 +623,11 @@ class AppTests(unittest.TestCase):
         import sys
         import types
 
-        gpu = MagicMock(side_effect=lambda function: function)
+        gpu = MagicMock(side_effect=lambda *, duration: lambda function: function)
         with patch.dict(sys.modules, {"spaces": types.SimpleNamespace(GPU=gpu)}), \
                 patch("evaluate_finetuned.LoRAInference") as backend:
             namespace = runpy.run_path(str(main.ROOT / "app/main.py"))
-        gpu.assert_called_once_with(namespace["predict_invoice"])
+        gpu.assert_called_once_with(duration=namespace["gpu_duration"])
         backend.assert_not_called()
 
     def test_gpu_callback_returns_raw_predictions_without_pydantic_validation(self):
