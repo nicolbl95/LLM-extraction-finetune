@@ -168,12 +168,16 @@ class BaseInference:
                 f"{row.get('id', 'invoice')}: prompt ({prompt_tokens}) + generation budget "
                 f"({generation_tokens}) exceeds context ({context}); adjust explicit limits, no truncation applied"
             )
+        generation_started = time.perf_counter()
         with self.torch.inference_mode():
             output = self.model.generate(
                 **inputs, max_new_tokens=generation_tokens, do_sample=False, temperature=0.0, use_cache=True,
                 pad_token_id=(self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None
                               else self.tokenizer.eos_token_id),
             )
+        if self.device == "cuda":
+            self.torch.cuda.synchronize()
+        generation_seconds = time.perf_counter() - generation_started
         generated = output[0][prompt_tokens:]
         count = len(generated)
         eos = self.model.generation_config.eos_token_id
@@ -185,6 +189,7 @@ class BaseInference:
             "raw": self.tokenizer.decode(generated, skip_special_tokens=True),
             "completion_tokens": count, "prompt_tokens": prompt_tokens,
             "finish_reason": "stop" if stopped else "length" if count >= generation_tokens else "other",
+            "generation_seconds": generation_seconds,
         }
 
 

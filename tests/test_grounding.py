@@ -322,14 +322,18 @@ def test_grounded_app_replay_avoids_a_second_gpu_request_when_ocr_solves_everyth
         assert "récupéré (corroboré par OCR)" in "\n".join(warnings)
 
 
-def test_duration_is_dynamic_bounded_and_smaller_for_corrections():
+def test_gpu_duration_uses_measured_generation_plus_bounded_margin(monkeypatch):
+    from collections import deque
     from app import main
+    from ocr_config import OCR_CONFIG
     small = [{"role": "user", "content": "Service 7,2 95,07 684,50"}]
     large = [{"role": "user", "content": "x" * 100000}]
-    assert 8 <= main.gpu_duration({"correction": True}, small) <= 30
-    assert main.gpu_duration({"correction": True}, small) < main.gpu_duration({}, large)
-    assert main.gpu_duration({"correction": True}, large) == 30
-    assert main.gpu_duration({}, large) == 60
+    monkeypatch.setattr(main, "_RECENT_GENERATION_SECONDS", deque(maxlen=20))
+    assert main.gpu_duration({}, small) == OCR_CONFIG.gpu_initial_seconds == 18
+    main._RECENT_GENERATION_SECONDS.append(9.25)
+    assert main.gpu_duration({"correction": True}, large) == 13
+    main._RECENT_GENERATION_SECONDS.append(100)
+    assert main.gpu_duration({}, large) == OCR_CONFIG.gpu_max_seconds == 22
 
 
 def test_deployed_hash_footer_has_no_model_load():

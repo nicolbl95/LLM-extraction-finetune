@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 
 @dataclass(frozen=True)
 class OCRConfiguration:
-    version: str = "ocr-policy-4-bounded-fastpath"
+    version: str = "ocr-policy-5-bounded-fastpath-quota"
     confidence: int = 40
     families: tuple[str, ...] = ("deskew", "clahe", "crop", "denoise", "scale3")
     segmentations: tuple[int, ...] = (4, 6)
@@ -17,6 +17,10 @@ class OCRConfiguration:
     total_seconds: float = 45.0
     call_seconds: float = 60.0
     max_pixels: int = 25_000_000
+    gpu_initial_seconds: int = 18
+    gpu_margin_seconds: int = 3
+    gpu_min_seconds: int = 8
+    gpu_max_seconds: int = 22
 
     def export(self) -> dict:
         return asdict(self)

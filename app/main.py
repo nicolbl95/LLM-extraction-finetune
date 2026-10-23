@@ -50,6 +50,7 @@ DEFAULT_ADAPTER = (
     ROOT / "results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter"
 )
 DEFAULT_ADAPTER_REPO = "nicolbl95/llm-extraction-weights"
+_RECENT_GENERATION_SECONDS: deque[float] = deque(maxlen=20)
 ADAPTER_FILES = [
     "adapter_config.json",
     "adapter_model.safetensors",
@@ -277,13 +278,21 @@ def get_extractor() -> LoRAInference:
 
 
 def gpu_duration(row: dict, messages: list[dict]) -> int:
-    characters = sum(len(message["content"]) for message in messages)
-    return min(30, max(8, 8 + characters // 600)) if row.get("correction") else min(60, max(15, 15 + characters // 800))
+    if _RECENT_GENERATION_SECONDS:
+        measured = max(list(_RECENT_GENERATION_SECONDS)[-5:])
+        requested = math.ceil(measured + OCR_CONFIG.gpu_margin_seconds)
+    else:
+        requested = OCR_CONFIG.gpu_initial_seconds
+    return min(OCR_CONFIG.gpu_max_seconds, max(OCR_CONFIG.gpu_min_seconds, requested))
 
 
 @spaces.GPU(duration=gpu_duration)
 def predict_invoice(row: dict, messages: list[dict]) -> dict:
-    return get_extractor().predict(row, messages=messages)
+    result = get_extractor().predict(row, messages=messages)
+    elapsed = result.get("generation_seconds") if isinstance(result, dict) else None
+    if isinstance(elapsed, (int, float)) and math.isfinite(elapsed) and elapsed > 0:
+        _RECENT_GENERATION_SECONDS.append(float(elapsed))
+    return result
 
 
 def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics: dict | None = None) -> dict:

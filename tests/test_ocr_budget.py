@@ -34,6 +34,9 @@ def test_policy_is_unique_frozen_versioned_and_fingerprinted():
     assert FAMILIES == ("deskew", "clahe", "crop", "denoise", "scale3")
     assert len(set(OCR_CONFIG.fast_families)) == 2
     assert OCR_CONFIG.fast_families == ("deskew", "clahe")
+    assert OCR_CONFIG.gpu_initial_seconds < 28
+    assert 0 < OCR_CONFIG.gpu_margin_seconds <= 3
+    assert OCR_CONFIG.gpu_min_seconds <= OCR_CONFIG.gpu_initial_seconds <= OCR_CONFIG.gpu_max_seconds
     assert inspect.signature(build_consensus).parameters["confidence"].default == OCR_CONFIG.confidence
     assert len(OCR_CONFIG.fingerprint()) == 64
     assert json.dumps(OCR_CONFIG.export(), sort_keys=True)
