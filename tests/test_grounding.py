@@ -339,7 +339,7 @@ def test_deployed_hash_footer_has_no_model_load():
         demo = main.build_app()
     backend.assert_not_called()
     footers = [component["props"]["value"] for component in demo.config["components"] if component["type"] == "html"]
-    assert any(revision in footer for footer in footers)
+    assert any(revision[:7] in footer for footer in footers)
 
 
 def test_real_tesseract_evidence_with_simulated_wrong_model_outputs_on_all_three_images():

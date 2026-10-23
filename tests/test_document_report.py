@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from collections import Counter
 from datetime import date
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from invoice_evidence import DocumentEvidence, EvidenceText, from_text
 from invoice_grounding import UNVERIFIED, read_model, reconcile, run_grounded_inference
+from ocr_consensus import build_consensus
 from invoice_validation import (
     IDENTIFIER_CALIBRATION, IDENTIFIER_SEVERITIES, canonical_name, document_validation,
     identifier_checks, luhn, parse_date, render_report, valid_ein, valid_fr_vat, valid_iban,
@@ -50,7 +52,7 @@ def test_capture_replay_is_recovered_without_a_document_anomaly():
     assert "Aucune anomalie" in report
     assert "4210" not in report
     assert "Pydantic" not in report
-    assert "récupérée" in report
+    assert f"{sum(value in {'valide', 'récupéré (corroboré par OCR)'} for value in result.statuses.values())} champs vérifiés" in report
 
 
 def test_printed_arithmetic_error_is_retained_and_flagged_outside_scored_json():
@@ -65,6 +67,94 @@ def test_printed_arithmetic_error_is_retained_and_flagged_outside_scored_json():
     assert "cohérent avec" in subtotal["reason"]
     assert "1" in subtotal["reason"]
     assert result.failed_rows == []
+    report = render_report(evidence, result.validation, result.statuses, [])
+    assert "⚠️ 2 anomalie(s) dans la facture" in report
+    assert "Ligne 1" in report
+
+
+UK_MULTI_RATE = (
+    "INVOICE GB-2025-00110\nSupplier: Example Creative Ltd\nCurrency: GBP\n"
+    "Invoice date: 2025-02-01\n"
+    "Description | Quantity | Net unit price | Net amount | VAT % | VAT\n"
+    "Logo design | 7.8 | 757.97 | 5912.17 | 20% | 1182.43\n"
+    "Translation | 1 | 500 | 500 | 0% | 0\n"
+    "Subtotal: 6412.17\nVAT (0%): 0\nVAT (20%): 1182.43\n"
+    "Invoice total: 7594.60\nDue date: 2025-03-18\nPayment terms: NET 45"
+)
+
+
+def test_uk_multirate_document_has_complete_controls_in_ocr_fallback():
+    evidence = from_text(UK_MULTI_RATE, locale="en-GB")
+    backend = MagicMock(side_effect=RuntimeError("ZeroGPU quota exceeded; try again in 36 min"))
+    result = run_grounded_inference(
+        evidence, {"id": "uk-test", "input": evidence.text}, [], backend,
+    )
+    report = result["report"]
+    assert evidence.invoice_number == "GB-2025-00110"
+    assert "Analyse de la facture GB-2025-00110" in report
+    assert "Lecture effectuée par reconnaissance de texte (OCR)" in report
+    assert "Nouvel essai possible dans 36 min." in report
+    assert "⚠️ 1 anomalie(s)" not in report
+    for control in (
+        "Ligne 1", "Sous-total", "TVA 0 %", "TVA 20 %",
+        "HT + taxes lues", "Devise GBP cohérente", "Échéance :",
+    ):
+        assert control in report
+    assert result["passes_requested"] == 1
+    assert result["passes_succeeded"] == 0
+    assert not result["validation"]["flags"]
+    assert report.count("Devise") == 1
+    assert all(result["payload"]["line_items"][0][key] is not None
+               for key in ("quantity", "unit_price", "total_ht"))
+
+
+def test_successful_model_generation_is_distinguished_from_ocr_fallback():
+    evidence = document()
+    backend = MagicMock(return_value={
+        "raw": json.dumps(model(), default=str),
+        "finish_reason": "stop",
+        "generation_seconds": 1.25,
+    })
+    result = run_grounded_inference(
+        evidence, {"id": "model-test", "input": evidence.text}, [], backend,
+    )
+    assert result["model_info"]["used"]
+    assert result["model_info"]["passes_requested"] == 1
+    assert result["model_info"]["passes_succeeded"] == 1
+    assert result["model_info"]["generation_seconds"] == 1.25
+    assert "Lecture effectuée par reconnaissance de texte (OCR)" not in result["report"]
+
+
+@pytest.mark.parametrize("invoice_id", ["invoice-0406", "invoice-0435"])
+def test_fr_and_us_fallback_reports_are_human_readable_without_duplicates(invoice_id):
+    row = next(
+        row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())
+        if row["id"] == invoice_id
+    )
+    evidence = from_text(row["input"], locale=row["locale"])
+    backend = MagicMock(side_effect=RuntimeError("ZeroGPU quota exceeded; try again in 36 min"))
+    report = run_grounded_inference(
+        evidence, {"id": invoice_id, "input": evidence.text}, [], backend,
+    )["report"]
+    for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
+        assert forbidden not in report
+    assert report.count("### Anomalies dans la facture") == 1
+    assert report.count("Lecture effectuée par reconnaissance de texte (OCR)") == 1
+    assert "line_items." not in report
+
+
+def test_consensus_ocr_arithmetic_disagreement_does_not_create_a_ghost_anomaly():
+    bad_text = UK_MULTI_RATE.replace("5912.17", "5900.00", 1)
+    evidence = build_consensus({
+        "deskew": [from_text(bad_text, locale="en-GB")],
+        "clahe": [from_text(bad_text, locale="en-GB")],
+    })
+    validation = document_validation(evidence)
+    assert not any(flag.code == "line_arithmetic" for flag in validation.flags)
+    assert evidence.rows[0].cells["quantity"] == []
+    assert evidence.rows[0].cells["unit_price"] == []
+    report = render_report(evidence, validation, {}, [])
+    assert "Aucune anomalie n’est affirmée avec les éléments disponibles." in report
 
 
 @pytest.mark.parametrize("left,right,equivalent", [
@@ -214,7 +304,7 @@ def test_ocr_unavailable_never_presents_model_values_as_verified():
     assert all(value is None for value in result.payload["line_items"][0].values())
     report = render_report(evidence, result.validation, result.statuses, [], available=False)
     assert "Preuves OCR indisponibles : extraction non recoupée" in report
-    assert "0 champs" in report
+    assert "0 champs vérifiés" in report
     assert not result.validation.flags
 
 
@@ -227,7 +317,14 @@ def test_ui_has_report_first_and_closed_technical_accordion():
     assert not accordion["props"]["open"]
     footer = next(component for component in components if component["type"] == "html")
     assert "OCR :" in footer["props"]["value"]
-    assert main.preview_ui(None) == (None, None, "", "", {"flags": [], "passed": []})
+    assert main.preview_ui(None) == (
+        None, None, "", "", "", {"flags": [], "passed": [], "not_verified": []}, None,
+    )
+    assert any(component["type"] == "downloadbutton" for component in components)
+    assert any(
+        "copy" in component["props"].get("buttons", [])
+        for component in components if component["type"] == "markdown"
+    )
 
 
 def test_app_ocr_failure_is_reported_without_loading_model(caplog):
@@ -235,12 +332,40 @@ def test_app_ocr_failure_is_reported_without_loading_model(caplog):
     with patch.object(main, "document_text", side_effect=RuntimeError("OCR absent")), \
             patch.object(main, "predict_invoice", side_effect=AssertionError("No evidence, no GPU")):
         outputs = list(main.run_extraction_ui(str(main.EXAMPLES[0][1])))
-    payload, report, technical, validation = outputs[-1]
+    payload, report, technical, advanced, validation, download = outputs[-1]
     assert "Preuves OCR indisponibles" in report
     assert "Pydantic" not in report
-    assert "indisponibles" in technical
+    assert "indisponible pour ce document" in technical
+    assert "Empreinte de configuration OCR" in advanced
+    assert download.endswith(".json")
     assert not validation["flags"]
     assert all(payload[key] is None for key in ("supplier_name", "invoice_date", "total_ht", "total_ttc"))
+
+
+def test_ui_technical_details_are_compact_and_json_download_matches_result():
+    from app import main
+    evidence = EvidenceText(from_text(UK_MULTI_RATE, locale="en-GB"))
+    with patch.object(main, "document_text", return_value=evidence), patch.object(
+        main, "predict_invoice",
+        side_effect=main.gr.Error("ZeroGPU quota exceeded; try again in 36 min"),
+    ):
+        payload, report, technical, advanced, validation, download = list(
+            main.run_extraction_ui(str(main.EXAMPLES[1][1]))
+        )[-1]
+    try:
+        for heading in ("### Lecture du document", "### Modèle", "### Champs", "### Version"):
+            assert technical.count(heading) == 1
+        assert "non utilisé — quota ZeroGPU indisponible" in technical
+        assert "passes demandées : 1 ; réussies : 0" in technical
+        assert "| Champ | Valeur | Statut | Source |" in technical
+        assert "| Ligne 1 — Quantité | 7.8 | vérifié | OCR seul |" in technical
+        assert len(re.search(r"[a-f0-9]{64}", advanced).group()) == 64
+        assert json.loads(Path(download).read_text()) == payload
+        for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
+            assert forbidden not in report + technical
+        assert not validation["flags"]
+    finally:
+        Path(download).unlink(missing_ok=True)
 
 
 def test_repeated_grounded_outputs_are_identical_and_model_errors_remain_technical():
@@ -266,8 +391,8 @@ def test_second_pass_exception_has_french_cause_and_only_technical_trace(caplog)
         ValueError("ValueError"),
     ])
     result = run_grounded_inference(evidence, {"id": "test", "input": evidence.text}, [], backend)
-    assert "La seconde passe a échoué" in result["report"]
-    assert "service n'a pas communiqué" in result["report"]
+    assert "Une passe d’extraction n’a pas abouti (indisponibilité technique)" in result["report"]
+    assert "La seconde passe a échoué" not in result["report"]
     assert "ValueError" not in result["report"]
     assert "Pydantic" not in result["report"]
     assert "Traceback" in caplog.text

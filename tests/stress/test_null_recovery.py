@@ -78,7 +78,7 @@ def test_model_reading_is_visible_separately_and_never_added_to_the_json():
     assert result["payload"]["line_items"][0]["quantity"] is None
     assert result["unverified_model_readings"]["line_items.0.quantity"] == "54"
     assert "Valeur non recoupée : à vérifier manuellement" in result["report"]
-    assert "hors JSON" in result["report"]
+    assert "non intégrée au résultat" in result["report"]
     assert "54" in result["report"]
     assert "unverified_model_readings" not in result["payload"]
 
@@ -136,11 +136,11 @@ def test_tesseract_timeout_is_explicitly_unverified_not_a_crash(caplog):
         with pytest.raises(UnreadableOCR, match="Délai OCR dépassé"):
             main.ocr_image(Image.new("RGB", (20, 20)))
         result = list(main.run_extraction_ui(str(main.EXAMPLES[0][1])))[-1]
-    payload, report, technical, validation = result
+    payload, report, technical, advanced, validation, download = result
     assert payload["total_ht"] is None
     assert "Preuves OCR insuffisantes" in report
     assert not validation["flags"]
-    assert "Délai OCR dépassé" in technical
+    assert "Temps OCR dépassé" in technical
     assert "Traceback" in caplog.text
 
 

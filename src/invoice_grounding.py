@@ -3,6 +3,8 @@
 import json
 import logging
 import math
+import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal, DecimalException, ROUND_HALF_UP, localcontext
@@ -522,7 +524,11 @@ def run_grounded_inference(
     errors = []
     quota_failed = False
     initial = None
+    passes_requested = 0
+    request_elapsed_seconds = 0.0
     if evidence.available and not document_quality(evidence):
+        passes_requested += 1
+        started = time.perf_counter()
         try:
             initial = predict(row, messages)
             attempts.append(initial)
@@ -533,6 +539,8 @@ def run_grounded_inference(
             LOGGER.exception("Initial invoice inference failed (%s: %r)", type(exc).__name__, exc)
             errors.append("La première passe a échoué : " + inference_error(exc))
             quota_failed = "quota" in errors[-1].casefold()
+        finally:
+            request_elapsed_seconds += time.perf_counter() - started
     grounded = reconcile(evidence, passes or [{}])
     correction_attempted = False
     retryable_rows = [index for index in grounded.failed_rows if index < len(evidence.rows)]
@@ -545,6 +553,8 @@ def run_grounded_inference(
             "id": row.get("id", "invoice") + "-targeted",
             "input": focused[-1]["content"], "correction": True, "max_new_tokens": 512,
         }
+        passes_requested += 1
+        started = time.perf_counter()
         try:
             corrected = predict(focused_row, focused)
             attempts.append(corrected)
@@ -559,6 +569,8 @@ def run_grounded_inference(
         except recoverable_errors as exc:
             LOGGER.exception("Targeted invoice inference failed (%s: %r)", type(exc).__name__, exc)
             errors.append("La seconde passe a échoué : " + inference_error(exc))
+        finally:
+            request_elapsed_seconds += time.perf_counter() - started
     warnings = [*grounded.warnings, *errors, *grounded.report()]
     suggestions = {}
     original = passes[0] if passes else {}
@@ -578,6 +590,38 @@ def run_grounded_inference(
             value = original.get(path)
         if value is not None:
             suggestions[path] = str(value) if isinstance(value, Decimal) else value
+    retry_wait = None
+    if errors and quota_failed:
+        wait = re.search(r"réessayer dans\s+([^.(]+)", errors[0], re.I)
+        retry_wait = wait.group(1).strip() if wait else None
+    if passes:
+        model_reason = None
+    elif quota_failed:
+        model_reason = "quota"
+    elif not evidence.available or document_quality(evidence):
+        model_reason = "preuves OCR insuffisantes"
+    elif errors:
+        model_reason = "indisponibilité technique"
+    else:
+        model_reason = "aucune passe n’a été demandée"
+    model_info = {
+        "used": bool(attempts),
+        "reason": model_reason,
+        "failure_reason": (
+            "quota" if any("quota" in error.casefold() for error in errors)
+            else "indisponibilité technique" if errors else None
+        ),
+        "retry_wait": retry_wait,
+        "passes_requested": passes_requested,
+        "passes_succeeded": len(passes),
+        "duration_seconds": request_elapsed_seconds,
+        "generation_seconds": sum(
+            attempt.get("generation_seconds", 0) for attempt in attempts
+            if isinstance(attempt.get("generation_seconds", 0), (int, float))
+        ),
+        "determinism": "génération gloutonne ; répétabilité non mesurée sur plusieurs exécutions"
+        if passes else "non applicable",
+    }
     if any(status != VALID for status in grounded.statuses.values()):
         LOGGER.warning("Document grounding for %s: %s", row.get("id", "invoice"), grounded.statuses)
     if any(flag.severity != "information" for flag in grounded.validation.flags):
@@ -591,11 +635,14 @@ def run_grounded_inference(
         "report": render_report(
             evidence, grounded.validation, grounded.statuses, errors, available=evidence.available,
             insufficient=bool(document_quality(evidence, passes[0] if passes else {})),
-            suggestions=suggestions,
+            suggestions=suggestions, model_info=model_info,
         ),
         "unverified_model_readings": suggestions,
         "provenance": grounded.provenance, "attempts": attempts,
-        "attempt_count": 1 + int(correction_attempted), "correction_attempted": correction_attempted,
+        "attempt_count": passes_requested, "passes_requested": passes_requested,
+        "passes_succeeded": len(passes), "model_info": model_info,
+        "request_elapsed_seconds": request_elapsed_seconds,
+        "correction_attempted": correction_attempted,
         "validation_errors": errors, "arithmetic_warnings": grounded.warnings,
         "operational_error": "; ".join(errors) or None,
         "completion_tokens": sum(attempt.get("completion_tokens") or 0 for attempt in attempts),

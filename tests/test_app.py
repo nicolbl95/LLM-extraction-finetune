@@ -380,7 +380,7 @@ class AppTests(unittest.TestCase):
                 self.assertNotIn("cohérence des montants HT contrôlée", updates[-1][1])
                 self.assertEqual(model.predict.call_count, 1)
 
-    def test_corrected_anomalies_remain_visible_above_json(self):
+    def test_model_reading_error_is_not_reported_as_invoice_anomaly(self):
                 invalid = {**self.gold, "total_ht": 999}
                 model = MagicMock()
                 model.predict.side_effect = [
@@ -394,9 +394,9 @@ class AppTests(unittest.TestCase):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
                 payload, status = updates[-1]
                 self.assertEqual(payload, self.gold)
-                self.assertIn("récupérée", status)
+                self.assertIn("Lecture incomplète", status)
                 self.assertNotIn("999", status)
-                self.assertIn("Aucune anomalie", status)
+                self.assertIn("Aucune anomalie n’est affirmée", status)
                 demo = main.build_app()
                 components = demo.config["components"]
                 status_index = next(
@@ -443,7 +443,7 @@ class AppTests(unittest.TestCase):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
                 self.assertIsNone(updates[-1][0][field])
                 self.assertEqual(updates[-1][0]["total_ttc"], self.gold["total_ttc"])
-                self.assertIn("neutralisée", updates[-1][1])
+                self.assertIn("Valeur non recoupée : à vérifier manuellement.", updates[-1][1])
                 json.dumps(updates[-1][0], allow_nan=False)
                 self.assertLessEqual(model.predict.call_count, 2)
 

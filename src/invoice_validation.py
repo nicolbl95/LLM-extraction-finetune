@@ -39,9 +39,14 @@ class Flag:
 class Validation:
     flags: list[Flag] = field(default_factory=list)
     passed: list[str] = field(default_factory=list)
+    not_verified: list[str] = field(default_factory=list)
 
     def export(self) -> dict:
-        return {"flags": [asdict(flag) for flag in self.flags], "passed": self.passed}
+        return {
+            "flags": [asdict(flag) for flag in self.flags],
+            "passed": self.passed,
+            "not_verified": self.not_verified,
+        }
 
 
 def rounded(value: Decimal) -> Decimal:
@@ -153,7 +158,11 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
     ):
         return result
     today = today or date.today()
-    certain_lines = [line for line in evidence.lines if all(token.confidence >= 60 for token in line.tokens)]
+    cross_checked = evidence.source_kind == "consensus" and evidence.ocr_cross_checked
+    certain_lines = [
+        line for line in evidence.lines
+        if cross_checked or all(token.confidence >= 60 for token in line.tokens)
+    ]
     evidence = replace(evidence, text="\n".join(line.text for line in certain_lines))
 
     def issue(code, severity, location, printed, expected, difference, reason):
@@ -163,10 +172,27 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
     bad_lines = []
     signatures = {}
     row_taxes: dict[Decimal, list[Decimal]] = {}
+    if not evidence.rows:
+        result.not_verified.append("Lignes : non vérifiables, aucun tableau n’a été identifié.")
     for index, row in enumerate(evidence.rows):
         values = {key: unique_value(row.cells.get(key, [])) for key in ("quantity", "unit_price", "total_ht")}
-        certain = all(token.confidence >= 60 for token in row.line.tokens)
+        if len({number.value for number in row.cells.get("quantity", [])}) > 1:
+            quantities = sorted({number.value for number in row.cells.get("quantity", [])})
+            price = values["unit_price"]
+            amount = values["total_ht"]
+            compatible = [
+                quantity for quantity in quantities
+                if price is not None and amount is not None
+                and abs(rounded(quantity * price) - amount) <= TOLERANCE
+            ]
+            if len(compatible) == 1:
+                values["quantity"] = compatible[0]
+        certain = cross_checked or all(token.confidence >= 60 for token in row.line.tokens)
         if not certain or any(value is None for value in values.values()):
+            result.not_verified.append(
+                f"Ligne {index + 1} : calcul non vérifiable, une ou plusieurs valeurs imprimées "
+                "sont absentes, ambiguës ou insuffisamment recoupées."
+            )
             continue
         quantity, price, amount = (values[key] for key in ("quantity", "unit_price", "total_ht"))
         expected = rounded(quantity * price)
@@ -202,11 +228,18 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
         else:
             signatures[signature] = index + 1
     certain_boxes = {(line.page, line.box) for line in certain_lines}
-    ht = unique_value([n for n in evidence.totals.get("total_ht", []) if (n.page, n.box) in certain_boxes])
-    ttc = unique_value([n for n in evidence.totals.get("total_ttc", []) if (n.page, n.box) in certain_boxes])
-    evidence = replace(evidence, taxes=[tax for tax in evidence.taxes if (tax.amount.page, tax.amount.box) in certain_boxes])
+    ht_numbers = evidence.totals.get("total_ht", [])
+    ttc_numbers = evidence.totals.get("total_ttc", [])
+    taxes = evidence.taxes
+    if not cross_checked:
+        ht_numbers = [n for n in ht_numbers if (n.page, n.box) in certain_boxes]
+        ttc_numbers = [n for n in ttc_numbers if (n.page, n.box) in certain_boxes]
+        taxes = [tax for tax in taxes if (tax.amount.page, tax.amount.box) in certain_boxes]
+    ht = unique_value(ht_numbers)
+    ttc = unique_value(ttc_numbers)
+    evidence = replace(evidence, taxes=taxes)
     if ht is not None and printed_rows and len(printed_rows) == len(evidence.rows):
-        discounts = [
+        discounts = evidence.discounts if cross_checked else [
             number for number in evidence.discounts if (number.page, number.box) in certain_boxes
         ]
         line_sum = sum(printed_rows, Decimal(0)) - sum((abs(number.value) for number in discounts), Decimal(0))
@@ -221,7 +254,15 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
                 "Sous-total : somme des montants imprimés"
                 + (" moins remise séparée imprimée" if discounts else "") + " = HT."
             )
+    elif ht is not None:
+        result.not_verified.append(
+            "Sous-total : non vérifiable, toutes les lignes ou montants imprimés ne sont pas disponibles."
+        )
+    else:
+        result.not_verified.append("Sous-total : non vérifiable, montant HT global absent ou ambigu.")
     taxes = {tax.rate.value if tax.rate else None: tax.amount.value for tax in evidence.taxes}
+    if not taxes:
+        result.not_verified.append("TVA par taux : non vérifiable, aucune ventilation n’a été lue.")
     unambiguous_taxes = len({(tax.rate.value if tax.rate else None, tax.amount.value) for tax in evidence.taxes}) == len(taxes)
     if ht is not None and ttc is not None and evidence.taxes and unambiguous_taxes:
         total_tax = sum(taxes.values(), Decimal(0))
@@ -230,8 +271,24 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
                   f"HT imprimé {ht} + TVA imprimée {total_tax} ne correspond pas au TTC imprimé.")
         else:
             result.passed.append(f"HT + taxes lues ({total_tax}) = TTC ; taux : {', '.join(str(rate) + ' %' for rate in taxes)}.")
+    else:
+        result.not_verified.append(
+            "HT + TVA = TTC : non vérifiable, total HT, total TTC ou ventilation de TVA absent ou ambigu."
+        )
     for rate, tax in taxes.items():
-        if rate is None or not printed_rows or len(printed_rows) != len(evidence.rows):
+        if rate is None:
+            result.not_verified.append("TVA : taux non lu ou ambigu.")
+            continue
+        if rate == 0:
+            if abs(tax) > TOLERANCE:
+                issue("tax_rate", "erreur", "Taxe à 0 %", tax, 0, abs(tax), "Une taxe au taux imprimé de 0 % doit être nulle.")
+            else:
+                result.passed.append("TVA 0 % : montant nul.")
+            continue
+        if not printed_rows or len(printed_rows) != len(evidence.rows):
+            result.not_verified.append(
+                f"TVA {rate} % : base non vérifiable, une ou plusieurs lignes ne sont pas suffisamment recoupées."
+            )
             continue
         if sum(map(len, row_taxes.values())) == len(evidence.rows) and rate in row_taxes:
             expected_rows = sum(row_taxes[rate], Decimal(0))
@@ -249,12 +306,7 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
                 issue("tax_printed_basis", "erreur", f"Taxe à {rate} %", f"base {base}, taxe {tax}",
                       expected_tax, abs(expected_tax - tax), "La base et le taux imprimés ne correspondent pas à la taxe imprimée.")
             else:
-                result.passed.append(f"Taxe {rate} % : base imprimée {base} × taux = {tax}.")
-        elif rate == 0:
-            if abs(tax) > TOLERANCE:
-                issue("tax_rate", "erreur", "Taxe à 0 %", tax, 0, abs(tax), "Une taxe au taux imprimé de 0 % doit être nulle.")
-            else:
-                result.passed.append("Taxe 0 % : montant nul.")
+                result.passed.append(f"TVA {rate} % : base imprimée {base} × taux = {tax}.")
         elif len(taxes) == 1 and ht is not None:
             per_line = sum((rounded(amount * rate / 100) for amount in printed_rows), Decimal(0))
             on_base = rounded(ht * rate / 100)
@@ -262,7 +314,7 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
                 issue("tax_rate", "erreur", f"Taxe à {rate} %", tax, f"{on_base} (base) ou {per_line} (lignes)",
                       min(abs(tax - per_line), abs(tax - on_base)), "Le taux et les bases imprimées ne justifient pas la taxe lue.")
             else:
-                result.passed.append(f"Taxe {rate} % : cohérente avec la base ou l'arrondi par ligne.")
+                result.passed.append(f"TVA {rate} % : cohérente avec la base ou l'arrondi par ligne.")
         elif len(printed_rows) <= 16:
             subsets = []
             for count in range(len(printed_rows) + 1):
@@ -272,10 +324,17 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
                     if min(abs(rounded(base * rate / 100) - tax), abs(per_line - tax)) <= TOLERANCE:
                         subsets.append(indexes)
             if len(subsets) == 1:
-                result.passed.append(f"Taxe {rate} % : base identifiée sur les lignes {', '.join(str(i + 1) for i in subsets[0])}.")
+                result.passed.append(
+                    f"TVA {rate} % : base identifiée sur les lignes "
+                    f"{', '.join(str(i + 1) for i in subsets[0])}."
+                )
             elif not subsets:
                 issue("tax_basis", "avertissement", f"Taxe à {rate} %", tax, "base taxable à vérifier", "",
                       "Aucun regroupement des montants imprimés ne justifie ce taux ; ventilation nécessaire.")
+            else:
+                result.not_verified.append(
+                    f"TVA {rate} % : plusieurs bases possibles ; aucune ventilation unique ne peut être confirmée."
+                )
     if re.search(r"discount already applied|remise.*(?:incluse|appliqu)", evidence.text, re.I):
         result.passed.append("Remise annoncée déjà incluse dans les prix nets : aucune seconde application.")
     _names(evidence, issue)
@@ -287,11 +346,25 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
         else:
             issue(f"identifier_{kind}", IDENTIFIER_SEVERITIES[kind], identifier_labels[kind], value,
                   "structure ou clé de contrôle valide", "",
-                  "Contrôle informatif : ce contrôle échoue sur des identifiants synthétiques de référence."
-                  if IDENTIFIER_SEVERITIES[kind] == "information" else
+                  "SIRET : la clé de contrôle ne correspond pas. À vérifier si ce numéro est réel."
+                  if kind == "siret" else
                   "La structure ou la clé imprimée ne satisfait pas le contrôle ; identifiant à vérifier.")
     _country(evidence, result, issue)
+    if evidence.locale:
+        currency = {"fr-FR": "EUR", "en-GB": "GBP", "en-US": "USD"}.get(evidence.locale)
+        if currency and not any(
+            message.startswith(f"Devise {currency} cohérente avec le préfixe")
+            for message in result.passed
+        ):
+            result.passed.append(f"Devise lue : {currency}.")
+    else:
+        result.not_verified.append("Devise : non vérifiable, aucune devise unique n’a été lue.")
     if evidence.source_kind == "consensus":
+        for flag in result.flags:
+            result.not_verified.append(
+                f"{flag.location} : non vérifiable, les lectures OCR ne permettent pas "
+                "de confirmer ce contrôle."
+            )
         result.flags = []
     result.flags.sort(key=lambda flag: {"erreur": 0, "avertissement": 1, "information": 2}[flag.severity])
     return result
@@ -337,7 +410,7 @@ def _dates(evidence, result, issue, today):
             if value.year < 1990 or value > today + timedelta(days=366):
                 issue("date_plausibility", "avertissement", f"Date de {kind}", value,
                       "date plausible à confirmer", "", "Date très ancienne ou distante de plus d'un an dans le futur.")
-        else:
+        elif line.partition(":")[2].strip():
             issue("date_invalid", "avertissement", f"Date de {kind}", line, "date calendaire valide", "",
                   "Date illisible ou impossible ; aucune interprétation supposée.")
     if len(styles) > 1:
@@ -363,6 +436,10 @@ def _dates(evidence, result, issue, today):
                     result.passed.append(f"Échéance : {invoice} + {days} jours = {due}.")
         else:
             result.passed.append("Échéance postérieure ou égale à la date de facture.")
+    if "facture" not in dates:
+        result.not_verified.append("Date de facture : non vérifiable, date non lue.")
+    if "échéance" not in dates:
+        result.not_verified.append("Échéance : non vérifiable, date d’échéance non lue.")
 
 
 def _country(evidence, result, issue):
@@ -401,73 +478,136 @@ def _country(evidence, result, issue):
                       "taux applicable à confirmer", "", "Taux inhabituel pour le pays ; aucune règle fiscale supposée certaine.")
 
 
+def _report_group(message: str) -> str:
+    folded_message = folded(message)
+    if folded_message.startswith(("ligne", "sous-total", "ht +")):
+        return "Calculs"
+    if folded_message.startswith(("tva", "taxe")) or " taxe " in folded_message:
+        return "Taxes"
+    if folded_message.startswith(("date", "echeance")) or "echeance" in folded_message:
+        return "Dates"
+    if folded_message.startswith(("identifiant", "siret", "iban", "vat uk", "ein")):
+        return "Identifiants"
+    return "Cohérence"
+
+
+def _human_field_name(path: str) -> str:
+    labels = {
+        "supplier_name": "Fournisseur",
+        "invoice_date": "Date de facture",
+        "total_ht": "Total HT",
+        "total_ttc": "Total TTC",
+        "description": "description",
+        "quantity": "quantité",
+        "unit_price": "prix unitaire",
+        "line_items": "Ligne",
+    }
+    parts = path.split(".")
+    if parts[0] != "line_items" or len(parts) < 3:
+        return labels.get(path, path.replace("_", " ").capitalize())
+    try:
+        line_number = int(parts[1]) + 1
+    except ValueError:
+        return path.replace("_", " ")
+    return f"Ligne {line_number} — {labels.get(parts[2], parts[2].replace('_', ' '))}"
+
+
 def render_report(evidence: DocumentEvidence, validation: Validation, statuses: dict[str, str],
                   technical_errors: list[str], *, available: bool = True, insufficient: bool = False,
-                  suggestions: dict | None = None) -> str:
+                  suggestions: dict | None = None, model_info: dict | None = None) -> str:
     insufficient = insufficient or bool(evidence.quality_issues) or (
         evidence.source_kind in {"ocr", "mixed"} and not evidence.ocr_cross_checked
     )
-    identifier = re.search(r"\b(?:FR|GB|US)-\d{4}-\d+\b", evidence.text)
-    title = identifier.group() if identifier else "document téléversé"
-    currency = {"fr-FR": "EUR", "en-GB": "GBP", "en-US": "USD"}.get(evidence.locale, "devise non identifiée")
+    title = f"Analyse de la facture {evidence.invoice_number}" if evidence.invoice_number else "Analyse de la facture"
     verified = sum(value in {"valide", "récupéré (corroboré par OCR)"} for value in statuses.values())
-    anomalies = [flag for flag in validation.flags if flag.severity != "information"]
-    lines = [f"## Analyse de la facture {title} ({currency})"]
-    doubtful = sum(value in {"neutralisé (non fiable)", "non vérifié"} for value in statuses.values())
-    if statuses and doubtful / len(statuses) > .5:
+    to_check = max(0, len(statuses) - verified)
+    anomalies = [flag for flag in validation.flags if flag.severity in {"erreur", "avertissement"}]
+    information = [flag for flag in validation.flags if flag.severity == "information"]
+    if anomalies:
+        verdict = f"⚠️ {len(anomalies)} anomalie(s) dans la facture"
+    elif to_check or validation.not_verified or insufficient:
+        verdict = f"⚠️ Lecture incomplète : {max(1, to_check)} champs à vérifier"
+    else:
+        verdict = f"✅ Facture cohérente : {verified} champs vérifiés sur {len(statuses)}"
+    lines = [f"**{verdict}**"]
+    if statuses and to_check / len(statuses) > .5:
         lines.append(
             "**Image de qualité insuffisante : renvoyez un scan plus net "
-            "(300 dpi, bien droit, sans flou)**"
+            "(300 dpi, bien droit, sans flou).**"
         )
-    if insufficient:
-        lines.append("**Preuves OCR insuffisantes : extraction non recoupée.**")
-    elif not available:
-        lines.append("**Preuves OCR indisponibles : extraction non recoupée.**")
-    elif anomalies:
-        lines.append(f"**{len(anomalies)} anomalie(s) détectée(s) dans la facture.**")
-    elif not verified:
-        lines.append("**Analyse partielle : preuves insuffisantes pour conclure.**")
-    else:
-        lines.append("**Aucune anomalie détectée dans les contrôles réalisables.**")
-    lines.append(f"{verified} champs sur {len(statuses)} vérifiés dans le document.")
+    details = model_info or {}
+    if not details.get("used"):
+        reason = details.get("reason", "indisponibilité technique")
+        if reason == "quota":
+            wait = details.get("retry_wait") or "un délai non communiqué"
+            lines.append(
+                "Lecture effectuée par reconnaissance de texte (OCR) : le modèle d'extraction "
+                "était indisponible (quota). Résultat vérifié dans le document. "
+                f"Nouvel essai possible dans {wait}."
+            )
+        elif insufficient or not available:
+            lines.append("Le modèle n’a pas été lancé : les éléments lus ne permettaient pas une extraction suffisamment recoupée.")
+        else:
+            lines.append("Lecture effectuée par reconnaissance de texte (OCR) : le modèle d’extraction n’a pas pu être utilisé.")
+    elif details.get("failure_reason"):
+        cause = "quota ZeroGPU" if details["failure_reason"] == "quota" else "indisponibilité technique"
+        lines.append(f"Une passe d’extraction n’a pas abouti ({cause}) ; les contrôles disponibles restent affichés.")
+    lines.append(f"### {title}")
+    if not available:
+        lines.append("Preuves OCR indisponibles : extraction non recoupée.")
+    elif insufficient:
+        lines.append("Preuves OCR insuffisantes : extraction non recoupée.")
     lines.append("### Anomalies dans la facture")
-    if not validation.flags:
-        lines.append("Aucune anomalie documentaire détectée." if available and not insufficient else "Aucune conclusion documentaire possible sans preuves suffisantes.")
-    for flag in validation.flags:
+    if not anomalies:
+        lines.append(
+            "Aucune anomalie détectée parmi les contrôles réalisables."
+            if available and not insufficient and not validation.not_verified else
+            "Aucune anomalie n’est affirmée avec les éléments disponibles."
+        )
+    for flag in anomalies:
         lines.append(
             f"- **{flag.severity.capitalize()} — {flag.location}** : imprimé « {flag.printed} » ; "
             f"attendu : {flag.expected}. " + (f"Écart : {flag.difference}. " if flag.difference else "") + flag.reason
         )
+    lines.append("### Informations")
+    if not evidence.invoice_number:
+        lines.append("- Numéro de facture non lu.")
+    if information:
+        for flag in information:
+            if flag.code == "identifier_siret":
+                lines.append("- SIRET : la clé de contrôle ne correspond pas. À vérifier si ce numéro est réel.")
+            else:
+                lines.append(f"- {flag.location} : {flag.reason}")
     lines.append("### Contrôles réussis")
-    lines.extend(f"- {message}" for message in validation.passed)
-    if not validation.passed:
-        lines.append("Aucun contrôle documentaire concluant avec les preuves disponibles.")
-    recovered = sum(value == "récupéré (corroboré par OCR)" for value in statuses.values())
-    neutralized = sum(value == "neutralisé (non fiable)" for value in statuses.values())
-    unverified = sum(value == "non vérifié" for value in statuses.values())
-    lines.append(
-        f"\nLecture : {recovered} valeur(s) récupérée(s), {neutralized} neutralisée(s), "
-        f"{unverified} non vérifiée(s). Détails de lecture dans « Détails techniques »."
+    grouped = {}
+    for message in validation.passed:
+        grouped.setdefault(_report_group(message), []).append(message)
+    for message in validation.not_verified:
+        grouped.setdefault(_report_group(message), []).append(f"Non vérifiable : {message}")
+    for group in ("Calculs", "Taxes", "Dates", "Identifiants", "Cohérence"):
+        if group not in grouped:
+            continue
+        lines.append(f"#### {group}")
+        lines.extend(f"- {message}" for message in grouped[group])
+    if not grouped:
+        lines.append("- Aucun contrôle documentaire réalisable.")
+    uncertain_label = f"{to_check} champ incertain" if to_check <= 1 else f"{to_check} champs incertains"
+    unchecked_controls = (
+        f" ; {len(validation.not_verified)} contrôle(s) non vérifiable(s)"
+        if validation.not_verified else ""
     )
-    if doubtful:
-        lines.append("**Valeur non recoupée : à vérifier manuellement.** Les lectures ci-dessous ne font pas partie du JSON standardisé.")
+    lines.append(
+        f"**{verified} champs vérifiés dans le document ; {uncertain_label}{unchecked_controls}.**"
+    )
+    if to_check:
+        lines.append("Valeur non recoupée : à vérifier manuellement.")
     if suggestions:
-        lines.append("### Lectures du modèle non fiables — hors JSON")
+        lines.append("### Lectures à vérifier — non intégrées au résultat")
+        lines.append("Valeur non recoupée : à vérifier manuellement.")
         for path, value in suggestions.items():
             escaped = json.dumps(value, ensure_ascii=False, default=str).replace("`", "\\u0060")
-            lines.append(f"- `{path}` — lecture du modèle non vérifiée : `{escaped}`.")
-    for error in technical_errors:
-        if "Quota ZeroGPU" in error:
-            lines.append(error[error.index("Quota ZeroGPU"):].split(" (", 1)[0])
-        else:
-            stage = "La seconde passe" if "seconde passe" in error else "La première passe"
-            if "incomplète" in error:
-                cause = "la réponse du modèle est incomplète"
-            elif "module" in error.casefold() or "cuda" in error.casefold():
-                cause = "le moteur d'inférence n'est pas disponible"
-            elif "message non communiqué" in error:
-                cause = "le service n'a pas communiqué la cause ; consultez les détails techniques"
-            else:
-                cause = "la réponse ou le service du modèle n'a pas permis une lecture exploitable"
-            lines.append(f"{stage} a échoué : {cause}. Repli sur les preuves documentaires disponibles.")
+            lines.append(
+                f"- { _human_field_name(path) } : valeur lue par le modèle (non intégrée au résultat) : "
+                f"`{escaped}`."
+            )
     return "\n\n".join(lines)

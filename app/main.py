@@ -2,11 +2,15 @@
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
+from collections import deque
 from functools import lru_cache
 from pathlib import Path
 
@@ -151,8 +155,12 @@ def preview_document(filename: str | None):
 
 def ocr_image(image: Image.Image, *, budget: ProcessingBudget | None = None) -> str:
     budget = budget or ProcessingBudget()
+    started = time.perf_counter()
+    calls = 0
     check_pixels(image.width * 2, image.height * 2)
     def reader(prepared, psm):
+        nonlocal calls
+        calls += 1
         timeout = min(OCR_CONFIG.call_seconds, budget.remaining())
         try:
             data = pytesseract.image_to_data(
@@ -179,6 +187,8 @@ def ocr_image(image: Image.Image, *, budget: ProcessingBudget | None = None) -> 
         raise UnreadableOCR(
             "Délai OCR dépassé : preuves insuffisantes, aucun chiffre n'est confirmé."
         ) from exc
+    evidence.ocr_calls = calls
+    evidence.ocr_elapsed_seconds = time.perf_counter() - started
     return EvidenceText(evidence)
 
 
@@ -293,7 +303,18 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics
         warnings.extend(result["warnings"])
     if diagnostics is not None:
         diagnostics.update(result)
-        diagnostics.update(ocr_available=evidence.available, ocr_lines=len(evidence.lines))
+        diagnostics.update(
+            evidence_available=evidence.available,
+            ocr_lines=len(evidence.lines),
+            ocr_calls=evidence.ocr_calls,
+            ocr_pages=evidence.ocr_pages,
+            ocr_elapsed_seconds=evidence.ocr_elapsed_seconds,
+            preprocessing_used=evidence.preprocessing_used,
+            source_kind=evidence.source_kind,
+            invoice_number=evidence.invoice_number,
+            ocr_quality_issues=evidence.quality_issues,
+            ocr_issues=evidence.issues,
+        )
     return result["payload"]
 
 
@@ -338,19 +359,132 @@ def run_extraction(filename: str | None, *, diagnostics: dict | None = None):
 def run_extraction_ui(filename: str | None):
     diagnostics = {}
     for payload, report in run_extraction(filename, diagnostics=diagnostics):
-        details = (
-            f"Preuves OCR : {'disponibles' if diagnostics.get('ocr_available') else 'indisponibles'} "
-            f"({diagnostics.get('ocr_lines', 0)} lignes lues).\n\n"
-            + "\n\n".join(diagnostics.get("warnings", []))
-            + f"\n\nVersion : {deployed_revision()}"
-            + f"\n\nPolitique OCR : {OCR_CONFIG.version} ({OCR_CONFIG.fingerprint()})"
-        ) if diagnostics else ""
-        yield payload, report, details, diagnostics.get("validation", {"flags": [], "passed": []})
+        if diagnostics:
+            engine_available, _ = ocr_availability()
+            preprocessing = ", ".join(diagnostics.get("preprocessing_used", [])) or "aucun"
+            read_reason = ""
+            quality_reasons = " ".join(diagnostics.get("ocr_quality_issues", [])).casefold()
+            if not diagnostics.get("evidence_available"):
+                read_reason = "OCR indisponible pour ce document."
+            elif "délai" in quality_reasons or "temps" in quality_reasons:
+                read_reason = "Temps OCR dépassé ; les champs non recoupés restent à vérifier."
+            elif diagnostics.get("ocr_quality_issues"):
+                read_reason = "Aucun texte suffisamment recoupé ; les champs restent à vérifier."
+            elif diagnostics.get("ocr_issues"):
+                read_reason = "Certaines preuves documentaires sont indisponibles."
+            method = {
+                "pdf": "PDF texte natif",
+                "consensus": "OCR recoupé",
+                "ocr": "OCR",
+                "text": "texte fourni",
+            }.get(diagnostics.get("source_kind"), "lecture documentaire")
+            model_info = diagnostics.get("model_info", {})
+            reason = {
+                "quota": "quota ZeroGPU indisponible",
+                "preuves OCR insuffisantes": "lecture du document insuffisante",
+                "indisponibilité technique": "indisponibilité technique",
+                "aucune passe n’a été demandée": "aucune demande d’extraction",
+            }.get(model_info.get("reason"), "")
+            model_state = "utilisé" if model_info.get("used") else f"non utilisé — {reason or 'non disponible'}"
+            generation = model_info.get("generation_seconds", 0)
+            request = model_info.get("duration_seconds", 0)
+            fields = []
+            statuses = diagnostics.get("field_statuses", {})
+            for path, status in statuses.items():
+                value = _payload_field(payload, path)
+                status_label = (
+                    "vérifié" if status in {"valide", "récupéré (corroboré par OCR)"}
+                    else "incertain" if status == "neutralisé (non fiable)"
+                    else "non lu"
+                )
+                source = (
+                    "modèle + OCR" if model_info.get("used") and status == "valide"
+                    else "OCR seul"
+                )
+                display = json.dumps(value, ensure_ascii=False, default=str) if value is not None else "—"
+                display = display.replace("|", "\\|")
+                fields.append(f"| {_human_field_name(path)} | {display} | {status_label} | {source} |")
+            short_revision = deployed_revision().split()[0][:7]
+            details = (
+                "### Lecture du document\n"
+                f"- OCR : {'disponible' if engine_available else 'indisponible'} ; "
+                f"méthode : {method} ; "
+                f"{diagnostics.get('ocr_lines', 0)} lignes lues ; "
+                f"{diagnostics.get('ocr_calls', 0)} appels Tesseract ; "
+                f"prétraitements : {preprocessing} ; "
+                f"durée : {diagnostics.get('ocr_elapsed_seconds', 0):.2f} s."
+                + (f"\n- {read_reason}" if read_reason else "") + "\n\n"
+                "### Modèle\n"
+                f"- {model_state} ; passes demandées : {model_info.get('passes_requested', 0)} ; "
+                f"réussies : {model_info.get('passes_succeeded', 0)} ; "
+                f"génération : {generation:.2f} s ; durée des appels : {request:.2f} s ; "
+                f"{model_info.get('determinism', 'répétabilité non mesurée')}.\n\n"
+                "### Champs\n"
+                "| Champ | Valeur | Statut | Source |\n|---|---|---|---|\n"
+                + "\n".join(fields) + "\n\n"
+                "### Version\n"
+                f"- {short_revision} · OCR : politique {OCR_CONFIG.version.split('-')[2]}"
+            )
+            advanced = (
+                f"- Révision complète : `{deployed_revision()}`\n"
+                f"- Empreinte de configuration OCR : `{OCR_CONFIG.fingerprint()}`"
+            )
+        else:
+            details = ""
+            advanced = ""
+        download = _download_json(payload) if payload is not None else None
+        yield (
+            payload, report, details, advanced,
+            diagnostics.get("validation", {"flags": [], "passed": [], "not_verified": []}),
+            download,
+        )
+
+
+def _payload_field(payload: dict | None, path: str):
+    if payload is None:
+        return None
+    parts = path.split(".")
+    value = payload
+    for part in parts:
+        if isinstance(value, list):
+            try:
+                value = value[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(value, dict):
+            value = value.get(part)
+        else:
+            return None
+    return value
+
+
+def _human_field_name(path: str) -> str:
+    labels = {
+        "supplier_name": "Fournisseur", "invoice_date": "Date de facture",
+        "total_ht": "Total HT", "total_ttc": "Total TTC",
+        "description": "Description", "quantity": "Quantité",
+        "unit_price": "Prix unitaire", "line_items": "Ligne",
+    }
+    parts = path.split(".")
+    if parts[0] == "line_items" and len(parts) == 3:
+        return f"Ligne {int(parts[1]) + 1} — {labels.get(parts[2], parts[2])}"
+    return labels.get(path, path)
+
+
+def _download_json(payload: dict) -> str:
+    cache_dir = Path(gr.utils.get_upload_folder())
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".json", prefix="invoice-",
+        dir=cache_dir, delete=False,
+    ) as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=False)
+        return handle.name
 
 
 def preview_ui(filename: str | None):
     image, payload, status = preview_document(filename)
-    return image, payload, status, "", {"flags": [], "passed": []}
+    return image, payload, status, "", "", {"flags": [], "passed": [], "not_verified": []}, None
 
 
 def ocr_availability() -> tuple[bool, str]:
@@ -382,10 +516,19 @@ def deployed_revision() -> str:
         return "indisponible — métadonnées de déploiement absentes"
 
 
+def short_revision() -> str:
+    revision = deployed_revision()
+    match = re.match(r"([a-fA-F0-9]{7,40})", revision)
+    return match.group(1)[:7] if match else revision
+
+
 def build_app() -> gr.Blocks:
     available, reason = ocr_availability()
     LOGGER.info("Startup OCR: available=%s; %s; revision=%s", available, reason, deployed_revision())
-    with gr.Blocks(title="Extraction standardisée de données de factures") as demo:
+    with gr.Blocks(
+        title="Extraction standardisée de données de factures",
+        delete_cache=(3600, 3600),
+    ) as demo:
         gr.Markdown(
             "# Extraction standardisée de données de factures\n"
             "Transformez vos factures françaises, britanniques et américaines "
@@ -411,22 +554,28 @@ def build_app() -> gr.Blocks:
                 extract = gr.Button("Extraire les données", variant="primary")
                 preview = gr.Image(label="Aperçu de la facture", type="pil", interactive=False)
             with gr.Column():
-                status = gr.Markdown("")
+                status = gr.Markdown("", buttons=["copy"])
                 result = gr.JSON(label="Résultat de l'extraction — JSON structuré")
+                download = gr.DownloadButton("Télécharger le JSON")
                 with gr.Accordion("Détails techniques", open=False):
                     technical = gr.Markdown("")
-                    validation = gr.JSON(label="validation.flags — hors du schéma standardisé")
+                    with gr.Accordion("Avancé", open=False):
+                        advanced = gr.Markdown("")
+                        validation = gr.JSON(label="Détails des contrôles — hors du résultat JSON")
         gr.HTML(
-            f"<footer>Version déployée : <code>{deployed_revision()}</code> · "
+            f"<footer>Version déployée : <code>{short_revision()}</code> · "
             f"OCR : {'disponible' if available else 'indisponible'}<br>"
             "Limite connue : les images floues ou inclinées peuvent donner plus de champs non vérifiés.</footer>"
         )
         upload.change(
-            preview_ui, inputs=[upload], outputs=[preview, result, status, technical, validation],
+            preview_ui, inputs=[upload],
+            outputs=[preview, result, status, technical, advanced, validation, download],
             concurrency_limit=1,
         )
         extract.click(
-            run_extraction_ui, inputs=[upload], outputs=[result, status, technical, validation], concurrency_limit=1,
+            run_extraction_ui, inputs=[upload],
+            outputs=[result, status, technical, advanced, validation, download],
+            concurrency_limit=1,
         )
     return demo.queue(default_concurrency_limit=1, max_size=8)
 
