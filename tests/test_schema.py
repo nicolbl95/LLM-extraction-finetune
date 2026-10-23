@@ -32,6 +32,35 @@ class SchemaTests(unittest.TestCase):
         line = LineItem.model_validate(self.line(quantity=0.3, unit_price=0.1, total_ht=0.03))
         self.assertEqual(line.total_ht, 0.03)
 
+    def test_decimal_comma_strings_preserve_fractional_digits(self):
+        for quantity in ("7,2", "7.2", " 7,2 "):
+            with self.subTest(quantity=quantity):
+                line = LineItem.model_validate(self.line(
+                    quantity=quantity, unit_price="95,07", total_ht="684,50",
+                ))
+                self.assertEqual(line.quantity, 7.2)
+                self.assertEqual(line.unit_price, 95.07)
+        self.assertEqual(
+            LineItem.model_validate(self.line(quantity="5,1", unit_price="10", total_ht="51")).quantity,
+            5.1,
+        )
+
+    def test_ambiguous_numbers_and_boolean_values_are_not_guessed(self):
+        for value in ("1,234", "1,234.56", "1.234,56", "7,2,0", "7 2", "7_2", True, False):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                LineItem.model_validate(self.line(quantity=value))
+
+    def test_supplier_normalization_preserves_name_and_rejects_ambiguous_ocr(self):
+        for name in ("  Acme \n LTD. ", "Acme Ltd", "Acme ltd."):
+            self.assertEqual(Invoice.model_validate(self.invoice(supplier_name=name)).supplier_name, "Acme Ltd")
+        for name in ("Acme LId", "Acme L1d", "Acme LtI", ""):
+            with self.subTest(name=name), self.assertRaises(ValidationError):
+                Invoice.model_validate(self.invoice(supplier_name=name))
+        self.assertEqual(
+            Invoice.model_validate(self.invoice(supplier_name="Lidl France")).supplier_name,
+            "Lidl France",
+        )
+
     def test_decimal_point_hallucination_is_rejected(self):
         with self.assertRaisesRegex(ValidationError, r"quantity \(25\.0\) \* unit_price \(5\.0\)"):
             Invoice.model_validate(self.invoice(line_items=[self.line(quantity=25)]))

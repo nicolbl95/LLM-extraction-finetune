@@ -21,7 +21,7 @@ from evaluate_baseline import FIELDS, TOLERANCE
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "data"))
 
-from schema import Invoice
+from schema import Invoice, safe_invoice_payload
 
 TEST_PATH = ROOT / "data" / "test.jsonl"
 LOCALE_CURRENCIES = {"fr-FR": "EUR", "en-GB": "GBP", "en-US": "USD"}
@@ -35,6 +35,11 @@ SYSTEM_PROMPT = (
     "Copier littéralement le texte exact des descriptions sans omettre de lettres. "
     "Préserve les quantités décimales et associe chaque quantité à son prix unitaire "
     "sur la même ligne, sans mélanger les colonnes. "
+    "7,2 devient 7.2 et 5,1 devient 5.1, jamais 72 ou 51. "
+    "Conserve le nom du fournisseur ; normalise seulement les espaces et la typographie "
+    "certaine de Ltd, sans deviner un suffixe OCR ambigu. "
+    "Pour un champ illisible ou irrécupérable, renvoie null, jamais un chiffre inventé "
+    "ou une valeur par défaut. "
     "Exemple fictif de lecture :\n"
     "Description | Quantité | Prix unitaire HT | Montant HT\n"
     "Maintenance préventive | 7,2 | 95,07 | 684,50\n"
@@ -273,6 +278,21 @@ def validate_invoice_json(raw: str, *, arithmetic_warnings: list[str] | None = N
     return payload
 
 
+def finalize_invoice_json(raw: str, *, warnings: list[str],
+                          initial_error: str | None = None) -> dict:
+    source = parse_object(raw)
+    if initial_error is not None:
+        try:
+            Invoice.model_validate(source)
+            state = "corrigée lors de la seconde passe"
+        except ValidationError:
+            state = "détectée, non résolue ou non vérifiable après la seconde passe"
+        warnings.append(f"Passe 1 — anomalie {state} :\n{initial_error}")
+    payload = safe_invoice_payload(source, warnings)
+    json.dumps(payload, allow_nan=False)
+    return payload
+
+
 def correction_messages(messages: list[dict], raw: str, error: Exception,
                         warnings: list[str]) -> list[dict]:
     arithmetic_focus = ""
@@ -306,7 +326,12 @@ def correction_messages(messages: list[dict], raw: str, error: Exception,
                 f"{arithmetic_focus}"
                 "Respecte strictement les valeurs de la facture réelle ci-dessus. Ne modifie pas les "
                 "montants pour simplement faire passer la validation et n'utilise pas "
-                "les valeurs de l'exemple fictif. Réponds uniquement par le JSON complet corrigé.\n\n"
+                "les valeurs de l'exemple fictif. Si un champ reste illisible, ambigu ou "
+                "irrécupérable, utilise null : ne conserve pas un chiffre ou un texte inventé. "
+                "Préserve 5,1 en 5.1 et les décimales, sans supprimer le séparateur. "
+                "Pour le fournisseur, ne remplace pas un suffixe OCR incertain par Ltd "
+                "sans confirmation dans la source. "
+                "Réponds uniquement par le JSON complet corrigé.\n\n"
                 "Relis attentivement la facture fournie (en faisant particulièrement attention "
                 "aux décimales des prix unitaires, aux quantités et aux totaux de lignes), "
                 "corrige l'erreur de calcul ou d'extraction, et renvoie un JSON rigoureusement valide."
@@ -323,48 +348,68 @@ def predict_with_correction(inference: BaseInference, row: dict) -> dict:
     errors = []
     operational_error = None
     correction_attempted = False
+    initial_error = None
     if initial["finish_reason"] == "stop":
         try:
             validate_invoice_json(initial["raw"])
         except (ValidationError, ValueError) as exc:
+            initial_error = str(exc)
             correction_attempted = True
             logging.warning("%s: validation failed; attempting one correction: %s", row["id"], exc)
             errors.append(str(exc))
             warnings = []
             try:
                 validate_invoice_json(initial["raw"], arithmetic_warnings=warnings)
-                initial_structure_valid = True
+                initial_object_valid = True
             except (ValidationError, ValueError) as structure_error:
                 logging.debug("%s: no structurally valid fallback: %s", row["id"], structure_error)
-                initial_structure_valid = False
+                try:
+                    parse_object(initial["raw"])
+                    initial_object_valid = True
+                except ValueError:
+                    initial_object_valid = False
+            initial_error = "\n".join([initial_error, *warnings])
             messages = correction_messages(messages, initial["raw"], exc, warnings)
             try:
                 corrected = inference.predict(row, messages=messages)
                 attempts.append(corrected)
                 if corrected["finish_reason"] == "stop":
-                    validate_invoice_json(corrected["raw"], arithmetic_warnings=[])
+                    parse_object(corrected["raw"])
                     selected = corrected
                 else:
                     operational_error = f"Correction incomplete: {corrected['finish_reason']}"
                     logging.warning("%s: %s", row["id"], operational_error)
-                    if not initial_structure_valid:
+                    if not initial_object_valid:
                         selected = corrected
             except (OSError, ValueError, RuntimeError, ImportError) as correction_error:
                 logging.warning("%s: correction failed: %s", row["id"], correction_error)
                 errors.append(str(correction_error))
-                if len(attempts) == 1:
-                    operational_error = str(correction_error)
-                elif not initial_structure_valid:
+                operational_error = str(correction_error)
+                if len(attempts) > 1 and not initial_object_valid:
                     selected = attempts[-1]
     warnings = []
+    result_warnings = []
+    payload = None
     try:
         validate_invoice_json(selected["raw"], arithmetic_warnings=warnings)
     except (ValidationError, ValueError) as final_error:
         errors.append(str(final_error))
+    if selected["finish_reason"] == "stop":
+        try:
+            payload = finalize_invoice_json(
+                selected["raw"], warnings=result_warnings, initial_error=initial_error,
+            )
+        except ValueError as final_error:
+            if initial_error:
+                result_warnings.append(f"Passe 1 — anomalie non résolue :\n{initial_error}")
+            result_warnings.append(f"JSON inutilisable : {final_error}")
+    if operational_error:
+        result_warnings.append(f"Auto-correction impossible : {operational_error}")
     return {
         **selected, "attempts": attempts, "attempt_count": 2 if correction_attempted else 1,
         "correction_attempted": correction_attempted,
         "validation_errors": errors, "arithmetic_warnings": warnings,
+        "payload": payload, "warnings": result_warnings,
         "operational_error": operational_error,
         "completion_tokens": sum(attempt["completion_tokens"] for attempt in attempts),
         "prompt_tokens": sum(attempt["prompt_tokens"] for attempt in attempts),

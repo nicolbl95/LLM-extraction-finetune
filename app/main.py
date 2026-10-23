@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from evaluate_finetuned import (
     INSTRUCTION, SYSTEM_PROMPT, Invoice, LoRAInference, check_adapter,
-    correction_messages, validate_invoice_json,
+    correction_messages, finalize_invoice_json, parse_object, validate_invoice_json,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -234,33 +234,42 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None) -> dict:
     prediction = predict_invoice(row, messages)
     if prediction["finish_reason"] != "stop":
         raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
-    previous_payload = None
     previous_warnings = []
+    current_warnings = []
     try:
-        return validate_invoice_json(prediction["raw"])
+        validate_invoice_json(prediction["raw"])
     except (ValidationError, ValueError) as exc:
+        initial_error = str(exc)
+        initial_raw = prediction["raw"]
         LOGGER.warning("Invoice response failed validation; retrying once (%s)", type(exc).__name__)
         try:
-            previous_payload = validate_invoice_json(
+            validate_invoice_json(
                 prediction["raw"], arithmetic_warnings=previous_warnings,
             )
         except (ValidationError, ValueError) as structure_error:
             LOGGER.debug("No structurally valid fallback (%s)", type(structure_error).__name__)
+        initial_error = "\n".join([initial_error, *previous_warnings])
         messages = correction_messages(messages, prediction["raw"], exc, previous_warnings)
-    current_warnings = []
-    try:
-        prediction = predict_invoice(row, messages)
-        if prediction["finish_reason"] != "stop":
-            raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
-        payload = validate_invoice_json(prediction["raw"], arithmetic_warnings=current_warnings)
-    except (OSError, ValueError, RuntimeError, ImportError, gr.Error) as exc:
-        if previous_payload is None:
-            raise
-        payload = previous_payload
-        current_warnings = [
-            *previous_warnings,
-            f"Auto-correction impossible : {exc}. Le premier JSON structurellement valide est conservé.",
-        ]
+        try:
+            corrected = predict_invoice(row, messages)
+            if corrected["finish_reason"] != "stop":
+                raise ValueError("Réponse du modèle incomplète. Essayez une facture plus courte.")
+            parse_object(corrected["raw"])
+            prediction = corrected
+        except (OSError, ValueError, RuntimeError, ImportError, gr.Error) as correction_error:
+            try:
+                parse_object(initial_raw)
+            except ValueError:
+                raise correction_error
+            current_warnings.append(
+                f"Auto-correction impossible : {correction_error}. "
+                "La première réponse est utilisée uniquement pour les champs récupérables."
+            )
+        payload = finalize_invoice_json(
+            prediction["raw"], warnings=current_warnings, initial_error=initial_error,
+        )
+    else:
+        payload = finalize_invoice_json(prediction["raw"], warnings=current_warnings)
     if current_warnings:
         LOGGER.warning("Invoice displayed with warnings: %s", "; ".join(current_warnings))
         if warnings is not None:
@@ -297,7 +306,8 @@ def run_extraction(filename: str | None):
         details = "\n".join(f"- {warning}" for warning in warnings)
         yield payload, (
             "**Avertissement — vérification manuelle nécessaire.**\n\n"
-            "Le JSON reste disponible : sa structure est valide, mais des anomalies subsistent.\n\n"
+            "Le JSON conserve les champs récupérables. Les champs non fiables sont mis à null ; "
+            "les anomalies corrigées restent signalées dans l'historique.\n\n"
             f"{details}\n\nAucune valeur n'a été recalculée de force."
         )
     else:

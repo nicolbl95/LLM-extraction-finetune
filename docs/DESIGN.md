@@ -28,6 +28,45 @@ global. La tolérance absolue est de 0,02 inclus, calculée avec `Decimal`.
 Les montants extraits ne sont pas réécrits ou arrondis pour masquer un écart ;
 les valeurs non finies sont rejetées avant les calculs.
 
+Les chaînes décimales simples `7,2`, `5,1` et `95,07` sont converties en
+nombres sans supprimer leur séparateur. Les formats mixtes (`1.234,56`,
+`1,234.56`), les regroupements ambigus (`1,234`), les chiffres séparés par
+des espaces ou underscores et les booléens sont rejetés, plutôt que devinés.
+La virgule suivie de trois chiffres après une partie entière de 1 à 3 chiffres
+non nulle est considérée ambiguë ; utiliser le point décimal pour lever ce doute.
+Les noms de fournisseurs sont normalisés uniquement pour les espaces et le
+suffixe certain `Ltd` (casse et point final). Un suffixe OCR tel que `LId`
+ou `L1d` déclenche la correction ; il n'est jamais remplacé arbitrairement.
+
+## Sortie partielle et historique des avertissements
+
+Le schéma strict `Invoice` reste non nullable. Après les deux passes au maximum,
+la sortie d'affichage utilise un modèle séparé `InvoiceResult`, nullable.
+Chaque erreur de type, champ manquant, texte vide ou marqueur `ERROR`/`INVALID`
+est listé avec son chemin et remplacé par `null`. Les normalisations décimales
+et typographiques sont également explicites dans les avertissements.
+
+Si une ligne reste incohérente, ses trois champs `quantity`, `unit_price` et
+`total_ht` deviennent `null`, faute de pouvoir isoler l'opérande fautif.
+Le `total_ht` global devient alors non vérifiable et est neutralisé aussi.
+Si l'écart global n'est pas attribuable à une ligne certaine, tous les montants
+HT impliqués sont neutralisés, mais les quantités et prix des lignes localement
+cohérentes sont conservés. Un `total_ttc` fini n'est pas recalculé ou supprimé
+par cette seule règle HT : il n'existe pas ici de contrôle des taxes.
+
+Les réponses brutes restent auditables, mais ne sont pas le JSON sécurisé
+destiné à l'utilisateur. Une réponse tronquée ou un JSON syntaxiquement
+invalide n'est jamais présenté comme un résultat partiel. Si la seconde passe
+est inutilisable, seuls les champs récupérables de la première sont conservés.
+Sans objet JSON exploitable, une erreur est affichée.
+
+L'en-tête au-dessus du JSON conserve les anomalies de la première passe,
+explicitement marquées comme corrigées lorsque la seconde est strictement
+valide, ainsi que tous les problèmes encore présents et les champs neutralisés.
+Ces contrôles ne prouvent pas la fidélité d'une extraction arithmétiquement
+cohérente au document source ; aucun fournisseur ni chiffre illisible n'est
+reconstitué par supposition.
+
 ## Évaluation du modèle brut et correction
 
 Le mode `--base-only` de `src/evaluate_finetuned.py` charge uniquement
@@ -60,10 +99,12 @@ Le rapport conserve les réponses brutes de chaque passe, les erreurs et
 avertissements, les compteurs de tokens cumulés, ainsi que
 `initial_json_validity_rate`, `initial_exact_match_rate` et `correction_rate`.
 Le timing comprend la correction lorsqu'elle est activée. Une seconde passe
-tronquée ou en erreur est signalée explicitement ; le premier JSON
-structurellement valide est conservé s'il existe. Les écarts arithmétiques
-restent des échecs de schéma dans les métriques, même si l'interface permet
-leur affichage avec avertissement. `truncation_rate` décrit la réponse retenue,
+tronquée ou en erreur est signalée explicitement. Les prédictions contiennent
+un `payload` sécurisé distinct de `raw`, et `warnings` conserve l'historique ;
+`arithmetic_warnings` décrit les anomalies restantes de la réponse retenue.
+Les écarts arithmétiques restent des échecs de schéma dans les métriques :
+le scoring porte sur la réponse brute, jamais sur le modèle nullable.
+`truncation_rate` décrit la réponse retenue,
 `truncated_attempt_rate` signale aussi les troncatures des tentatives écartées.
 
 Les résultats mesurés ne sont écrits qu'après évaluation des entrées demandées.

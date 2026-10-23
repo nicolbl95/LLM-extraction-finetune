@@ -74,9 +74,13 @@ surapprentissage, sans garantir son absence.
   arrondi `ROUND_HALF_UP`, tolérance **0,02**.
 - **Correction :** une seule passe corrective, deux inférences maximum, à partir
   de la facture, de la réponse et des erreurs ; pas d'ajustement artificiel des
-  totaux. Le dernier JSON structurellement valide est conservé avec
-  avertissements si nécessaire ; sans résultat valide, une erreur est affichée.
+  totaux. Après correction, les champs irrécupérables sont mis à `null` dans le
+  JSON affiché ; les anomalies initiales (même corrigées) et restantes sont
+  listées au-dessus. Sans objet JSON exploitable, une erreur est affichée.
   Données, évaluation et tests Golden restent stricts par défaut.
+- **Normalisation prudente :** décimales simples à virgule ou point préservées,
+  formats ambigus rejetés ; espaces et typographie de `Ltd` harmonisés, sans
+  deviner les erreurs OCR d'un fournisseur.
 - **Erreurs opérationnelles :** chargement, troncature ou dépassement de contexte
   ne déclenchent pas la correction ; aucun contexte n'est tronqué silencieusement.
 

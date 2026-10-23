@@ -229,6 +229,103 @@ class EvaluationTests(unittest.TestCase):
         return {"raw": raw, "finish_reason": finish_reason,
                 "completion_tokens": 10, "prompt_tokens": 20}
 
+    def test_final_result_nulls_inconsistent_line_and_dependent_invoice_total(self):
+        payload = copy.deepcopy(self.gold)
+        payload["line_items"][0]["quantity"] += 100
+        warnings = []
+        result = evaluation.finalize_invoice_json(json.dumps(payload), warnings=warnings)
+        self.assertIsNone(result["total_ht"])
+        for field in ("quantity", "unit_price", "total_ht"):
+            self.assertIsNone(result["line_items"][0][field])
+            self.assertTrue(any(f"line_items.0.{field}" in warning for warning in warnings))
+        self.assertEqual(result["total_ttc"], self.gold["total_ttc"])
+        self.assertTrue(any("Écart absolu" in warning for warning in warnings))
+        json.dumps(result, allow_nan=False)
+        with self.assertRaises(evaluation.ValidationError):
+            evaluation.Invoice.model_validate(result)
+
+    def test_final_result_nulls_global_mismatch_amounts_but_keeps_coherent_operands(self):
+        payload = copy.deepcopy(self.gold)
+        payload["total_ht"] += 100
+        warnings = []
+        result = evaluation.finalize_invoice_json(json.dumps(payload), warnings=warnings)
+        self.assertIsNone(result["total_ht"])
+        for original, item in zip(payload["line_items"], result["line_items"]):
+            self.assertIsNone(item["total_ht"])
+            self.assertEqual(item["quantity"], original["quantity"])
+            self.assertEqual(item["unit_price"], original["unit_price"])
+        self.assertTrue(any("somme des total_ht" in warning for warning in warnings))
+
+    def test_final_result_nulls_invalid_fields_without_losing_valid_text(self):
+        payload = copy.deepcopy(self.gold)
+        payload["supplier_name"] = "Acme LId"
+        payload["line_items"][0]["description"] = ""
+        payload["line_items"][0]["quantity"] = "INVALID"
+        payload["total_ttc"] = "ERROR"
+        warnings = []
+        result = evaluation.finalize_invoice_json(json.dumps(payload), warnings=warnings)
+        self.assertIsNone(result["supplier_name"])
+        self.assertIsNone(result["total_ttc"])
+        self.assertIsNone(result["line_items"][0]["description"])
+        self.assertIsNone(result["line_items"][0]["quantity"])
+        self.assertEqual(result["invoice_date"], payload["invoice_date"])
+        for field in ("supplier_name", "line_items.0.description", "line_items.0.quantity", "total_ttc"):
+            self.assertTrue(any(field in warning for warning in warnings))
+
+    def test_partial_results_handle_missing_bad_lines_and_numeric_overflow(self):
+        for items in (None, [None], ["INVALID"], [{"description": "Service"}], "INVALID"):
+            payload = {**self.gold, "line_items": items}
+            warnings = []
+            with self.subTest(items=items):
+                result = evaluation.finalize_invoice_json(json.dumps(payload), warnings=warnings)
+                self.assertIsNone(result["total_ht"])
+                self.assertEqual(result["supplier_name"], self.gold["supplier_name"])
+                self.assertTrue(warnings)
+                json.dumps(result, allow_nan=False)
+        for field in ("total_ht", "total_ttc"):
+            raw = json.dumps(self.gold)
+            source_value = json.dumps(self.gold[field])
+            raw = raw.replace(f'"{field}": {source_value}', f'"{field}": 1e999')
+            warnings = []
+            with self.subTest(field=field):
+                result = evaluation.finalize_invoice_json(raw, warnings=warnings)
+                self.assertIsNone(result[field])
+                self.assertTrue(any(field in warning for warning in warnings))
+                json.dumps(result, allow_nan=False)
+
+    def test_valid_line_survives_a_different_inconsistent_line(self):
+        payload = {
+            **self.gold, "total_ht": 110,
+            "line_items": [
+                {"description": "Correct", "quantity": 1, "unit_price": 100, "total_ht": 100},
+                {"description": "Incorrect", "quantity": 72, "unit_price": 2, "total_ht": 10},
+            ],
+        }
+        warnings = []
+        result = evaluation.finalize_invoice_json(json.dumps(payload), warnings=warnings)
+        self.assertEqual(result["line_items"][0], payload["line_items"][0])
+        self.assertIsNone(result["line_items"][1]["quantity"])
+        self.assertIsNone(result["line_items"][1]["unit_price"])
+        self.assertIsNone(result["line_items"][1]["total_ht"])
+        self.assertIsNone(result["total_ht"])
+
+    def test_all_initial_line_and_global_anomalies_survive_successful_correction(self):
+        invalid = copy.deepcopy(self.gold)
+        invalid["line_items"][0]["quantity"] += 10
+        invalid["total_ht"] += 10
+        backend = MagicMock()
+        backend.predict.side_effect = [
+            self.prediction(json.dumps(invalid)), self.prediction(json.dumps(self.gold)),
+        ]
+        with self.assertLogs(level="WARNING"):
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+        self.assertEqual(result["payload"], self.gold)
+        history = "\n".join(result["warnings"])
+        self.assertIn("corrigée lors de la seconde passe", history)
+        self.assertIn("Incohérence sur la ligne", history)
+        self.assertIn("somme des total_ht", history)
+        self.assertEqual(backend.predict.call_count, 2)
+
     def test_correction_uses_original_prompt_error_and_no_gold(self):
         backend = MagicMock()
         initial = self.prediction('{"supplier_name":')
@@ -271,6 +368,9 @@ class EvaluationTests(unittest.TestCase):
             result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
         self.assertEqual(backend.predict.call_count, 2)
         self.assertTrue(result["arithmetic_warnings"])
+        self.assertIsNone(result["payload"]["total_ht"])
+        self.assertIsNone(result["payload"]["line_items"][0]["quantity"])
+        self.assertTrue(any("line_items.0.quantity" in warning for warning in result["warnings"]))
         self.assertFalse(evaluation.score(result["raw"], invalid)["valid"])
         self.assertIn(
             "Priorité de correction arithmétique",
@@ -320,6 +420,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("ré-extrais la ligne exacte", prompt)
         self.assertTrue(evaluation.score(result["raw"], corrected)["exact"])
         self.assertEqual(result["arithmetic_warnings"], [])
+        self.assertEqual(result["payload"], corrected)
+        self.assertTrue(any("corrigée lors de la seconde passe" in warning for warning in result["warnings"]))
 
     def test_invoice_sum_mismatch_automatically_triggers_correction(self):
         invalid = {**self.gold, "total_ht": self.gold["total_ht"] - 10}
@@ -388,6 +490,24 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["raw"], "broken second")
         self.assertFalse(evaluation.score(result["raw"], self.gold)["exact"])
         self.assertTrue(result["validation_errors"])
+        self.assertIsNone(result["payload"])
+        self.assertTrue(any("JSON inutilisable" in warning for warning in result["warnings"]))
+
+    def test_failed_correction_recovers_valid_fields_of_an_initial_partial_object(self):
+        invalid = {key: value for key, value in self.gold.items() if key != "supplier_name"}
+        raw = json.dumps(invalid)
+        backend = MagicMock()
+        backend.predict.side_effect = [self.prediction(raw), self.prediction("broken JSON")]
+        with self.assertLogs(level="WARNING"):
+            result = evaluation.predict_with_correction(backend, {"id": "test", "input": "invoice"})
+        self.assertEqual(result["raw"], raw)
+        self.assertIsNone(result["payload"]["supplier_name"])
+        self.assertEqual(result["payload"]["line_items"], self.gold["line_items"])
+        self.assertEqual(result["payload"]["total_ht"], self.gold["total_ht"])
+        self.assertTrue(any("supplier_name" in warning for warning in result["warnings"]))
+        self.assertTrue(any("Auto-correction impossible" in warning for warning in result["warnings"]))
+        self.assertFalse(evaluation.score(raw, self.gold)["valid"])
+        self.assertEqual(backend.predict.call_count, 2)
 
     def test_no_correction_after_valid_output_or_truncation(self):
         for initial in (self.prediction(json.dumps(self.gold)), self.prediction("cut", "length")):
@@ -428,6 +548,33 @@ class EvaluationTests(unittest.TestCase):
             self.assertTrue(report["generation"]["self_correction"])
             self.assertEqual(report["test_sha256"], evaluation.file_hash(ROOT / "data/test.jsonl"))
             self.assertEqual(len((output / "predictions.jsonl").read_text().splitlines()), 60)
+
+    def test_cli_persists_safe_payload_and_raw_failures_without_inflating_metrics(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            output = Path(directory) / "partial-results"
+            invalid = copy.deepcopy(self.gold)
+            invalid["line_items"][0]["quantity"] += 100
+            raw = json.dumps(invalid)
+            argv = [
+                "evaluate_finetuned.py", "--base-only", "--self-correct",
+                "--output-dir", str(output), "--warmup", "0", "--limit", "1",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(evaluation, "BaseInference") as backend, \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertLogs(level="WARNING"):
+                backend.return_value.metadata = {"model": "mock-base-unit-test", "adapter_applied": False}
+                backend.return_value.predict.return_value = self.prediction(raw)
+                evaluation.main()
+            record = json.loads((output / "predictions.jsonl").read_text())
+            report = json.loads((output / "metrics.json").read_text())
+            self.assertEqual(record["raw"], raw)
+            self.assertEqual([attempt["raw"] for attempt in record["attempts"]], [raw, raw])
+            self.assertIsNone(record["payload"]["total_ht"])
+            self.assertIsNone(record["payload"]["line_items"][0]["quantity"])
+            self.assertTrue(record["warnings"])
+            self.assertFalse(record["valid"])
+            self.assertEqual(report["json_validity_rate"], 1)
+            self.assertEqual(report["schema_validity_rate"], 0)
+            self.assertEqual(report["exact_match_rate"], 0)
 
     def test_lora_generation_slices_prompt_and_checks_budget(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
