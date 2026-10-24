@@ -136,7 +136,7 @@ def test_tesseract_timeout_is_explicitly_unverified_not_a_crash(caplog):
         with pytest.raises(UnreadableOCR, match="Délai OCR dépassé"):
             main.ocr_image(Image.new("RGB", (20, 20)))
         result = list(main.run_extraction_ui(str(main.EXAMPLES[0][1])))[-1]
-    payload, report, technical, advanced, validation, download = result
+    payload, report, technical, advanced, first_pass_raw, validation, download = result
     assert payload["total_ht"] is None
     assert "Preuves OCR insuffisantes" in report
     assert not validation["flags"]

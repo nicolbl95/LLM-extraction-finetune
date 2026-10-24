@@ -11,6 +11,7 @@ import pytesseract
 from PIL import Image
 
 from app import main
+from invoice_evidence import EvidenceText, from_text
 
 
 class AppTests(unittest.TestCase):
@@ -142,11 +143,100 @@ class AppTests(unittest.TestCase):
             self.skipTest("Tesseract is not installed")
         if not {"fra", "eng"} <= set(pytesseract.get_languages()):
             self.skipTest("Tesseract fra/eng languages are missing")
+        references = {
+            "France · EUR": ("invoice-0406", "FR-2025-00406"),
+            "Royaume-Uni · GBP": ("invoice-0110", "GB-2025-00110"),
+            "États-Unis · USD": ("invoice-0435", "US-2023-00435"),
+        }
+        rows = {
+            row["id"]: row
+            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+        }
         for label, path in main.EXAMPLES:
             with self.subTest(example=label):
                 text = main.document_text(str(path))
                 self.assertGreater(len(text), 100)
                 self.assertTrue("invoice" in text.lower() or "facture" in text.lower())
+                reference_id, invoice_number = references[label]
+                self.assertEqual(text.evidence.invoice_number, invoice_number)
+                if reference_id == "invoice-0406":
+                    self.assertIn(("siret", "40023297980955"), text.evidence.corroborated_identifiers)
+                    diagnostics = {}
+                    with patch.object(
+                        main, "predict_invoice",
+                        side_effect=main.gr.Error("ZeroGPU quota exceeded; try again in 36 min"),
+                    ):
+                        payload = main.extract_invoice(text, diagnostics=diagnostics)
+                    self.assertEqual(payload, rows[reference_id]["output"])
+                    report = diagnostics["report"]
+                    self.assertTrue(report.startswith("**✅ Facture cohérente : 20 champs vérifiés sur 20**"))
+                    self.assertIn(
+                        "SIRET : la clé de contrôle ne correspond pas. À vérifier si ce numéro est réel.",
+                        report,
+                    )
+                    for forbidden in ("None", "non ancré", "ancrage", "description_non_verifiee"):
+                        self.assertNotIn(forbidden, report)
+
+    def test_gradio_example_and_extract_handlers_return_declared_outputs_for_all_examples(self):
+        app = main.build_app()
+        dependencies = {
+            dependency["api_name"]: dependency
+            for dependency in app.config["dependencies"]
+        }
+        load_event = dependencies["load_example"]
+        preview_event = dependencies["preview_ui"]
+        extract_event = dependencies["run_extraction_ui"]
+        load_handler = app.fns[load_event["id"]].fn
+        preview_handler = app.fns[preview_event["id"]].fn
+        extract_handler = app.fns[extract_event["id"]].fn
+        rows = {
+            row["id"]: row
+            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+        }
+        reference_ids = ("invoice-0406", "invoice-0110", "invoice-0435")
+        for index, ((_, path), reference_id) in enumerate(zip(main.EXAMPLES, reference_ids, strict=True)):
+            with self.subTest(example=path.name):
+                loaded = load_handler((index, [str(path)]))
+                loaded_outputs = loaded if isinstance(loaded, (list, tuple)) else [loaded]
+                self.assertEqual(len(loaded_outputs), len(load_event["outputs"]))
+                selected_path = loaded["value"]["path"]
+
+                preview_outputs = preview_handler(selected_path)
+                self.assertEqual(len(preview_outputs), len(preview_event["outputs"]))
+
+                text = EvidenceText(from_text(
+                    rows[reference_id]["input"],
+                    locale=rows[reference_id]["locale"],
+                ))
+                with patch.object(main, "document_text", return_value=text), patch.object(
+                    main, "predict_invoice",
+                    return_value={
+                        "raw": json.dumps(rows[reference_id]["output"]),
+                        "finish_reason": "stop",
+                        "generation_seconds": 0.01,
+                    },
+                ):
+                    frames = list(extract_handler(selected_path))
+                self.assertTrue(frames)
+                self.assertTrue(all(
+                    len(frame) == len(extract_event["outputs"]) for frame in frames
+                ))
+                self.assertEqual(frames[-1][0], rows[reference_id]["output"])
+
+    def test_extraction_errors_show_a_readable_cause_and_keep_traceback(self):
+        errors = (
+            (OSError("cannot decode uploaded image"), "Fichier illisible ou inaccessible"),
+            (main.pytesseract.TesseractNotFoundError(), "Tesseract indisponible"),
+            (RuntimeError("Tesseract process timeout"), "Délai de lecture dépassé"),
+        )
+        filename = str(main.EXAMPLES[2][1])
+        for error, expected in errors:
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(main, "document_text", side_effect=error), \
+                    self.assertLogs(main.LOGGER, level="ERROR") as captured:
+                result = list(main.run_extraction(filename))[-1]
+            self.assertIn(expected, result[1])
+            self.assertIn("Traceback", "\n".join(captured.output))
 
     def test_uk_example_quota_fallback_reports_number_and_multirate_controls(self):
         if not shutil.which("tesseract"):

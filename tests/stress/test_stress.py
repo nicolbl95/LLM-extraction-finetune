@@ -96,7 +96,7 @@ def test_app_empty_ocr_is_insufficient_not_a_success_or_crash():
     from invoice_evidence import UnreadableOCR
     with patch.object(main, "document_text", side_effect=UnreadableOCR("Aucun texte détecté")), \
             patch.object(main, "predict_invoice", side_effect=AssertionError("No GPU without evidence")):
-        payload, report, technical, advanced, validation, download = list(
+        payload, report, technical, advanced, first_pass_raw, validation, download = list(
             main.run_extraction_ui(str(main.EXAMPLES[0][1]))
         )[-1]
     assert "Preuves OCR insuffisantes : extraction non recoupée" in report

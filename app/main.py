@@ -11,15 +11,19 @@ import sys
 import tempfile
 import time
 from collections import deque
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 
 import spaces
 import gradio as gr
+import cv2
+import numpy
 import pymupdf
 import pytesseract
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HfHubHTTPError
+import PIL
 from PIL import Image, ImageOps
 from pydantic import ValidationError
 
@@ -31,7 +35,7 @@ from evaluate_finetuned import (
     validate_invoice_json as validate_invoice_json,
 )
 from invoice_evidence import DocumentEvidence, EvidenceText, Token, UnreadableOCR, combine_pages, from_text, from_tokens
-from invoice_grounding import run_grounded_inference
+from invoice_grounding import read_model, run_grounded_inference
 from ocr_recovery import recover_image
 from ocr_budget import ProcessingBudget
 from ocr_config import OCR_CONFIG
@@ -323,8 +327,32 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics
             invoice_number=evidence.invoice_number,
             ocr_quality_issues=evidence.quality_issues,
             ocr_issues=evidence.issues,
+            first_pass_raw=result["raw"],
         )
     return result["payload"]
+
+
+def readable_read_failure(error: Exception) -> str:
+    if isinstance(error, pytesseract.TesseractNotFoundError):
+        return "Tesseract indisponible."
+    if isinstance(error, pytesseract.TesseractError):
+        return "Tesseract n’a pas pu lire le document."
+    if isinstance(error, Image.DecompressionBombError):
+        return "Image trop grande ou invalide."
+    if isinstance(error, OSError):
+        return "Fichier illisible ou inaccessible."
+    if isinstance(error, ValueError):
+        return f"Fichier ou demande invalide : {error}"
+    if isinstance(error, ImportError):
+        return "Composant nécessaire à la lecture du document indisponible."
+    if isinstance(error, RuntimeError):
+        message = str(error).strip()
+        if "timeout" in message.casefold() or "délai" in message.casefold():
+            return "Délai de lecture dépassé."
+        if "tesseract" in message.casefold():
+            return "Tesseract n’a pas pu lire le document."
+        return f"Erreur de lecture : {message or 'erreur technique'}."
+    return "Erreur de lecture du document."
 
 
 def run_extraction(filename: str | None, *, diagnostics: dict | None = None):
@@ -341,7 +369,11 @@ def run_extraction(filename: str | None, *, diagnostics: dict | None = None):
         except (pytesseract.TesseractNotFoundError, pytesseract.TesseractError, RuntimeError) as exc:
             LOGGER.exception("Document evidence unavailable (%s: %r)", type(exc).__name__, exc)
             text = EvidenceText(DocumentEvidence(
-                "", None, [], [], available=False, issues=["Preuves OCR indisponibles : extraction non recoupée"],
+                "", None, [], [], available=False,
+                issues=[
+                    "Preuves OCR indisponibles : extraction non recoupée",
+                    readable_read_failure(exc),
+                ],
             ))
         yield None, PROCESSING_STATUS
         warnings = []
@@ -360,7 +392,7 @@ def run_extraction(filename: str | None, *, diagnostics: dict | None = None):
     except (OSError, ValueError, RuntimeError, ImportError,
             pytesseract.TesseractError, Image.DecompressionBombError) as exc:
         LOGGER.exception("Invoice extraction failed")
-        yield None, "Échec de la lecture du document. Vérifiez le fichier et consultez les détails techniques."
+        yield None, f"Échec de la lecture du document : {readable_read_failure(exc)}"
         return
     yield payload, analysis.get("report", "Lecture terminée ; contrôles documentaires non disponibles.")
 
@@ -374,7 +406,14 @@ def run_extraction_ui(filename: str | None):
             read_reason = ""
             quality_reasons = " ".join(diagnostics.get("ocr_quality_issues", [])).casefold()
             if not diagnostics.get("evidence_available"):
-                read_reason = "OCR indisponible pour ce document."
+                reasons = diagnostics.get("ocr_issues", [])
+                read_reason = next(
+                    (
+                        reason for reason in reasons
+                        if not reason.startswith("Preuves OCR indisponibles")
+                    ),
+                    "Outil de lecture du document indisponible.",
+                )
             elif "délai" in quality_reasons or "temps" in quality_reasons:
                 read_reason = "Temps OCR dépassé ; les champs non recoupés restent à vérifier."
             elif diagnostics.get("ocr_quality_issues"):
@@ -383,8 +422,8 @@ def run_extraction_ui(filename: str | None):
                 read_reason = "Certaines preuves documentaires sont indisponibles."
             method = {
                 "pdf": "PDF texte natif",
-                "consensus": "OCR recoupé",
-                "ocr": "OCR",
+                "consensus": "image relue plusieurs fois",
+                "ocr": "image lue",
                 "text": "texte fourni",
             }.get(diagnostics.get("source_kind"), "lecture documentaire")
             model_info = diagnostics.get("model_info", {})
@@ -396,7 +435,6 @@ def run_extraction_ui(filename: str | None):
             }.get(model_info.get("reason"), "")
             model_state = "utilisé" if model_info.get("used") else f"non utilisé — {reason or 'non disponible'}"
             generation = model_info.get("generation_seconds", 0)
-            request = model_info.get("duration_seconds", 0)
             fields = []
             statuses = diagnostics.get("field_statuses", {})
             for path, status in statuses.items():
@@ -407,43 +445,52 @@ def run_extraction_ui(filename: str | None):
                     else "non lu"
                 )
                 source = (
-                    "modèle + OCR" if model_info.get("used") and status == "valide"
-                    else "OCR seul"
+                    "modèle + document" if model_info.get("used") and status == "valide"
+                    else "document seul"
                 )
-                display = json.dumps(value, ensure_ascii=False, default=str) if value is not None else "—"
-                display = display.replace("|", "\\|")
+                display = _visible_field_value(path, value).replace("|", "\\|")
                 fields.append(f"| {_human_field_name(path)} | {display} | {status_label} | {source} |")
             short_revision = deployed_revision().split()[0][:7]
+            generation_label = f"{generation:.2f} s" if generation > 0 else "non mesurée"
+            model_comparison = _model_comparison(
+                diagnostics.get("first_pass_raw", ""), payload, statuses,
+            )
             details = (
                 "### Lecture du document\n"
-                f"- OCR : {'disponible' if engine_available else 'indisponible'} ; "
+                f"- Outil de lecture de texte : {'disponible' if engine_available else 'indisponible'} ; "
                 f"méthode : {method} ; "
                 f"{diagnostics.get('ocr_lines', 0)} lignes lues ; "
-                f"{diagnostics.get('ocr_calls', 0)} appels Tesseract ; "
-                f"prétraitements : {preprocessing} ; "
+                f"{diagnostics.get('ocr_calls', 0)} lectures effectuées ; "
                 f"durée : {diagnostics.get('ocr_elapsed_seconds', 0):.2f} s."
                 + (f"\n- {read_reason}" if read_reason else "") + "\n\n"
                 "### Modèle\n"
                 f"- {model_state} ; passes demandées : {model_info.get('passes_requested', 0)} ; "
                 f"réussies : {model_info.get('passes_succeeded', 0)} ; "
-                f"génération : {generation:.2f} s ; durée des appels : {request:.2f} s ; "
+                f"génération : {generation_label} ; "
                 f"{model_info.get('determinism', 'répétabilité non mesurée')}.\n\n"
                 "### Champs\n"
                 "| Champ | Valeur | Statut | Source |\n|---|---|---|---|\n"
                 + "\n".join(fields) + "\n\n"
+                "### Comparatif — modèle / résultat retenu\n"
+                + model_comparison + "\n\n"
                 "### Version\n"
-                f"- {short_revision} · OCR : politique {OCR_CONFIG.version.split('-')[2]}"
+                f"- {short_revision} · Lecture : politique {OCR_CONFIG.version.split('-')[2]}"
             )
             advanced = (
-                f"- Révision complète : `{deployed_revision()}`\n"
+                f"- Révision déployée : `{deployed_revision()}`\n"
+                f"- Prétraitements utilisés : {preprocessing}\n"
                 f"- Empreinte de configuration OCR : `{OCR_CONFIG.fingerprint()}`"
+            )
+            first_pass_raw = diagnostics.get("first_pass_raw") or (
+                "Aucune réponse brute : la première passe du modèle n’a pas été exécutée."
             )
         else:
             details = ""
             advanced = ""
+            first_pass_raw = ""
         download = _download_json(payload) if payload is not None else None
         yield (
-            payload, report, details, advanced,
+            payload, report, details, advanced, first_pass_raw,
             diagnostics.get("validation", {"flags": [], "passed": [], "not_verified": []}),
             download,
         )
@@ -480,6 +527,48 @@ def _human_field_name(path: str) -> str:
     return labels.get(path, path)
 
 
+def _visible_field_value(path: str, value: object) -> str:
+    if value is None:
+        return "non renseigné"
+    if isinstance(value, Decimal):
+        if path.endswith(".quantity") and value == value.to_integral_value():
+            return format(value, ".0f")
+        return format(value, "f")
+    if path.endswith(".quantity") and isinstance(value, (int, float)) and not isinstance(value, bool):
+        if float(value).is_integer():
+            return str(int(value))
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _model_comparison(raw: str, payload: dict | None, statuses: dict[str, str]) -> str:
+    if not raw:
+        return "Aucune réponse du modèle à comparer."
+    try:
+        model_payload = read_model(raw)
+    except ValueError:
+        return "Comparatif indisponible : la première réponse ne peut pas être lue comme des données structurées."
+    differences = []
+    numeric_fields = {"quantity", "unit_price", "total_ht", "total_ttc"}
+    for path in statuses:
+        model_value = _payload_field(model_payload, path)
+        retained_value = _payload_field(payload, path)
+        field = path.rsplit(".", 1)[-1]
+        same = model_value == retained_value
+        if field in numeric_fields and model_value is not None and retained_value is not None:
+            try:
+                same = Decimal(str(model_value)) == Decimal(str(retained_value))
+            except (InvalidOperation, ValueError):
+                same = False
+        if not same:
+            differences.append(
+                f"| {_human_field_name(path)} | {_visible_field_value(path, model_value)} | "
+                f"{_visible_field_value(path, retained_value)} |"
+            )
+    if not differences:
+        return "Aucune différence entre les valeurs lues par le modèle et celles retenues."
+    return "| Champ | Lu par le modèle | Retenu |\n|---|---|---|\n" + "\n".join(differences)
+
+
 def _download_json(payload: dict) -> str:
     cache_dir = Path(gr.utils.get_upload_folder())
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -493,7 +582,7 @@ def _download_json(payload: dict) -> str:
 
 def preview_ui(filename: str | None):
     image, payload, status = preview_document(filename)
-    return image, payload, status, "", "", {"flags": [], "passed": [], "not_verified": []}, None
+    return image, payload, status, "", "", "", {"flags": [], "passed": [], "not_verified": []}, None
 
 
 def ocr_availability() -> tuple[bool, str]:
@@ -531,9 +620,34 @@ def short_revision() -> str:
     return match.group(1)[:7] if match else revision
 
 
+def runtime_versions() -> dict[str, str]:
+    try:
+        tesseract_version = str(pytesseract.get_tesseract_version())
+    except (OSError, RuntimeError, pytesseract.TesseractError) as exc:
+        tesseract_version = f"indisponible ({type(exc).__name__})"
+    try:
+        languages = ", ".join(sorted(pytesseract.get_languages()))
+    except (OSError, RuntimeError, pytesseract.TesseractError) as exc:
+        languages = f"indisponibles ({type(exc).__name__})"
+    return {
+        "Tesseract": tesseract_version,
+        "langues": languages or "aucune",
+        "Pillow": PIL.__version__,
+        "NumPy": numpy.__version__,
+        "OpenCV": cv2.__version__,
+        "PyMuPDF": str(pymupdf.VersionBind),
+    }
+
+
 def build_app() -> gr.Blocks:
     available, reason = ocr_availability()
     LOGGER.info("Startup OCR: available=%s; %s; revision=%s", available, reason, deployed_revision())
+    versions = runtime_versions()
+    LOGGER.info(
+        "Runtime versions: Tesseract=%s; langues=%s; Pillow=%s; NumPy=%s; OpenCV=%s; PyMuPDF=%s",
+        versions["Tesseract"], versions["langues"], versions["Pillow"],
+        versions["NumPy"], versions["OpenCV"], versions["PyMuPDF"],
+    )
     with gr.Blocks(
         title="Extraction standardisée de données de factures",
         delete_cache=(3600, 3600),
@@ -568,6 +682,10 @@ def build_app() -> gr.Blocks:
                 download = gr.DownloadButton("Télécharger le JSON")
                 with gr.Accordion("Détails techniques", open=False):
                     technical = gr.Markdown("")
+                    with gr.Accordion("Réponse brute du modèle — première passe", open=False):
+                        first_pass_raw = gr.Code(
+                            language="json", label="Réponse brute", interactive=False, lines=10,
+                        )
                     with gr.Accordion("Avancé", open=False):
                         advanced = gr.Markdown("")
                         validation = gr.JSON(label="Détails des contrôles — hors du résultat JSON")
@@ -578,12 +696,12 @@ def build_app() -> gr.Blocks:
         )
         upload.change(
             preview_ui, inputs=[upload],
-            outputs=[preview, result, status, technical, advanced, validation, download],
+            outputs=[preview, result, status, technical, advanced, first_pass_raw, validation, download],
             concurrency_limit=1,
         )
         extract.click(
             run_extraction_ui, inputs=[upload],
-            outputs=[result, status, technical, advanced, validation, download],
+            outputs=[result, status, technical, advanced, first_pass_raw, validation, download],
             concurrency_limit=1,
         )
     return demo.queue(default_concurrency_limit=1, max_size=8)

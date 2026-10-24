@@ -163,7 +163,7 @@ def test_budget_failure_ui_is_insufficient_and_never_loads_model():
     from app import main
     with patch.object(main, "document_text", side_effect=OCRBudgetExceeded("Budget documentaire OCR dépassé")), \
             patch.object(main, "predict_invoice", side_effect=AssertionError("No GPU")):
-        payload, report, technical, advanced, validation, download = list(
+        payload, report, technical, advanced, first_pass_raw, validation, download = list(
             main.run_extraction_ui(str(main.EXAMPLES[0][1]))
         )[-1]
     assert "Preuves OCR insuffisantes" in report

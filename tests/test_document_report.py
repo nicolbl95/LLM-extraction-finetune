@@ -446,9 +446,14 @@ def test_ui_has_report_first_and_closed_technical_accordion():
     footer = next(component for component in components if component["type"] == "html")
     assert "OCR :" in footer["props"]["value"]
     assert main.preview_ui(None) == (
-        None, None, "", "", "", {"flags": [], "passed": [], "not_verified": []}, None,
+        None, None, "", "", "", "", {"flags": [], "passed": [], "not_verified": []}, None,
     )
     assert any(component["type"] == "downloadbutton" for component in components)
+    assert any(
+        component["type"] == "code"
+        and component["props"]["label"] == "Réponse brute"
+        for component in components
+    )
     assert any(
         "copy" in component["props"].get("buttons", [])
         for component in components if component["type"] == "markdown"
@@ -458,16 +463,19 @@ def test_ui_has_report_first_and_closed_technical_accordion():
 def test_app_ocr_failure_is_reported_without_loading_model(caplog):
     from app import main
     with patch.object(main, "document_text", side_effect=RuntimeError("OCR absent")), \
-            patch.object(main, "predict_invoice", side_effect=AssertionError("No evidence, no GPU")):
+            patch.object(main, "predict_invoice", side_effect=AssertionError("No evidence, no GPU")) as predict:
         outputs = list(main.run_extraction_ui(str(main.EXAMPLES[0][1])))
-    payload, report, technical, advanced, validation, download = outputs[-1]
+    payload, report, technical, advanced, raw, validation, download = outputs[-1]
+    predict.assert_not_called()
     assert "Preuves OCR indisponibles" in report
     assert "Pydantic" not in report
-    assert "indisponible pour ce document" in technical
+    assert "- Erreur de lecture : OCR absent." in technical
     assert "Empreinte de configuration OCR" in advanced
     assert download.endswith(".json")
     assert not validation["flags"]
     assert all(payload[key] is None for key in ("supplier_name", "invoice_date", "total_ht", "total_ttc"))
+    for forbidden in ("None", "non ancré", "ancrage", "description_non_verifiee"):
+        assert forbidden not in report + technical + advanced
 
 
 def test_ui_technical_details_are_compact_and_json_download_matches_result():
@@ -477,7 +485,7 @@ def test_ui_technical_details_are_compact_and_json_download_matches_result():
         main, "predict_invoice",
         side_effect=main.gr.Error("ZeroGPU quota exceeded; try again in 36 min"),
     ):
-        payload, report, technical, advanced, validation, download = list(
+        payload, report, technical, advanced, raw, validation, download = list(
             main.run_extraction_ui(str(main.EXAMPLES[1][1]))
         )[-1]
     try:
@@ -486,7 +494,13 @@ def test_ui_technical_details_are_compact_and_json_download_matches_result():
         assert "non utilisé — quota ZeroGPU indisponible" in technical
         assert "passes demandées : 1 ; réussies : 0" in technical
         assert "| Champ | Valeur | Statut | Source |" in technical
-        assert "| Ligne 1 — Quantité | 7.8 | vérifié | OCR seul |" in technical
+        assert "| Ligne 1 — Quantité | 7.8 | vérifié | document seul |" in technical
+        assert "durée des appels" not in technical
+        assert "prétraitements" not in technical
+        assert "Prétraitements utilisés" in advanced
+        assert "Révision déployée" in advanced
+        assert "Aucune réponse du modèle à comparer." in technical
+        assert "Aucune réponse brute" in raw
         assert len(re.search(r"[a-f0-9]{64}", advanced).group()) == 64
         assert json.loads(Path(download).read_text()) == payload
         for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
@@ -494,6 +508,40 @@ def test_ui_technical_details_are_compact_and_json_download_matches_result():
         assert not validation["flags"]
     finally:
         Path(download).unlink(missing_ok=True)
+
+
+def test_first_pass_raw_json_and_model_result_comparison_are_available_in_details():
+    from app import main
+    evidence = EvidenceText(from_text(document().text))
+    raw = json.dumps(model(), default=str)
+    with patch.object(main, "document_text", return_value=evidence), patch.object(
+        main, "predict_invoice",
+        return_value={"raw": raw, "finish_reason": "stop", "generation_seconds": 1.25},
+    ):
+        payload, report, technical, advanced, first_pass_raw, validation, download = list(
+            main.run_extraction_ui(str(main.EXAMPLES[0][1]))
+        )[-1]
+    try:
+        assert first_pass_raw == raw
+        assert "Aucune différence entre les valeurs lues par le modèle et celles retenues." in technical
+        assert "génération : 1.25 s" in technical
+        assert "durée des appels" not in technical
+        assert "Révision déployée" in advanced
+    finally:
+        Path(download).unlink(missing_ok=True)
+
+
+def test_model_result_comparison_lists_differences_and_formats_integer_quantities():
+    from app import main
+    actual = model()
+    proposed = {**actual, "line_items": [{**actual["line_items"][0], "quantity": 54}]}
+    comparison = main._model_comparison(
+        json.dumps(proposed, default=str),
+        actual,
+        {"line_items.0.quantity": "récupéré (corroboré par OCR)"},
+    )
+    assert "| Ligne 1 — Quantité | 54 | 2 |" in comparison
+    assert main._visible_field_value("line_items.0.quantity", 30.0) == "30"
 
 
 def test_repeated_grounded_outputs_are_identical_and_model_errors_remain_technical():
@@ -533,8 +581,12 @@ def test_deployment_ocr_packages_and_startup_status_are_explicit(caplog):
     from app import main
     packages = set((ROOT / "packages.txt").read_text().splitlines())
     assert {"tesseract-ocr", "tesseract-ocr-fra", "tesseract-ocr-eng"} <= packages
-    with caplog.at_level("INFO"), patch.object(main, "ocr_availability", return_value=(False, "test absent")):
+    with caplog.at_level("INFO"), patch.object(
+        main, "ocr_availability", return_value=(False, "test absent"),
+    ):
         demo = main.build_app()
     assert "Startup OCR: available=False" in caplog.text
+    for package in ("Tesseract=", "langues=", "Pillow=", "NumPy=", "OpenCV=", "PyMuPDF="):
+        assert package in caplog.text
     footer = next(component for component in demo.config["components"] if component["type"] == "html")
     assert "OCR : indisponible" in footer["props"]["value"]
