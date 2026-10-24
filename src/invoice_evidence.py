@@ -119,6 +119,7 @@ class DocumentEvidence:
     supplier: str | None = None
     supplier_raw: str | None = None
     invoice_number: str | None = None
+    corroborated_identifiers: list[tuple[str, str]] = field(default_factory=list)
     invoice_date: str | None = None
     issues: list[str] = field(default_factory=list)
     available: bool = True
@@ -167,13 +168,10 @@ MONTHS = {
 
 
 def invoice_number_from_text(text: str) -> str | None:
-    match = re.search(r"\b(FR|GB|US)[ -]+(\d{4})[ -]+(\d(?:[ \d]*\d)?)\b", text, re.I)
+    match = re.search(r"\b(FR|GB|US)-(\d{4})-(\d{5})\b", text, re.I)
     if not match:
         return None
-    suffix = re.sub(r"\s+", "", match.group(3))
-    if not 3 <= len(suffix) <= 12:
-        return None
-    return f"{match.group(1).upper()}-{match.group(2)}-{suffix}"
+    return f"{match.group(1).upper()}-{match.group(2)}-{match.group(3)}"
 
 
 def union_box(tokens: list[Token]) -> tuple[float, float, float, float]:
@@ -250,6 +248,10 @@ def combine_pages(pages: list[DocumentEvidence], *, contains_ocr: bool = False) 
             suppliers.add(evidence.supplier)
         if evidence.invoice_number:
             invoice_numbers.add(evidence.invoice_number)
+        result.corroborated_identifiers.extend(
+            identifier for identifier in evidence.corroborated_identifiers
+            if identifier not in result.corroborated_identifiers
+        )
         if evidence.invoice_date:
             dates.add(evidence.invoice_date)
         if evidence.locale:

@@ -97,8 +97,10 @@ def recover_image(image, reader, *, budget=None):
                 continue
             budget.remaining()
             header_psm = (
-                6 if family == "deskew" and psm == 6 else
-                11 if family == "clahe" and psm == 4 else None
+                11 if family in {"deskew", "clahe"} and (
+                    (family == "deskew" and psm == 6)
+                    or (family == "clahe" and psm == 4)
+                ) else None
             )
             if confirm_header and header_psm is not None:
                 crop = prepared.crop(
@@ -116,13 +118,15 @@ def recover_image(image, reader, *, budget=None):
                 data = table_crop(data, prepared, reader)
             readings[family].append(from_tsv(data))
             budget.remaining()
+    confirmed_invoice_number = None
     if (
         confirm_header and len(header_candidates) == 2 and header_candidates[0]
         and header_candidates[0] == header_candidates[1]
     ):
-        for entries in readings.values():
-            for evidence in entries:
-                evidence.invoice_number = header_candidates[0]
+        confirmed_invoice_number = header_candidates[0]
     if not any(evidence.tokens for entries in readings.values() for evidence in entries):
         raise UnreadableOCR("Aucun texte détecté après les prétraitements OCR.")
-    return record_ocr_metadata(build_consensus(readings, confidence=CONFIDENCE))
+    consensus = build_consensus(readings, confidence=CONFIDENCE)
+    if confirmed_invoice_number is not None:
+        consensus.invoice_number = confirmed_invoice_number
+    return record_ocr_metadata(consensus)

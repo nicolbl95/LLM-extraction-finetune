@@ -1,5 +1,6 @@
 """Regional agreement across distinct preprocessing families, not model votes."""
 
+import re
 from collections import defaultdict
 from copy import deepcopy
 from decimal import Decimal, ROUND_HALF_UP
@@ -57,6 +58,15 @@ def number_confident(row, number, threshold):
     return bool(tokens) and all(token.confidence >= threshold for token in tokens)
 
 
+def _siret_values(evidence: DocumentEvidence) -> list[str]:
+    values = []
+    for match in re.finditer(r"\bSIRET\s*:?\s*([0-9][0-9 ]{12,18}[0-9])\b", evidence.text, re.I):
+        value = match.group(1).replace(" ", "")
+        if len(value) == 14:
+            values.append(value)
+    return values
+
+
 def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=OCR_CONFIG.confidence) -> DocumentEvidence:
     all_reads = [evidence for group in readings.values() for evidence in group]
     anchor = max(all_reads, key=lambda evidence: (
@@ -68,6 +78,10 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
     result.ocr_cross_checked = True
     result.quality_issues = []
     result.issues = []
+    result.corroborated_identifiers = [
+        ("siret", value)
+        for value in _agreed(readings, _siret_values, lambda candidate: candidate, unanimous=True)
+    ]
     for key in ("supplier", "invoice_number", "invoice_date"):
         def metadata(evidence):
             candidate = getattr(evidence, key)

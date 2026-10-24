@@ -427,7 +427,7 @@ class AppTests(unittest.TestCase):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
                 payload, status = updates[-1]
                 self.assertEqual(payload, self.gold)
-                self.assertIn("Lecture incomplète", status)
+                self.assertIn("Facture cohérente : 8 champs vérifiés sur 8", status)
                 self.assertNotIn("999", status)
                 self.assertIn("Aucune anomalie n’est affirmée", status)
                 demo = main.build_app()

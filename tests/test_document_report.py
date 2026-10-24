@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from invoice_evidence import DocumentEvidence, EvidenceText, from_text
+from invoice_evidence import DocumentEvidence, EvidenceText, from_text, invoice_number_from_text
 from invoice_grounding import UNVERIFIED, read_model, reconcile, run_grounded_inference
 from ocr_consensus import build_consensus
 from invoice_validation import (
@@ -155,6 +155,134 @@ def test_consensus_ocr_arithmetic_disagreement_does_not_create_a_ghost_anomaly()
     assert evidence.rows[0].cells["unit_price"] == []
     report = render_report(evidence, validation, {}, [])
     assert "Aucune anomalie n’est affirmée avec les éléments disponibles." in report
+
+
+def _reference_report(invoice_id, *, invoice_number_readable=True, siret_readable=True):
+    row = next(
+        row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())
+        if row["id"] == invoice_id
+    )
+    text = row["input"]
+    if not invoice_number_readable:
+        text = re.sub(r"\b(?:FR|GB|US)-\d{4}-\d{5}\b", "NUMERO ILLISIBLE", text)
+    if invoice_id == "invoice-0406" and not siret_readable:
+        text = re.sub(r"(?<=SIRET : )\d{14}", "illisible", text, count=1)
+    evidence = build_consensus({
+        "deskew": [from_text(text, locale=row["locale"])],
+        "clahe": [from_text(text, locale=row["locale"])],
+    })
+    result = reconcile(evidence, [read_model(json.dumps(row["output"]))])
+    report = render_report(
+        evidence, result.validation, result.statuses, [],
+        model_info={"used": True},
+    )
+    return evidence, result, report
+
+
+def test_invoice_number_parser_requires_the_expected_country_year_and_five_digits():
+    assert invoice_number_from_text("FACTURE FR-2025-00406") == "FR-2025-00406"
+    assert invoice_number_from_text("INVOICE GB-2025-00110") == "GB-2025-00110"
+    assert invoice_number_from_text("INVOICE US-2023-00435") == "US-2023-00435"
+    assert invoice_number_from_text("FACTURE FR-2025-0406") is None
+    assert invoice_number_from_text("FACTURE FR-2025-000406") is None
+
+
+def test_consensus_requires_two_independent_reads_for_invoice_number_and_siret():
+    text = (
+        "FACTURE FR-2025-00406\nSupplier: Services Horizon SAS\n"
+        "SIRET : 40023297980955\nCurrency: EUR\n"
+        "Description | Quantity | Unit price | Line total\nService | 1 | 10 | 10\n"
+        "Subtotal: 10\nInvoice total: 10"
+    )
+    single_family = build_consensus({"deskew": [from_text(text, locale="fr-FR")]})
+    assert single_family.invoice_number is None
+    assert single_family.corroborated_identifiers == []
+
+    paired = build_consensus({
+        "deskew": [from_text(text, locale="fr-FR")],
+        "clahe": [from_text(text, locale="fr-FR")],
+    })
+    assert paired.invoice_number == "FR-2025-00406"
+    assert paired.corroborated_identifiers == [("siret", "40023297980955")]
+    validation = document_validation(paired)
+    assert any(
+        flag.code == "identifier_siret"
+        and flag.reason == "SIRET : la clé de contrôle ne correspond pas. À vérifier si ce numéro est réel."
+        for flag in validation.flags
+    )
+    assert not any("SIRET" in message for message in validation.not_verified)
+
+
+@pytest.mark.parametrize(
+    "invoice_id,number_readable",
+    [
+        ("invoice-0406", True), ("invoice-0406", False),
+        ("invoice-0110", True), ("invoice-0110", False),
+        ("invoice-0435", True), ("invoice-0435", False),
+    ],
+)
+def test_country_report_verdict_depends_on_json_fields_not_invoice_number(invoice_id, number_readable):
+    evidence, result, report = _reference_report(
+        invoice_id, invoice_number_readable=number_readable,
+    )
+    expected_count = len(result.statuses)
+    assert all(status in {"valide", "récupéré (corroboré par OCR)"} for status in result.statuses.values())
+    assert report.startswith(f"**✅ Facture cohérente : {expected_count} champs vérifiés sur {expected_count}**")
+    if number_readable:
+        assert evidence.invoice_number is not None
+        assert "### Points non vérifiés" not in report
+        assert "Numéro de facture non lu." not in report
+    else:
+        assert evidence.invoice_number is None
+        assert "### Analyse de la facture\n" in report
+        assert "Numéro de facture non lu." in report
+        if invoice_id == "invoice-0406":
+            assert "### Informations" in report
+            assert "SIRET : la clé de contrôle ne correspond pas." in report
+        else:
+            assert "### Informations" not in report
+        assert "### Points non vérifiés" in report
+    for forbidden in ("None", "non ancré", "ancrage", "description_non_verifiee"):
+        assert forbidden not in report
+
+
+@pytest.mark.parametrize(
+    "number_readable,siret_readable,information,point",
+    [
+        (True, True, True, False),
+        (False, True, True, True),
+        (True, False, False, True),
+        (False, False, False, True),
+    ],
+)
+def test_fr_siret_readability_is_reported_separately_from_verified_json(
+    number_readable, siret_readable, information, point,
+):
+    evidence, result, report = _reference_report(
+        "invoice-0406",
+        invoice_number_readable=number_readable,
+        siret_readable=siret_readable,
+    )
+    if number_readable:
+        assert evidence.invoice_number is not None
+    else:
+        assert evidence.invoice_number is None
+    assert all(status in {"valide", "récupéré (corroboré par OCR)"} for status in result.statuses.values())
+    assert report.startswith("**✅ Facture cohérente : 20 champs vérifiés sur 20**")
+    if information:
+        assert "### Informations" in report
+        assert "SIRET : la clé de contrôle ne correspond pas. À vérifier si ce numéro est réel." in report
+        assert "SIRET : numéro illisible avec certitude, contrôle non effectué." not in report
+    else:
+        assert "### Informations" not in report
+    if point:
+        assert "### Points non vérifiés" in report
+    else:
+        assert "### Points non vérifiés" not in report
+    if not siret_readable:
+        assert "SIRET : numéro illisible avec certitude, contrôle non effectué." in report
+    for forbidden in ("None", "non ancré", "ancrage", "description_non_verifiee"):
+        assert forbidden not in report
 
 
 @pytest.mark.parametrize("left,right,equivalent", [

@@ -340,7 +340,20 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
     _names(evidence, issue)
     _dates(evidence, result, issue, today)
     identifier_labels = {"siret": "SIRET", "fr_vat": "TVA FR", "iban": "IBAN", "uk_vat": "VAT UK", "ein": "EIN US"}
-    for kind, value, valid in identifier_checks(evidence.text):
+    identifiers = identifier_checks(evidence.text)
+    if evidence.source_kind == "consensus":
+        corroborated_sirets = {
+            value for kind, value in evidence.corroborated_identifiers if kind == "siret"
+        }
+        identifiers = [check for check in identifiers if check[0] != "siret"]
+        identifiers.extend(
+            ("siret", value, valid_siret(value)) for value in sorted(corroborated_sirets)
+        )
+        if re.search(r"\bSIRET\b", evidence.text, re.I) and not corroborated_sirets:
+            result.not_verified.append(
+                "SIRET : numéro illisible avec certitude, contrôle non effectué."
+            )
+    for kind, value, valid in identifiers:
         if valid:
             result.passed.append(f"Identifiant {identifier_labels[kind]} : contrôle de structure ou clé réussi.")
         else:
@@ -360,12 +373,19 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
     else:
         result.not_verified.append("Devise : non vérifiable, aucune devise unique n’a été lue.")
     if evidence.source_kind == "consensus":
+        corroborated_sirets = {
+            value for kind, value in evidence.corroborated_identifiers if kind == "siret"
+        }
+        retained_flags = []
         for flag in result.flags:
+            if flag.code == "identifier_siret" and flag.printed in corroborated_sirets:
+                retained_flags.append(flag)
+                continue
             result.not_verified.append(
                 f"{flag.location} : non vérifiable, les lectures OCR ne permettent pas "
                 "de confirmer ce contrôle."
             )
-        result.flags = []
+        result.flags = retained_flags
     result.flags.sort(key=lambda flag: {"erreur": 0, "avertissement": 1, "information": 2}[flag.severity])
     return result
 
@@ -525,8 +545,8 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
     information = [flag for flag in validation.flags if flag.severity == "information"]
     if anomalies:
         verdict = f"⚠️ {len(anomalies)} anomalie(s) dans la facture"
-    elif to_check or validation.not_verified or insufficient:
-        verdict = f"⚠️ Lecture incomplète : {max(1, to_check)} champs à vérifier"
+    elif to_check:
+        verdict = f"⚠️ Lecture incomplète : {to_check} champs à vérifier"
     else:
         verdict = f"✅ Facture cohérente : {verified} champs vérifiés sur {len(statuses)}"
     lines = [f"**{verdict}**"]
@@ -555,6 +575,10 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
     lines.append(f"### {title}")
     if not available:
         lines.append("Preuves OCR indisponibles : extraction non recoupée.")
+        lines.extend(
+            f"- {issue}" for issue in evidence.issues
+            if not issue.startswith("Preuves OCR indisponibles")
+        )
     elif insufficient:
         lines.append("Preuves OCR insuffisantes : extraction non recoupée.")
     lines.append("### Anomalies dans la facture")
@@ -569,36 +593,31 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
             f"- **{flag.severity.capitalize()} — {flag.location}** : imprimé « {flag.printed} » ; "
             f"attendu : {flag.expected}. " + (f"Écart : {flag.difference}. " if flag.difference else "") + flag.reason
         )
-    lines.append("### Informations")
-    if not evidence.invoice_number:
-        lines.append("- Numéro de facture non lu.")
     if information:
+        lines.append("### Informations")
         for flag in information:
             if flag.code == "identifier_siret":
                 lines.append("- SIRET : la clé de contrôle ne correspond pas. À vérifier si ce numéro est réel.")
             else:
                 lines.append(f"- {flag.location} : {flag.reason}")
-    lines.append("### Contrôles réussis")
+    if validation.passed:
+        lines.append("### Contrôles réussis")
     grouped = {}
     for message in validation.passed:
         grouped.setdefault(_report_group(message), []).append(message)
-    for message in validation.not_verified:
-        grouped.setdefault(_report_group(message), []).append(f"Non vérifiable : {message}")
     for group in ("Calculs", "Taxes", "Dates", "Identifiants", "Cohérence"):
         if group not in grouped:
             continue
         lines.append(f"#### {group}")
         lines.extend(f"- {message}" for message in grouped[group])
-    if not grouped:
-        lines.append("- Aucun contrôle documentaire réalisable.")
+    points_non_verifies = list(validation.not_verified)
+    if not evidence.invoice_number:
+        points_non_verifies.insert(0, "Numéro de facture non lu.")
+    if points_non_verifies:
+        lines.append("### Points non vérifiés")
+        lines.extend(f"- {message}" for message in points_non_verifies)
     uncertain_label = f"{to_check} champ incertain" if to_check <= 1 else f"{to_check} champs incertains"
-    unchecked_controls = (
-        f" ; {len(validation.not_verified)} contrôle(s) non vérifiable(s)"
-        if validation.not_verified else ""
-    )
-    lines.append(
-        f"**{verified} champs vérifiés dans le document ; {uncertain_label}{unchecked_controls}.**"
-    )
+    lines.append(f"**{verified} champs vérifiés dans le document ; {uncertain_label}.**")
     if to_check:
         lines.append("Valeur non recoupée : à vérifier manuellement.")
     if suggestions:
