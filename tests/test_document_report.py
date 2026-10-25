@@ -143,7 +143,7 @@ def test_fr_and_us_fallback_reports_are_human_readable_without_duplicates(invoic
     assert "line_items." not in report
 
 
-def test_consensus_ocr_arithmetic_disagreement_does_not_create_a_ghost_anomaly():
+def test_consensus_reports_printed_line_amount_error_confirmed_by_subtotal():
     bad_text = UK_MULTI_RATE.replace("5912.17", "5900.00", 1)
     evidence = build_consensus({
         "deskew": [from_text(bad_text, locale="en-GB")],
@@ -153,8 +153,83 @@ def test_consensus_ocr_arithmetic_disagreement_does_not_create_a_ghost_anomaly()
     assert not any(flag.code == "line_arithmetic" for flag in validation.flags)
     assert evidence.rows[0].cells["quantity"] == []
     assert evidence.rows[0].cells["unit_price"] == []
+    warning = next(
+        flag for flag in validation.flags
+        if flag.code == "corroborated_line_amount_mismatch"
+    )
+    assert warning.severity == "avertissement"
+    assert warning.printed == "5900.00"
+    assert warning.expected == "5912.17"
     report = render_report(evidence, validation, {}, [])
-    assert "Aucune anomalie n’est affirmée avec les éléments disponibles." in report
+    assert "Ligne 1 : le montant imprimé (5900.00) ne correspond pas à quantité × prix (5912.17). À vérifier." in report
+
+
+def test_fixture_with_corroborated_printed_line_total_reports_warning_without_rewriting_json():
+    import shutil
+
+    from app import main
+
+    if not shutil.which("tesseract"):
+        pytest.fail("Fixture acceptance requires actual Tesseract OCR")
+    fixture = ROOT / "tests/fixtures/us-line3-amount-error.png"
+    text = main.document_text(str(fixture))
+    evidence = text.evidence
+    reference = next(
+        row["output"] for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())
+        if row["id"] == "invoice-0435"
+    )
+    result = reconcile(evidence, [read_model(json.dumps(reference))])
+    warning = next(
+        flag for flag in result.validation.flags
+        if flag.code == "corroborated_line_amount_mismatch"
+    )
+    assert warning.severity == "avertissement"
+    assert warning.reason == (
+        "Ligne 3 : le montant imprimé (369.07) ne correspond pas à quantité × prix (396.07). À vérifier."
+    )
+    line = result.payload["line_items"][2]
+    assert line["description"] == "Web development"
+    assert line["quantity"] is None
+    assert line["unit_price"] is None
+    assert line["total_ht"] == 369.07
+    report = render_report(evidence, result.validation, result.statuses, [])
+    assert warning.reason in report
+    assert "369.07" in report
+
+
+def test_disagreeing_degraded_family_amounts_do_not_assert_warning():
+    original = UK_MULTI_RATE
+    altered = original.replace("5912.17", "5900.00", 1)
+    evidence = build_consensus({
+        "deskew": [from_text(original, locale="en-GB")],
+        "clahe": [from_text(altered, locale="en-GB")],
+    })
+    assert evidence.rows[0].cells["total_ht"] == []
+    validation = document_validation(evidence)
+    assert not any(
+        flag.code == "corroborated_line_amount_mismatch"
+        for flag in validation.flags
+    )
+
+
+def test_single_preprocessing_family_amount_misread_does_not_create_warning():
+    correct = UK_MULTI_RATE
+    single_family_error = correct.replace("5912.17", "5900.00", 1)
+    evidence = build_consensus({
+        "deskew": [from_text(correct, locale="en-GB")],
+        "clahe": [from_text(single_family_error, locale="en-GB")],
+        "crop": [from_text(correct, locale="en-GB")],
+        "denoise": [from_text(correct, locale="en-GB")],
+    })
+    line = evidence.rows[0]
+    assert line.family_votes["total_ht"][Decimal("5912.17")] == (
+        "crop", "denoise", "deskew",
+    )
+    assert line.corroborated_amount_mismatch is None
+    assert not any(
+        flag.code == "corroborated_line_amount_mismatch"
+        for flag in document_validation(evidence).flags
+    )
 
 
 def _reference_report(invoice_id, *, invoice_number_readable=True, siret_readable=True):

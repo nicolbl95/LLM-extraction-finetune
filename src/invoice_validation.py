@@ -176,6 +176,15 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
         result.not_verified.append("Lignes : non vérifiables, aucun tableau n’a été identifié.")
     for index, row in enumerate(evidence.rows):
         values = {key: unique_value(row.cells.get(key, [])) for key in ("quantity", "unit_price", "total_ht")}
+        if evidence.source_kind == "consensus" and row.corroborated_amount_mismatch is not None:
+            printed_amount, calculated_amount = row.corroborated_amount_mismatch
+            issue(
+                "corroborated_line_amount_mismatch", "avertissement",
+                f"Ligne {index + 1}", printed_amount, calculated_amount,
+                abs(printed_amount - calculated_amount),
+                f"Ligne {index + 1} : le montant imprimé ({printed_amount}) ne correspond pas "
+                f"à quantité × prix ({calculated_amount}). À vérifier.",
+            )
         if len({number.value for number in row.cells.get("quantity", [])}) > 1:
             quantities = sorted({number.value for number in row.cells.get("quantity", [])})
             price = values["unit_price"]
@@ -378,6 +387,9 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
         }
         retained_flags = []
         for flag in result.flags:
+            if flag.code == "corroborated_line_amount_mismatch":
+                retained_flags.append(flag)
+                continue
             if flag.code == "identifier_siret" and flag.printed in corroborated_sirets:
                 retained_flags.append(flag)
                 continue
@@ -589,6 +601,11 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
             "Aucune anomalie n’est affirmée avec les éléments disponibles."
         )
     for flag in anomalies:
+        if flag.code == "corroborated_line_amount_mismatch":
+            lines.append(
+                f"- **Avertissement** : {flag.reason}"
+            )
+            continue
         lines.append(
             f"- **{flag.severity.capitalize()} — {flag.location}** : imprimé « {flag.printed} » ; "
             f"attendu : {flag.expected}. " + (f"Écart : {flag.difference}. " if flag.difference else "") + flag.reason

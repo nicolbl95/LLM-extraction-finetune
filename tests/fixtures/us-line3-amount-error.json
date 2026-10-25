@@ -1,0 +1,24 @@
+{
+  "source_image": "app/examples/us.png",
+  "fixture_image": "tests/fixtures/us-line3-amount-error.png",
+  "modification": {
+    "line": 3,
+    "field": "total_ht",
+    "original_printed_value": "USD 396.07",
+    "modified_printed_value": "USD 369.07"
+  },
+  "expected": {
+    "json_path": "line_items.2.total_ht",
+    "retained_printed_value": 369.07,
+    "arithmetic_anomaly": true
+  },
+  "observed_real_ocr": {
+    "line_3_total_ht_read": "369.07",
+    "final_json_total_ht": 369.07,
+    "final_json_quantity": null,
+    "final_json_unit_price": null,
+    "arithmetic_warning_reported": true,
+    "warning": "Ligne 3 : le montant imprimé (369.07) ne correspond pas à quantité × prix (396.07). À vérifier.",
+    "note": "Only the warning is added. The printed line total remains 369.07; uncorroborated quantity and unit price remain null."
+  }
+}

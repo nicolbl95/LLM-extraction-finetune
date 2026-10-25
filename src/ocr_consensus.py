@@ -27,7 +27,7 @@ def _matching_row(anchor, evidence):
     return None
 
 
-def _agreed(groups, key, value, *, unanimous=False):
+def _family_votes(groups, key, value):
     votes = defaultdict(set)
     originals = {}
     for family, entries in groups.items():
@@ -43,6 +43,11 @@ def _agreed(groups, key, value, *, unanimous=False):
         if observations and all(values == observations[0] for values in observations):
             for token in observations[0]:
                 votes[token].add(family)
+    return votes, originals
+
+
+def _agreed(groups, key, value, *, unanimous=False):
+    votes, originals = _family_votes(groups, key, value)
     candidates = [token for token, voters in votes.items() if len(voters) >= 2]
     if unanimous and len(votes) > 1:
         return []
@@ -120,6 +125,7 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
     # Tax and identity contradictions from image OCR are never asserted as
     # invoice errors without native/manual confirmation.
     result.discounts = _agreed(readings, lambda evidence: evidence.discounts, lambda n: n.value)
+    amount_mismatches = []
     for row in result.rows:
         matches = {
             family: [candidate for evidence in entries if (candidate := _matching_row(row, evidence)) is not None]
@@ -133,12 +139,17 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
         row.description = descriptions[0] if len(descriptions) == 1 else ""
         row.description_confident = bool(row.description)
         for key in ("quantity", "unit_price", "total_ht"):
-            row.cells[key] = _agreed(
-                matches, lambda candidate: [
+            candidates_for_family = lambda candidate: [
                     number for number in candidate.cells.get(key, [])
                     if number_confident(candidate, number, confidence)
-                ], lambda n: n.value,
-            )
+                ]
+            votes, _ = _family_votes(matches, candidates_for_family, lambda number: number.value)
+            row.family_votes[key] = {
+                value: tuple(sorted(families))
+                for value, families in votes.items()
+                if len(families) >= 2
+            }
+            row.cells[key] = _agreed(matches, candidates_for_family, lambda number: number.value)
         candidates = [
             {number.value for number in row.cells[key]} for key in ("quantity", "unit_price", "total_ht")
         ]
@@ -148,6 +159,28 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
                 if abs((values[0] * values[1]).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) - values[2]) <= Decimal(".02")
             ]
             if not solutions:
+                corroborated_quantities = set(row.family_votes["quantity"])
+                corroborated_prices = set(row.family_votes["unit_price"])
+                corroborated_totals = set(row.family_votes["total_ht"])
+                calculated_totals = {
+                    (quantity * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+                    for quantity, price in product(corroborated_quantities, corroborated_prices)
+                }
+                if (
+                    len(corroborated_totals) == 1
+                    and len(calculated_totals) == 1
+                    and all(
+                        abs(total - calculated) > Decimal(".02")
+                        for total, calculated in product(corroborated_totals, calculated_totals)
+                    )
+                ):
+                    amount_mismatches.append(
+                        (
+                            row,
+                            next(iter(corroborated_totals)),
+                            next(iter(calculated_totals)),
+                        )
+                    )
                 row.cells["quantity"] = []
                 row.cells["unit_price"] = []
                 result.issues.append(
@@ -159,4 +192,20 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
     result.numbers = [
         n for row in result.rows for values in row.cells.values() for n in values
     ] + [n for values in result.totals.values() for n in values]
+    line_amounts = []
+    for row in result.rows:
+        totals = row.family_votes.get("total_ht", {})
+        if len(totals) != 1:
+            line_amounts = []
+            break
+        line_amounts.append(next(iter(totals)))
+    invoice_totals = {number.value for number in result.totals.get("total_ht", [])}
+    if line_amounts and len(line_amounts) == len(result.rows) and len(invoice_totals) == 1:
+        printed_sum = sum(line_amounts, Decimal(0)) - sum(
+            (abs(number.value) for number in result.discounts), Decimal(0),
+        )
+        subtotal_delta = printed_sum - next(iter(invoice_totals))
+        for row, printed_amount, calculated_amount in amount_mismatches:
+            if abs(subtotal_delta - (printed_amount - calculated_amount)) <= Decimal(".02"):
+                row.corroborated_amount_mismatch = (printed_amount, calculated_amount)
     return result

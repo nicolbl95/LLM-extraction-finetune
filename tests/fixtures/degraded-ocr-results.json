@@ -1,0 +1,151 @@
+{
+  "scope": "real Tesseract OCR on nine generated degraded image variants; simulated deterministic reference model response",
+  "model_execution": "simulated; Qwen was not loaded",
+  "summary": {
+    "cases": 9,
+    "expected_fields": 180,
+    "null_fields": 33,
+    "wrong_values": 0,
+    "anomalies": 0,
+    "crashes": 0
+  },
+  "cases": [
+    {
+      "case": "france/rotate-2",
+      "expected_fields": 20,
+      "null_fields": 0,
+      "null_paths": [],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 12,
+      "source_kind": "consensus"
+    },
+    {
+      "case": "france/blur-light",
+      "expected_fields": 20,
+      "null_fields": 20,
+      "null_paths": [
+        "invoice_date",
+        "line_items.0.description",
+        "line_items.0.quantity",
+        "line_items.0.total_ht",
+        "line_items.0.unit_price",
+        "line_items.1.description",
+        "line_items.1.quantity",
+        "line_items.1.total_ht",
+        "line_items.1.unit_price",
+        "line_items.2.description",
+        "line_items.2.quantity",
+        "line_items.2.total_ht",
+        "line_items.2.unit_price",
+        "line_items.3.description",
+        "line_items.3.quantity",
+        "line_items.3.total_ht",
+        "line_items.3.unit_price",
+        "supplier_name",
+        "total_ht",
+        "total_ttc"
+      ],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 10,
+      "source_kind": "consensus"
+    },
+    {
+      "case": "france/jpeg-q40",
+      "expected_fields": 20,
+      "null_fields": 2,
+      "null_paths": [
+        "line_items.0.description",
+        "line_items.3.description"
+      ],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 11,
+      "source_kind": "consensus"
+    },
+    {
+      "case": "uk/rotate-2",
+      "expected_fields": 16,
+      "null_fields": 0,
+      "null_paths": [],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 12,
+      "source_kind": "consensus"
+    },
+    {
+      "case": "uk/blur-light",
+      "expected_fields": 16,
+      "null_fields": 3,
+      "null_paths": [
+        "line_items.0.quantity",
+        "line_items.0.unit_price",
+        "supplier_name"
+      ],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 12,
+      "source_kind": "consensus"
+    },
+    {
+      "case": "uk/jpeg-q40",
+      "expected_fields": 16,
+      "null_fields": 5,
+      "null_paths": [
+        "line_items.0.quantity",
+        "line_items.0.total_ht",
+        "line_items.0.unit_price",
+        "supplier_name",
+        "total_ht"
+      ],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 12,
+      "source_kind": "consensus"
+    },
+    {
+      "case": "us/rotate-2",
+      "expected_fields": 24,
+      "null_fields": 3,
+      "null_paths": [
+        "line_items.0.description",
+        "line_items.1.quantity",
+        "line_items.4.quantity"
+      ],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 12,
+      "source_kind": "consensus"
+    },
+    {
+      "case": "us/blur-light",
+      "expected_fields": 24,
+      "null_fields": 0,
+      "null_paths": [],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 2,
+      "source_kind": "ocr"
+    },
+    {
+      "case": "us/jpeg-q40",
+      "expected_fields": 24,
+      "null_fields": 0,
+      "null_paths": [],
+      "wrong_values": [],
+      "anomalies": [],
+      "crash": null,
+      "ocr_calls": 12,
+      "source_kind": "consensus"
+    }
+  ]
+}

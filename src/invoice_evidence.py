@@ -96,6 +96,8 @@ class TableRow:
     cells: dict[str, list[Number]]
     line: TextLine
     description_confident: bool = True
+    family_votes: dict[str, dict[Decimal, tuple[str, ...]]] = field(default_factory=dict)
+    corroborated_amount_mismatch: tuple[Decimal, Decimal] | None = None
 
 
 @dataclass(frozen=True)

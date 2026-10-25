@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from invoice_evidence import DocumentEvidence, from_text, from_tsv
 from invoice_grounding import UNVERIFIED, read_model, reconcile, run_grounded_inference
 from invoice_validation import document_validation, render_report
 from ocr_quality import assess_ocr
+from cases import image_cases
 from run_stress_check import run
 
 
@@ -78,6 +80,22 @@ def test_model_ocr_line_count_disagreement_is_not_a_document_error():
     assert not result.validation.flags
     assert result.payload["total_ht"] is None
     assert any("Nombre d'articles" in warning for warning in result.warnings)
+
+
+def test_blurred_uk_line_quantity_misread_does_not_create_amount_warning():
+    from app import main
+
+    case = next(case for case in image_cases(ROOT) if case.name == "uk/blur")
+    evidence = main.ocr_image(case.image).evidence
+    line = evidence.rows[0]
+    assert line.family_votes["quantity"] == {
+        Decimal("78"): ("clahe", "crop", "denoise", "deskew", "scale3")
+    }
+    assert line.corroborated_amount_mismatch is None
+    assert not any(
+        flag.code == "corroborated_line_amount_mismatch"
+        for flag in document_validation(evidence).flags
+    )
 
 
 def test_bad_quality_does_not_allocate_gpu():
