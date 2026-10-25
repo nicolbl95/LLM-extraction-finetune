@@ -223,6 +223,82 @@ class AppTests(unittest.TestCase):
                 ))
                 self.assertEqual(frames[-1][0], rows[reference_id]["output"])
 
+    def test_selected_examples_survive_gradio_cache_cleanup(self):
+        rows = {
+            row["id"]: row
+            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+        }
+        reference_ids = ("invoice-0406", "invoice-0110", "invoice-0435")
+        with tempfile.TemporaryDirectory(
+            prefix="gradio-example-cache-", dir=main.ROOT / "tests",
+        ) as cache_dir, patch.dict(os.environ, {"GRADIO_TEMP_DIR": cache_dir}):
+            app = main.build_app()
+            dependencies = {
+                dependency["api_name"]: dependency
+                for dependency in app.config["dependencies"]
+            }
+            load_event = dependencies["load_example"]
+            extract_event = dependencies["run_extraction_ui"]
+            load_handler = app.fns[load_event["id"]].fn
+            extract_handler = app.fns[extract_event["id"]].fn
+
+            for index, ((_, source), reference_id) in enumerate(
+                zip(main.EXAMPLES, reference_ids, strict=True)
+            ):
+                with self.subTest(example=source.name):
+                    selected = load_handler((index, [str(source)]))
+                    self.assertEqual(len([selected]), len(load_event["outputs"]))
+                    cached_path = Path(selected["value"]["path"])
+                    self.assertTrue(cached_path.is_file())
+                    self.assertNotEqual(cached_path.resolve(), source.resolve())
+
+                    cached_path.unlink()
+                    self.assertFalse(cached_path.exists())
+
+                    with patch.object(
+                        main, "predict_invoice",
+                        return_value={
+                            "raw": json.dumps(rows[reference_id]["output"]),
+                            "finish_reason": "stop",
+                            "generation_seconds": 0.01,
+                        },
+                    ):
+                        frames = list(extract_handler(str(cached_path)))
+
+                    self.assertTrue(frames)
+                    self.assertTrue(all(
+                        len(frame) == len(extract_event["outputs"])
+                        for frame in frames
+                    ))
+                    self.assertEqual(frames[-1][0], rows[reference_id]["output"])
+                    self.assertNotIn("Traceback", str(frames[-1]))
+
+    def test_missing_uploaded_temp_file_returns_reimport_message_without_trace(self):
+        with tempfile.TemporaryDirectory(
+            prefix="gradio-upload-cache-", dir=main.ROOT / "tests",
+        ) as cache_dir, patch.dict(os.environ, {"GRADIO_TEMP_DIR": cache_dir}):
+            app = main.build_app()
+            dependency = next(
+                item for item in app.config["dependencies"]
+                if item["api_name"] == "run_extraction_ui"
+            )
+            extract_handler = app.fns[dependency["id"]].fn
+            missing_upload = Path(cache_dir) / "expired-upload.png"
+            missing_upload.write_bytes(b"temporary upload")
+            missing_upload.unlink()
+            with patch.object(main, "predict_invoice") as predict:
+                frames = list(extract_handler(str(missing_upload)))
+            predict.assert_not_called()
+
+        self.assertTrue(frames)
+        self.assertTrue(all(len(frame) == len(dependency["outputs"]) for frame in frames))
+        report = frames[-1][1]
+        self.assertIn(
+            "Le fichier n'est plus disponible : importez-le de nouveau",
+            report,
+        )
+        self.assertNotIn("Traceback", report)
+
     def test_extraction_errors_show_a_readable_cause_and_keep_traceback(self):
         errors = (
             (OSError("cannot decode uploaded image"), "Fichier illisible ou inaccessible"),

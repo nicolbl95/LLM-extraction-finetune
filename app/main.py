@@ -17,6 +17,7 @@ from pathlib import Path
 
 import spaces
 import gradio as gr
+from gradio import processing_utils
 import cv2
 import numpy
 import pymupdf
@@ -46,9 +47,9 @@ MAX_PAGES = 10
 MAX_PIXELS = 25_000_000
 PROCESSING_STATUS = "Analyse des données, détection des erreurs"
 EXAMPLES = [
-    ("France · EUR", ROOT / "app/examples/france.png"),
-    ("Royaume-Uni · GBP", ROOT / "app/examples/uk.png"),
-    ("États-Unis · USD", ROOT / "app/examples/us.png"),
+    ("France · EUR", (ROOT / "app/examples/france.png").resolve()),
+    ("Royaume-Uni · GBP", (ROOT / "app/examples/uk.png").resolve()),
+    ("États-Unis · USD", (ROOT / "app/examples/us.png").resolve()),
 ]
 DEFAULT_ADAPTER = (
     ROOT / "results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter"
@@ -108,7 +109,19 @@ def checked_path(filename: str | None) -> Path:
     if path.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"}:
         raise ValueError("Formats acceptés : PDF, PNG et JPEG.")
     if not path.is_file():
-        raise ValueError("Le fichier sélectionné est introuvable.")
+        cached_path = path.resolve()
+        cache_root = Path(gr.utils.get_upload_folder()).resolve()
+        for _, example_path in EXAMPLES:
+            expected_cache_path = (
+                cache_root
+                / processing_utils.hash_file(example_path)
+                / example_path.name
+            ).resolve()
+            if cached_path == expected_cache_path and example_path.is_file():
+                path = example_path
+                break
+        else:
+            raise ValueError("Le fichier n'est plus disponible : importez-le de nouveau.")
     if not 0 < path.stat().st_size <= MAX_BYTES:
         raise ValueError("Le fichier doit être non vide et ne pas dépasser 20 Mo.")
     return path
@@ -342,6 +355,8 @@ def readable_read_failure(error: Exception) -> str:
     if isinstance(error, OSError):
         return "Fichier illisible ou inaccessible."
     if isinstance(error, ValueError):
+        if str(error) == "Le fichier n'est plus disponible : importez-le de nouveau.":
+            return str(error)
         return f"Fichier ou demande invalide : {error}"
     if isinstance(error, ImportError):
         return "Composant nécessaire à la lecture du document indisponible."
