@@ -166,7 +166,7 @@ def test_budget_failure_ui_is_insufficient_and_never_loads_model():
         payload, report, technical, advanced, first_pass_raw, validation, download = list(
             main.run_extraction_ui(str(main.EXAMPLES[0][1]))
         )[-1]
-    assert "Preuves OCR insuffisantes" in report
+    assert "Délai de lecture dépassé" in report
     assert payload["total_ht"] is None
     assert not validation["flags"]
     assert "insuffisante" in technical

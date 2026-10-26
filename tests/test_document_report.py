@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from invoice_evidence import DocumentEvidence, EvidenceText, from_text, invoice_number_from_text
-from invoice_grounding import UNVERIFIED, read_model, reconcile, run_grounded_inference
+from invoice_grounding import VALID, UNVERIFIED, read_model, reconcile, run_grounded_inference
 from ocr_consensus import build_consensus
 from invoice_validation import (
     IDENTIFIER_CALIBRATION, IDENTIFIER_SEVERITIES, canonical_name, document_validation,
@@ -232,6 +232,264 @@ def test_single_preprocessing_family_amount_misread_does_not_create_warning():
     )
 
 
+LAYOUT_REFERENCE = {
+    "supplier_name": "Joanna Binet",
+    "invoice_date": "2019-01-29",
+    "total_ht": 145.0,
+    "total_ttc": 174.0,
+    "line_items": [
+        {"description": "Grand brun escargot pour manger", "quantity": 1, "unit_price": 100.0, "total_ht": 100.0},
+        {"description": "Petit marinière uniforme en bleu", "quantity": 2, "unit_price": 15.0, "total_ht": 30.0},
+        {"description": "Facile à jouer accordéon", "quantity": 3, "unit_price": 5.0, "total_ht": 15.0},
+    ],
+}
+
+
+def test_real_ocr_equivalent_invoice_with_unusual_french_layout_is_grounded():
+    import shutil
+
+    from app import main
+
+    if not shutil.which("tesseract"):
+        pytest.fail("Synthetic-layout acceptance requires actual Tesseract OCR")
+    fixture = ROOT / "tests/fixtures/layout-joanna-binet.png"
+    evidence = main.document_text(str(fixture)).evidence
+    assert evidence.source_kind == "consensus"
+    assert evidence.invoice_number == "FR-001"
+    assert evidence.supplier == "Joanna Binet"
+    assert evidence.invoice_date == "2019-01-29"
+    assert len(evidence.rows) == 3
+    assert evidence.totals.get("total_candidate")
+    assert evidence.rows[0].cells["quantity"][0].value == Decimal("1")
+    assert evidence.rows[1].cells["quantity"][0].value == Decimal("2")
+    assert evidence.rows[2].cells["quantity"][0].value == Decimal("3")
+
+    response = MagicMock(return_value={
+        "raw": json.dumps(LAYOUT_REFERENCE, ensure_ascii=False),
+        "finish_reason": "stop",
+        "generation_seconds": 0.01,
+    })
+    diagnostics = {}
+    from app import main
+    with patch.object(main, "predict_invoice", side_effect=response):
+        payload = main.extract_invoice(EvidenceText(evidence), diagnostics=diagnostics)
+    response.assert_called_once()
+    assert payload == LAYOUT_REFERENCE
+    assert diagnostics["model_info"]["passes_succeeded"] == 1
+    assert diagnostics["report"].startswith("**✅ Facture cohérente : 16 champs vérifiés sur 16**")
+    assert any(
+        "Total « TOTAL » retenu comme TTC" in item
+        for item in diagnostics["validation"]["passed"]
+    )
+    assert not [
+        flag for flag in diagnostics["validation"]["flags"]
+        if flag["severity"] != "information"
+    ]
+    assert all(
+        value == VALID
+        for value in diagnostics["field_statuses"].values()
+    )
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        (
+            "Qté | Désignation | Prix unit. HT | Montant HT\n"
+            "1 | Grand brun escargot pour manger | 100.00 | 100.00\n"
+            "2 | Petit marinière uniforme en bleu | 15.00 | 30.00\n"
+            "3 | Facile à jouer accordéon | 5.00 | 15.00"
+        ),
+        (
+            "Désignation | Montant HT | Qté | PU\n"
+            "Grand brun escargot pour manger | 100.00 | 1 | 100.00\n"
+            "Petit marinière uniforme en bleu | 30.00 | 2 | 15.00\n"
+            "Facile à jouer accordéon | 15.00 | 3 | 5.00"
+        ),
+        (
+            "Qty | Item | P.U. | Amount\n"
+            "1 | Grand brun escargot pour manger | 100.00 | 100.00\n"
+            "2 | Petit marinière uniforme en bleu | 15.00 | 30.00\n"
+            "3 | Facile à jouer accordéon | 5.00 | 15.00"
+        ),
+    ],
+    ids=("quantity-first-french", "reordered-columns", "english-abbreviations"),
+)
+def test_three_additional_table_layouts_map_fields_without_guessing(table):
+    text = (
+        "FACTURE FR-001\nDate 29/01/2019\nJoanna Binet\n"
+        + table + "\nTVA 20% 29.00\nTOTAL 174.00"
+    )
+    evidence = build_consensus({
+        "deskew": [from_text(text, locale="fr-FR")],
+        "clahe": [from_text(text, locale="fr-FR")],
+    })
+    result = reconcile(evidence, [read_model(json.dumps(LAYOUT_REFERENCE, ensure_ascii=False))])
+    assert len(evidence.rows) == 3
+    assert evidence.invoice_number == "FR-001"
+    assert evidence.supplier == "Joanna Binet"
+    assert evidence.invoice_date == "2019-01-29"
+    assert result.payload == LAYOUT_REFERENCE
+    assert not [flag for flag in result.validation.flags if flag["severity"] != "information"]
+
+
+def test_gross_amount_header_is_not_misinterpreted_as_line_total_ht():
+    text = (
+        "INVOICE GB-2024-00332\n"
+        "Supplier: Bristol Digital Ltd\n"
+        "Invoice date: 2024-07-14\n"
+        "Currency: GBP\n"
+        "Product | Quantity | Net unit price | VAT % | VAT | Gross amount | Discount\n"
+        "Brochure printing | 18 | GBP 10.09 | 20% | GBP 36.32 | GBP 217.94 | 10%\n"
+        "Total excl. tax: GBP 4,445.17\nVAT (20%): GBP 889.03\nInvoice total: GBP 5,334.20"
+    )
+    evidence = from_text(text, locale="en-GB")
+    assert evidence.rows == []
+    assert evidence.totals.get("total_ht")
+    assert not evidence.totals.get("total_candidate")
+
+
+def test_unqualified_total_is_ttc_only_when_printed_ht_plus_tax_matches():
+    matching_text = (
+        "FACTURE FR-001\nDate 29/01/2019\nJoanna Binet\n"
+        "QTÉ | DÉSIGNATION | PRIX UNIT. HT | MONTANT HT\n"
+        "1 | Grand brun escargot pour manger | 100.00 | 100.00\n"
+        "2 | Petit marinière uniforme en bleu | 15.00 | 30.00\n"
+        "3 | Facile à jouer accordéon | 5.00 | 15.00\n"
+        "TVA 20% 29.00\nTOTAL 174.00"
+    )
+    evidence = build_consensus({
+        "deskew": [from_text(matching_text, locale="fr-FR")],
+        "clahe": [from_text(matching_text, locale="fr-FR")],
+    })
+    accepted = reconcile(evidence, [read_model(json.dumps(LAYOUT_REFERENCE, ensure_ascii=False))])
+    assert accepted.payload["total_ht"] == 145.0
+    assert accepted.payload["total_ttc"] == 174.0
+
+    bad_total = matching_text.replace("TOTAL 174.00", "TOTAL 180.00")
+    rejected_evidence = build_consensus({
+        "deskew": [from_text(bad_total, locale="fr-FR")],
+        "clahe": [from_text(bad_total, locale="fr-FR")],
+    })
+    rejected = reconcile(
+        rejected_evidence,
+        [read_model(json.dumps(LAYOUT_REFERENCE, ensure_ascii=False))],
+    )
+    assert rejected.payload["total_ttc"] is None
+    assert rejected.payload["total_ht"] is None
+    assert not [flag for flag in rejected.validation.flags if flag["severity"] != "information"]
+
+
+def test_readable_unsupported_layout_runs_model_but_only_keeps_anchored_fields():
+    text = (
+        "FACTURE FR-001\nFournisseur : Joanna Binet\nDate 29/01/2019\n"
+        "QTÉ | RÉFÉRENCE | PXU | VALEUR\n"
+        "1 | Grand brun escargot pour manger | 100.00 | 100.00\n"
+        "2 | Petit marinière uniforme en bleu | 15.00 | 30.00\n"
+        "3 | Facile à jouer accordéon | 5.00 | 15.00\n"
+        "TVA 20% 29.00\nTOTAL 174.00"
+    )
+    evidence = build_consensus({
+        "deskew": [from_text(text, locale="fr-FR")],
+        "clahe": [from_text(text, locale="fr-FR")],
+    })
+    assert not evidence.rows
+    assert evidence.quality_issues == ["Tableau non reconstruit malgré les prétraitements."]
+    response = MagicMock(return_value={
+        "raw": json.dumps(LAYOUT_REFERENCE, ensure_ascii=False),
+        "finish_reason": "stop",
+        "generation_seconds": 0.01,
+    })
+    result = run_grounded_inference(
+        evidence, {"id": "partial-layout", "input": evidence.text}, [], response,
+    )
+    response.assert_called_once()
+    assert result["payload"]["supplier_name"] == "Joanna Binet"
+    assert result["payload"]["invoice_date"] == "2019-01-29"
+    assert result["payload"]["total_ht"] is None
+    assert result["payload"]["total_ttc"] is None
+    assert all(item == {
+        "description": None, "quantity": None, "unit_price": None, "total_ht": None,
+    } for item in result["payload"]["line_items"])
+    assert "Lecture partielle" in result["report"]
+    assert "Mise en page non reconnue" not in result["report"]
+
+
+def test_unique_unlabelled_supplier_is_not_taken_from_the_client_block():
+    client_only = from_text(
+        "FACTURE FR-001\nDate 29/01/2019\nBill to:\nMaison Rivage SAS\n"
+        "QTÉ | DÉSIGNATION | PRIX UNIT. HT | MONTANT HT",
+        locale="fr-FR",
+    )
+    assert client_only.supplier is None
+
+    ambiguous = from_text(
+        "FACTURE FR-001\nDate 29/01/2019\nJoanna Binet\nServices Horizon\n"
+        "QTÉ | DÉSIGNATION | PRIX UNIT. HT | MONTANT HT",
+        locale="fr-FR",
+    )
+    assert ambiguous.supplier is None
+
+
+def test_unlabelled_supplier_requires_two_family_votes_and_never_uses_client():
+    text = (
+        "FACTURE FR-001\nJoanna Binet\n"
+        "Bill to: Maison Rivage SAS\n"
+        "Date 29/01/2019\n"
+        "QTÉ | DÉSIGNATION | PRIX UNIT. HT | MONTANT HT\n"
+        "1 | Grand brun escargot pour manger | 100.00 | 100.00\n"
+        "2 | Petit marinière uniforme en bleu | 15.00 | 30.00\n"
+        "3 | Facile à jouer accordéon | 5.00 | 15.00\n"
+        "TVA 20% 29.00\nTOTAL 174.00"
+    )
+    single_read = from_text(text, locale="fr-FR")
+    single_read.source_kind = "pdf"
+    single = reconcile(single_read, [read_model(json.dumps(LAYOUT_REFERENCE, ensure_ascii=False))])
+    assert single.payload["supplier_name"] is None
+
+    consensus = build_consensus({
+        "deskew": [from_text(text, locale="fr-FR")],
+        "clahe": [from_text(text, locale="fr-FR")],
+    })
+    assert consensus.supplier == "Joanna Binet"
+    assert not consensus.supplier_is_explicit
+    agreed = reconcile(consensus, [read_model(json.dumps(LAYOUT_REFERENCE, ensure_ascii=False))])
+    assert agreed.payload["supplier_name"] == "Joanna Binet"
+
+    wrong_supplier = text.replace("Joanna Binet", "Maison Rivage SAS")
+    disagreement = build_consensus({
+        "deskew": [from_text(text, locale="fr-FR")],
+        "clahe": [from_text(wrong_supplier, locale="fr-FR")],
+    })
+    assert disagreement.supplier is None
+
+
+def test_report_distinguishes_blurred_text_from_unrecognized_table_layout():
+    from dataclasses import replace
+
+    layout = from_text(
+        "FACTURE FR-001\nDate 29/01/2019\nJoanna Binet\n"
+        "QTE DESIGNATION PRIX UNIT HT MONTANT HT\n"
+        "1 Grand brun escargot pour manger 100.00 100.00",
+        locale="fr-FR",
+    )
+    layout.source_kind = "consensus"
+    layout.ocr_cross_checked = True
+    layout.quality_issues = ["Tableau non reconstruit malgré les prétraitements."]
+    layout_report = render_report(layout, document_validation(layout), {}, [], insufficient=True)
+    assert "Mise en page non reconnue" in layout_report
+    assert "Image floue" not in layout_report
+
+    blur = from_text("FACTURE FR-001 texte illisible")
+    blur.source_kind = "consensus"
+    blur.ocr_cross_checked = True
+    blur.tokens = [replace(token, confidence=20) for token in blur.tokens]
+    blur.quality_issues = ["Confiance OCR moyenne insuffisante."]
+    blur_report = render_report(blur, document_validation(blur), {}, [], insufficient=True)
+    assert "Image floue ou texte trop peu lisible" in blur_report
+    assert "Mise en page non reconnue" not in blur_report
+
+
 def _reference_report(invoice_id, *, invoice_number_readable=True, siret_readable=True):
     row = next(
         row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())
@@ -254,12 +512,14 @@ def _reference_report(invoice_id, *, invoice_number_readable=True, siret_readabl
     return evidence, result, report
 
 
-def test_invoice_number_parser_requires_the_expected_country_year_and_five_digits():
+def test_invoice_number_parser_supports_general_sequences_with_invoice_context():
     assert invoice_number_from_text("FACTURE FR-2025-00406") == "FR-2025-00406"
     assert invoice_number_from_text("INVOICE GB-2025-00110") == "GB-2025-00110"
     assert invoice_number_from_text("INVOICE US-2023-00435") == "US-2023-00435"
-    assert invoice_number_from_text("FACTURE FR-2025-0406") is None
-    assert invoice_number_from_text("FACTURE FR-2025-000406") is None
+    assert invoice_number_from_text("FACTURE FR-001") == "FR-001"
+    assert invoice_number_from_text("FACTURE FR-2025-0406") == "FR-2025-0406"
+    assert invoice_number_from_text("FACTURE FR-2025-000406") == "FR-2025-000406"
+    assert invoice_number_from_text("Reference FR-001") is None
 
 
 def test_consensus_requires_two_independent_reads_for_invoice_number_and_siret():

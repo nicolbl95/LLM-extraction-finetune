@@ -1,15 +1,55 @@
 {
-  "scope": "real Tesseract OCR on nine generated degraded image variants; simulated deterministic reference model response",
-  "model_execution": "simulated; Qwen was not loaded",
-  "summary": {
+  "scope": "real Tesseract on degraded examples; model reference responses simulated",
+  "model": "reference JSON mocked; Qwen not loaded",
+  "stress_35": {
+    "cases": 35,
+    "wrong_values": 0,
+    "false_nulls": 158,
+    "phantom_anomalies": 0,
+    "crashes": 0,
+    "expected_fields": 612
+  },
+  "error_replays_105": {
+    "cases": 105,
+    "wrong_values": 0,
+    "phantom_anomalies": 0,
+    "provenance": "User-reported Qwen failures reconstructed for replay, plus coherent/permuted errors; not locally captured generations"
+  },
+  "null_differences_vs_155_baseline": {
+    "added": [
+      [
+        "france/noise",
+        "line_items.0.description"
+      ],
+      [
+        "france/noise",
+        "line_items.2.description"
+      ],
+      [
+        "france/rotate:-2",
+        "line_items.1.description"
+      ],
+      [
+        "france/rotate:-2",
+        "line_items.2.description"
+      ]
+    ],
+    "removed": [
+      [
+        "uk/jpeg40",
+        "total_ht"
+      ]
+    ]
+  },
+  "degraded_9": {
     "cases": 9,
     "expected_fields": 180,
-    "null_fields": 33,
+    "null_fields": 32,
     "wrong_values": 0,
     "anomalies": 0,
     "crashes": 0
   },
-  "cases": [
+  "degraded_cases": [
     {
       "case": "france/rotate-2",
       "expected_fields": 20,
@@ -96,13 +136,12 @@
     {
       "case": "uk/jpeg-q40",
       "expected_fields": 16,
-      "null_fields": 5,
+      "null_fields": 4,
       "null_paths": [
         "line_items.0.quantity",
         "line_items.0.total_ht",
         "line_items.0.unit_price",
-        "supplier_name",
-        "total_ht"
+        "supplier_name"
       ],
       "wrong_values": [],
       "anomalies": [],

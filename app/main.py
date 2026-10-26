@@ -35,7 +35,10 @@ from evaluate_finetuned import (
     INSTRUCTION, SYSTEM_PROMPT, Invoice as Invoice, LoRAInference, check_adapter,
     validate_invoice_json as validate_invoice_json,
 )
-from invoice_evidence import DocumentEvidence, EvidenceText, Token, UnreadableOCR, combine_pages, from_text, from_tokens
+from invoice_evidence import (
+    DocumentEvidence, EvidenceText, Token, UnreadableOCR, combine_pages, from_text,
+    from_tokens, reading_issue_category,
+)
 from invoice_grounding import read_model, run_grounded_inference
 from ocr_recovery import recover_image
 from ocr_budget import ProcessingBudget
@@ -46,11 +49,19 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 10
 MAX_PIXELS = 25_000_000
 PROCESSING_STATUS = "Analyse des données, détection des erreurs"
-EXAMPLES = [
+REGIONAL_EXAMPLES = [
     ("France · EUR", (ROOT / "app/examples/france.png").resolve()),
     ("Royaume-Uni · GBP", (ROOT / "app/examples/uk.png").resolve()),
     ("États-Unis · USD", (ROOT / "app/examples/us.png").resolve()),
 ]
+ADDITIONAL_EXAMPLES = [
+    ("France · Joanna Binet (mise en page inhabituelle)",
+     (ROOT / "tests/fixtures/layout-joanna-binet.png").resolve()),
+    ("États-Unis · erreur d'impression",
+     (ROOT / "tests/fixtures/us-line3-amount-error.png").resolve()),
+    ("Modèle vierge à compléter", (ROOT / "app/examples/modele-vierge.png").resolve()),
+]
+EXAMPLES = [*REGIONAL_EXAMPLES, *ADDITIONAL_EXAMPLES]
 DEFAULT_ADAPTER = (
     ROOT / "results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter"
 )
@@ -341,6 +352,7 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics
             ocr_quality_issues=evidence.quality_issues,
             ocr_issues=evidence.issues,
             first_pass_raw=result["raw"],
+            ocr_issue_category=reading_issue_category(evidence),
         )
     return result["payload"]
 
@@ -429,10 +441,16 @@ def run_extraction_ui(filename: str | None):
                     ),
                     "Outil de lecture du document indisponible.",
                 )
+            elif diagnostics.get("ocr_issue_category") == "layout":
+                read_reason = "Mise en page non reconnue : du texte est lisible, mais le tableau n’a pas pu être interprété."
+            elif diagnostics.get("ocr_issue_category") == "blur":
+                read_reason = "Image floue ou texte trop peu lisible ; les champs non confirmés restent à vérifier."
+            elif diagnostics.get("ocr_issue_category") == "timeout":
+                read_reason = "Délai de lecture dépassé ; les champs non recoupés restent à vérifier."
             elif "délai" in quality_reasons or "temps" in quality_reasons:
-                read_reason = "Temps OCR dépassé ; les champs non recoupés restent à vérifier."
+                read_reason = "Délai de lecture dépassé ; les champs non recoupés restent à vérifier."
             elif diagnostics.get("ocr_quality_issues"):
-                read_reason = "Aucun texte suffisamment recoupé ; les champs restent à vérifier."
+                read_reason = "Lecture partielle : certains éléments n’ont pas pu être recoupés."
             elif diagnostics.get("ocr_issues"):
                 read_reason = "Certaines preuves documentaires sont indisponibles."
             method = {
@@ -681,7 +699,10 @@ def build_app() -> gr.Blocks:
                     type="filepath",
                 )
                 gr.Markdown("PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais")
-                gr.Markdown("Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽")
+                gr.Markdown(
+                    "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis "
+                    "/ Joanna Binet / erreur d'impression / modèle vierge 🔽"
+                )
                 gr.Examples(
                     examples=[[str(path)] for _, path in EXAMPLES],
                     inputs=[upload],

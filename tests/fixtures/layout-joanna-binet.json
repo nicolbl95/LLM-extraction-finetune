@@ -1,0 +1,47 @@
+{
+  "fixture_image": "tests/fixtures/layout-joanna-binet.png",
+  "provenance": "Synthetic visual equivalent rendered locally because the reported Space image was not attached.",
+  "printed_header": {
+    "title": "FACTURE",
+    "invoice_number": "FR-001",
+    "date": "29/01/2019",
+    "supplier": "Joanna Binet"
+  },
+  "columns": [
+    "QTÉ",
+    "DÉSIGNATION",
+    "PRIX UNIT. HT",
+    "MONTANT HT"
+  ],
+  "printed_summary": {
+    "tax": "TVA 20% 29.00",
+    "total_label": "TOTAL",
+    "total": "174.00"
+  },
+  "reference": {
+    "supplier_name": "Joanna Binet",
+    "invoice_date": "2019-01-29",
+    "total_ht": 145.0,
+    "total_ttc": 174.0,
+    "line_items": [
+      {
+        "description": "Grand brun escargot pour manger",
+        "quantity": 1,
+        "unit_price": 100.0,
+        "total_ht": 100.0
+      },
+      {
+        "description": "Petit marinière uniforme en bleu",
+        "quantity": 2,
+        "unit_price": 15.0,
+        "total_ht": 30.0
+      },
+      {
+        "description": "Facile à jouer accordéon",
+        "quantity": 3,
+        "unit_price": 5.0,
+        "total_ht": 15.0
+      }
+    ]
+  }
+}

@@ -94,22 +94,52 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
                 return []
             if key == "invoice_number":
                 return [candidate]
-            relevant = [
-                line for line in evidence.lines
-                if ("supplier" in folded(line.text) or "fournisseur" in folded(line.text))
-                if key == "supplier"
-            ] if key == "supplier" else [
-                line for line in evidence.lines if "invoice date" in folded(line.text) or "date de facture" in folded(line.text)
-            ]
+            if key == "supplier":
+                expected_name = folded(evidence.supplier_raw or candidate)
+                if evidence.supplier_is_explicit:
+                    relevant = [
+                        line for line in evidence.lines
+                        if "supplier" in folded(line.text) or "fournisseur" in folded(line.text)
+                    ]
+                else:
+                    relevant = [
+                        line for line in evidence.lines
+                        if folded(line.text) == expected_name
+                    ]
+            else:
+                relevant = [
+                    line for line in evidence.lines
+                    if (
+                        "invoice date" in folded(line.text)
+                        or "date de facture" in folded(line.text)
+                        or (
+                            re.search(r"\bdate\b", folded(line.text))
+                            and not re.search(
+                                r"\b(?:due\s+date|date\s+d[' ]?echeance|date\s+de\s+(?:livraison|paiement)|echeance)\b",
+                                folded(line.text),
+                            )
+                        )
+                    )
+                ]
             if not relevant or any(token.confidence < confidence for line in relevant for token in line.tokens):
                 return []
             return [candidate]
         candidates = _agreed(readings, metadata, folded, unanimous=True)
         setattr(result, key, candidates[0] if len(candidates) == 1 else None)
+    if result.supplier:
+        explicit_votes = _agreed(
+            readings,
+            lambda evidence: [evidence.supplier_is_explicit]
+            if evidence.supplier and folded(evidence.supplier) == folded(result.supplier)
+            else [],
+            lambda value: value,
+            unanimous=True,
+        )
+        result.supplier_is_explicit = explicit_votes == [True]
     if result.supplier and folded(result.supplier).endswith((" lid", " l1d", " lti")):
         result.supplier = None
     result.totals = {}
-    for key in ("total_ht", "total_ttc"):
+    for key in ("total_ht", "total_ttc", "total_candidate"):
         result.totals[key] = _agreed(
             readings, lambda evidence: [
                 n for n in evidence.totals.get(key, [])
@@ -188,7 +218,15 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
                     "quantité/prix non recoupés, pas d'anomalie de facture affirmée."
                 )
     if not result.rows:
-        result.quality_issues.append("Tableau non reconstruit malgré les prétraitements.")
+        confidence_values = [token.confidence for token in result.tokens]
+        mean_confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0
+        if mean_confidence < OCR_CONFIG.fast_mean_confidence:
+            result.quality_issues.append(
+                f"Confiance OCR moyenne insuffisante : {mean_confidence:.1f}/100 "
+                f"(minimum {OCR_CONFIG.fast_mean_confidence})."
+            )
+        else:
+            result.quality_issues.append("Tableau non reconstruit malgré les prétraitements.")
     result.numbers = [
         n for row in result.rows for values in row.cells.values() for n in values
     ] + [n for values in result.totals.values() for n in values]

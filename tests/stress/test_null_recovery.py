@@ -88,7 +88,7 @@ def test_more_than_half_doubtful_fields_adds_scan_instruction_at_the_top():
     statuses = {"supplier_name": "non vérifié", "total_ht": "non vérifié", "total_ttc": "valide"}
     from invoice_validation import Validation
     report = render_report(evidence, Validation(), statuses, [], insufficient=True)
-    assert "Image de qualité insuffisante : renvoyez un scan plus net (300 dpi, bien droit, sans flou)" in report.split("\n\n")[1]
+    assert "Lecture partielle" in report.split("\n\n")[1]
 
 
 def test_partition_is_exact_frozen_and_has_no_overlap():
@@ -137,10 +137,19 @@ def test_tesseract_timeout_is_explicitly_unverified_not_a_crash(caplog):
             main.ocr_image(Image.new("RGB", (20, 20)))
         result = list(main.run_extraction_ui(str(main.EXAMPLES[0][1])))[-1]
     payload, report, technical, advanced, first_pass_raw, validation, download = result
+    # No false value: a timed-out read never confirms a field.
     assert payload["total_ht"] is None
-    assert "Preuves OCR insuffisantes" in report
+    assert payload["supplier_name"] is None
+    assert all(value is None for item in payload["line_items"] for value in item.values())
     assert not validation["flags"]
-    assert "Temps OCR dépassé" in technical
+    # The exact cause is stated, both in the report and in the technical panel.
+    assert "Délai de lecture dépassé" in report
+    assert "Délai de lecture dépassé" in technical
+    # No internal jargon is exposed to the reader.
+    for jargon in ("Traceback", "None", "Pydantic", "UnreadableOCR", "Tesseract process timeout"):
+        assert jargon not in report
+        assert jargon not in technical
+    # The traceback stays available to operators, in the logs only.
     assert "Traceback" in caplog.text
 
 

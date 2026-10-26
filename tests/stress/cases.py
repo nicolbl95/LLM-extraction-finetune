@@ -136,6 +136,21 @@ def layout_cases(directory):
         "inverse_english": "Description | Quantity | Net unit price | Net amount\nInstallation | 2 | 617.28 | 1,234.56\nManuel | 2 | 25.00 | 50.00",
         "currency_prefix": "Description | Quantity | Net unit price | Net amount\nInstallation | 2 | EUR 617,28 | €1 234,56\nManuel | 2 | EUR 25 | €50",
         "currency_suffix": "Description | Quantity | Net unit price | Net amount\nInstallation | 2 | 617,28 EUR | 1 234,56 EUR\nManuel | 2 | 25 EUR | 50 EUR",
+        "quantity_first_french": (
+            "Qté | Désignation | Prix unit. HT | Montant HT\n"
+            "2 | Installation | 617,28 | 1 234,56\n"
+            "2 | Manuel | 25,00 | 50,00"
+        ),
+        "reordered_columns": (
+            "Désignation | Montant HT | Qté | PU\n"
+            "Installation | 1 234,56 | 2 | 617,28\n"
+            "Manuel | 50,00 | 2 | 25,00"
+        ),
+        "english_abbreviations": (
+            "Qty | Item | P.U. | Amount\n"
+            "2 | Installation | 617.28 | 1,234.56\n"
+            "2 | Manuel | 25.00 | 50.00"
+        ),
     }
     for name, table in layouts.items():
         text = LAYOUT_HEADER + table + LAYOUT_TOTALS
@@ -161,3 +176,29 @@ def layout_cases(directory):
             pdf.new_page().insert_text((40, 40), text, fontsize=10)
         pdf.save(path)
     yield StressCase("layout/two_page_pdf", LAYOUT_REFERENCE, wrong_model(LAYOUT_REFERENCE), pdf=path)
+
+
+GUARD_LAYOUTS = {
+    "duplicated_columns": (
+        "Description | Quantity | Net unit price | Quantity | Net amount\n"
+        "Installation | 2 | 617,28 | 2 | 1 234,56\nManuel | 2 | 25,00 | 2 | 50,00"
+    ),
+    "missing_description": (
+        "Quantity | Net unit price | Net amount\n"
+        "2 | 617,28 | 1 234,56\n2 | 25,00 | 50,00"
+    ),
+}
+
+
+def layout_guard_cases():
+    """Counter-tests for the header guard rails: these layouts must stay unverified.
+
+    ``duplicated_columns`` assigns two columns to the same header, and
+    ``missing_description`` has no description column at all. In both cases the
+    parser must refuse the table instead of inventing an alignment.
+    """
+    for name, table in GUARD_LAYOUTS.items():
+        yield StressCase(
+            f"layout-guard/{name}", LAYOUT_REFERENCE, wrong_model(LAYOUT_REFERENCE),
+            text=LAYOUT_HEADER + table + LAYOUT_TOTALS,
+        )

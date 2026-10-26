@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 from difflib import SequenceMatcher
 from itertools import combinations
 
-from invoice_evidence import DocumentEvidence, MONTHS, folded
+from invoice_evidence import DocumentEvidence, MONTHS, folded, reading_issue_category
 
 CENT = Decimal(".01")
 TOLERANCE = Decimal(".02")
@@ -247,17 +247,61 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
     ht = unique_value(ht_numbers)
     ttc = unique_value(ttc_numbers)
     evidence = replace(evidence, taxes=taxes)
-    if ht is not None and printed_rows and len(printed_rows) == len(evidence.rows):
-        discounts = evidence.discounts if cross_checked else [
-            number for number in evidence.discounts if (number.page, number.box) in certain_boxes
+    taxes = {tax.rate.value if tax.rate else None: tax.amount.value for tax in evidence.taxes}
+    unambiguous_taxes = len({
+        (tax.rate.value if tax.rate else None, tax.amount.value)
+        for tax in evidence.taxes
+    }) == len(taxes)
+    total_tax = sum(taxes.values(), Decimal(0))
+    candidate_numbers = evidence.totals.get("total_candidate", [])
+    if not cross_checked:
+        candidate_numbers = [
+            number for number in candidate_numbers
+            if (number.page, number.box) in certain_boxes
         ]
-        line_sum = sum(printed_rows, Decimal(0)) - sum((abs(number.value) for number in discounts), Decimal(0))
-        if abs(line_sum - ht) > TOLERANCE:
+    total_candidate = unique_value(candidate_numbers)
+    inferred_ht_from_lines = None
+    discounts = evidence.discounts if cross_checked else [
+        number for number in evidence.discounts
+        if (number.page, number.box) in certain_boxes
+    ]
+    complete_printed_rows = (
+        bool(evidence.rows)
+        and len(printed_rows) == len(evidence.rows)
+        and not bad_lines
+    )
+    line_sum = (
+        sum(printed_rows, Decimal(0))
+        - sum((abs(number.value) for number in discounts), Decimal(0))
+        if complete_printed_rows else None
+    )
+    if ht is None and line_sum is not None and evidence.taxes and unambiguous_taxes:
+        if ttc is not None and abs(line_sum + total_tax - ttc) <= TOLERANCE:
+            ht = line_sum
+            inferred_ht_from_lines = line_sum
+        elif total_candidate is not None and abs(line_sum + total_tax - total_candidate) <= TOLERANCE:
+            ht = line_sum
+            ttc = total_candidate
+            inferred_ht_from_lines = line_sum
+    if (
+        ht is not None and ttc is None and total_candidate is not None
+        and evidence.taxes and unambiguous_taxes
+        and abs(ht + total_tax - total_candidate) <= TOLERANCE
+    ):
+        ttc = total_candidate
+    if inferred_ht_from_lines is not None and total_candidate == ttc:
+        result.passed.append(
+            f"Total « TOTAL » retenu comme TTC : somme HT des lignes ({inferred_ht_from_lines}) "
+            f"+ TVA imprimée ({total_tax}) = {ttc}."
+        )
+    if ht is not None and printed_rows and len(printed_rows) == len(evidence.rows):
+        printed_line_sum = sum(printed_rows, Decimal(0)) - sum((abs(number.value) for number in discounts), Decimal(0))
+        if abs(printed_line_sum - ht) > TOLERANCE:
             consequence = (
                 "Écart cohérent avec l'anomalie des lignes " + ", ".join(map(str, bad_lines))
                 if bad_lines else "La somme des montants imprimés diffère du sous-total imprimé."
             )
-            issue("subtotal", "erreur", "Sous-total", ht, line_sum, abs(line_sum - ht), consequence)
+            issue("subtotal", "erreur", "Sous-total", ht, printed_line_sum, abs(printed_line_sum - ht), consequence)
         else:
             result.passed.append(
                 "Sous-total : somme des montants imprimés"
@@ -269,12 +313,9 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
         )
     else:
         result.not_verified.append("Sous-total : non vérifiable, montant HT global absent ou ambigu.")
-    taxes = {tax.rate.value if tax.rate else None: tax.amount.value for tax in evidence.taxes}
     if not taxes:
         result.not_verified.append("TVA par taux : non vérifiable, aucune ventilation n’a été lue.")
-    unambiguous_taxes = len({(tax.rate.value if tax.rate else None, tax.amount.value) for tax in evidence.taxes}) == len(taxes)
     if ht is not None and ttc is not None and evidence.taxes and unambiguous_taxes:
-        total_tax = sum(taxes.values(), Decimal(0))
         if abs(ht + total_tax - ttc) > TOLERANCE:
             issue("tax_total", "erreur", "Total TTC", ttc, ht + total_tax, abs(ht + total_tax - ttc),
                   f"HT imprimé {ht} + TVA imprimée {total_tax} ne correspond pas au TTC imprimé.")
@@ -429,8 +470,12 @@ def _dates(evidence, result, issue, today):
     styles = set()
     for line in evidence.text.replace(" ; ", "\n").splitlines():
         normalized = folded(line)
-        kind = "facture" if re.search(r"invoice date|date de facture|^date\s*:", normalized) else (
-            "échéance" if re.search(r"due date|echeance", normalized) else None
+        due_label = re.search(
+            r"\b(?:due\s+date|date\s+d[' ]?echeance|date\s+de\s+(?:livraison|paiement)|echeance)\b",
+            normalized,
+        )
+        kind = "échéance" if due_label else (
+            "facture" if re.search(r"\b(?:invoice\s+date|date\s+de\s+facture|date)\b", normalized) else None
         )
         if kind is None:
             continue
@@ -476,7 +521,7 @@ def _dates(evidence, result, issue, today):
 
 def _country(evidence, result, issue):
     text = evidence.text
-    countries = set(re.findall(r"\b(FR|GB|US)-\d{4}-\d+\b", text))
+    countries = set(re.findall(r"\b(FR|GB|US)-(?:\d{4}-)?\d{3,12}\b", text))
     codes = set(re.findall(r"\b(EUR|GBP|USD)\b", text))
     symbols = {symbol for symbol in ("€", "£", "$") if symbol in text}
     mapping = {"FR": ("EUR", "€"), "GB": ("GBP", "£"), "US": ("USD", "$")}
@@ -555,6 +600,7 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
     to_check = max(0, len(statuses) - verified)
     anomalies = [flag for flag in validation.flags if flag.severity in {"erreur", "avertissement"}]
     information = [flag for flag in validation.flags if flag.severity == "information"]
+    reading_issue = reading_issue_category(evidence)
     if anomalies:
         verdict = f"⚠️ {len(anomalies)} anomalie(s) dans la facture"
     elif to_check:
@@ -562,11 +608,19 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
     else:
         verdict = f"✅ Facture cohérente : {verified} champs vérifiés sur {len(statuses)}"
     lines = [f"**{verdict}**"]
-    if statuses and to_check / len(statuses) > .5:
+    if reading_issue == "layout":
         lines.append(
-            "**Image de qualité insuffisante : renvoyez un scan plus net "
+            "**Mise en page non reconnue : le texte est lisible, mais le tableau n’a pas pu être interprété.**"
+        )
+    elif reading_issue == "blur":
+        lines.append(
+            "**Image floue ou texte trop peu lisible : renvoyez un scan net "
             "(300 dpi, bien droit, sans flou).**"
         )
+    elif reading_issue == "timeout":
+        lines.append("**Délai de lecture dépassé : certains champs restent à vérifier.**")
+    elif statuses and to_check / len(statuses) > .5:
+        lines.append("**Lecture partielle : plusieurs champs restent à vérifier.**")
     details = model_info or {}
     if not details.get("used"):
         reason = details.get("reason", "indisponibilité technique")
@@ -591,8 +645,8 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
             f"- {issue}" for issue in evidence.issues
             if not issue.startswith("Preuves OCR indisponibles")
         )
-    elif insufficient:
-        lines.append("Preuves OCR insuffisantes : extraction non recoupée.")
+    elif insufficient and reading_issue not in {"layout", "blur"}:
+        lines.append("Lecture du document incomplète : les éléments n’ont pas pu être recoupés.")
     lines.append("### Anomalies dans la facture")
     if not anomalies:
         lines.append(

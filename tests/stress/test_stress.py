@@ -26,7 +26,7 @@ def stress_report():
     return run()
 
 
-@pytest.mark.parametrize("index", range(35))
+@pytest.mark.parametrize("index", range(38))
 def test_stress_no_wrong_value_no_phantom_no_crash(stress_report, index):
     case = stress_report["cases"][index]
     assert not case["crash"], case
@@ -38,9 +38,33 @@ def test_stress_no_wrong_value_no_phantom_no_crash(stress_report, index):
 
 def test_layout_variants_are_independent_and_fully_recovered(stress_report):
     layouts = [case for case in stress_report["cases"] if case["case"].startswith("layout/")]
-    assert len(layouts) == 11
+    assert len(layouts) == 14
     assert not any(case["false_nulls"] for case in layouts)
     assert not any(case["crash"] or case["wrong_values"] or case["phantom_anomalies"] for case in layouts)
+
+
+def test_additional_nonstandard_layouts_have_no_false_values_or_anomalies(stress_report):
+    cases = {
+        case["case"]: case for case in stress_report["cases"]
+        if case["case"] in {
+            "layout/quantity_first_french",
+            "layout/reordered_columns",
+            "layout/english_abbreviations",
+        }
+    }
+    assert set(cases) == {
+        "layout/quantity_first_french",
+        "layout/reordered_columns",
+        "layout/english_abbreviations",
+    }
+    for case in cases.values():
+        assert not case["false_nulls"], case
+        assert not case["wrong_values"], case
+        assert not case["phantom_anomalies"], case
+        assert not case["crash"], case
+        profiles = case["model_error_profiles"]
+        assert len(profiles) == 3
+        assert not any(profile["wrong_values"] or profile["phantom_anomalies"] for profile in profiles), case
 
 
 def test_destroyed_ocr_with_false_model_values_is_not_verified(stress_report):
@@ -50,8 +74,26 @@ def test_destroyed_ocr_with_false_model_values_is_not_verified(stress_report):
         assert not case["wrong_values"]
         assert set(case["statuses"].values()) == {UNVERIFIED}
         assert all(value is None for item in case["final"]["line_items"] for value in item.values())
+        assert all(
+            case["final"][key] is None
+            for key in ("supplier_name", "invoice_date", "total_ht", "total_ttc")
+        ), case
         assert not case["phantom_anomalies"]
-        assert "Preuves OCR insuffisantes : extraction non recoupée" in case["report"]
+        # Exact cause: a destroyed image either exhausts the shared document OCR budget
+        # (timeout) or stays unreadable (blur). The report must state that cause and must
+        # not claim a layout failure, nor leak internal jargon.
+        quality = " ".join(case["quality_issues"]).casefold()
+        cause = (
+            "Délai de lecture dépassé"
+            if any(term in quality for term in ("budget documentaire", "timeout", "délai"))
+            else "Image floue ou texte trop peu lisible"
+        )
+        assert cause in case["report"], case
+        for jargon in (
+            "Traceback", "None", "Pydantic", "non ancré", "ancrage",
+            "description_non_verifiee", "Mise en page non reconnue",
+        ):
+            assert jargon not in case["report"], (case["case"], jargon)
 
 
 def test_average_confidence_and_unrecognized_table_produce_insufficient_report():
@@ -61,7 +103,8 @@ def test_average_confidence_and_unrecognized_table_produce_insufficient_report()
     model = read_model('{"line_items":[{"description":"Inventé","quantity":54,"unit_price":77.68,"total_ht":4210.32}]}')
     result = reconcile(evidence, [model])
     report = render_report(evidence, result.validation, result.statuses, [], insufficient=True)
-    assert "Preuves OCR insuffisantes : extraction non recoupée" in report
+    assert "Image floue ou texte trop peu lisible" in report
+    assert "Mise en page non reconnue" not in report
     assert set(result.statuses.values()) == {UNVERIFIED}
     assert not result.validation.flags
     assert all(value is None for item in result.payload["line_items"] for value in item.values())
@@ -104,7 +147,8 @@ def test_bad_quality_does_not_allocate_gpu():
     predict = MagicMock(side_effect=AssertionError("No GPU on insufficient evidence"))
     result = run_grounded_inference(evidence, {"input": "bruit"}, [], predict)
     predict.assert_not_called()
-    assert "Preuves OCR insuffisantes" in result["report"]
+    assert "Image floue ou texte trop peu lisible" in result["report"]
+    assert "Mise en page non reconnue" not in result["report"]
     assert not result["validation"]["flags"]
 
 
@@ -117,7 +161,8 @@ def test_app_empty_ocr_is_insufficient_not_a_success_or_crash():
         payload, report, technical, advanced, first_pass_raw, validation, download = list(
             main.run_extraction_ui(str(main.EXAMPLES[0][1]))
         )[-1]
-    assert "Preuves OCR insuffisantes : extraction non recoupée" in report
+    assert "Image floue ou texte trop peu lisible" in report
+    assert "Mise en page non reconnue" not in report
     assert payload["total_ht"] is None
     assert not validation["flags"]
     assert "0 lignes lues" in technical

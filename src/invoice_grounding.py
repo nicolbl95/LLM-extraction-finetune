@@ -13,7 +13,9 @@ from itertools import product
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from invoice_evidence import DocumentEvidence, TableRow, folded, parse_number
+from invoice_evidence import (
+    DocumentEvidence, TableRow, description_is_usable, folded, parse_number, reading_issue_category,
+)
 from invoice_validation import Validation, document_validation, render_report
 from ocr_quality import document_quality
 from ocr_config import OCR_CONFIG
@@ -27,6 +29,28 @@ RECOVERED = "récupéré (corroboré par OCR)"
 NULL = "neutralisé (non fiable)"
 UNVERIFIED = "non vérifié"
 MAX_SOLUTIONS = 4096
+TABLE_LAYOUT_ISSUE = "Tableau non reconstruit malgré les prétraitements."
+PARTIAL_LAYOUT_ISSUES = {
+    TABLE_LAYOUT_ISSUE,
+    "Nombre d'articles modèle/OCR incohérent ; aucune correspondance supposée.",
+}
+
+
+def partial_layout_is_usable(evidence: DocumentEvidence, issues: list[str]) -> bool:
+    if (
+        not evidence.available
+        or evidence.source_kind != "consensus"
+        or not evidence.ocr_cross_checked
+        or evidence.rows
+        or not evidence.tokens
+        or not issues
+        or reading_issue_category(evidence) not in {"layout", "partial"}
+        or TABLE_LAYOUT_ISSUE not in issues
+        or not set(issues).issubset(PARTIAL_LAYOUT_ISSUES)
+    ):
+        return False
+    confidence = sum(token.confidence for token in evidence.tokens) / len(evidence.tokens)
+    return confidence >= OCR_CONFIG.fast_mean_confidence
 
 
 def close(left: Decimal, right: Decimal) -> bool:
@@ -147,7 +171,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
     result = GroundedResult({"supplier_name": None, "invoice_date": None,
                              "total_ht": None, "total_ttc": None, "line_items": []})
     quality_issues = document_quality(evidence, initial)
-    if not evidence.available or quality_issues:
+    if not evidence.available or (quality_issues and not partial_layout_is_usable(evidence, quality_issues)):
         for index in range(max(len(_items(initial)), len(evidence.rows))):
             result.payload["line_items"].append({"description": None, **dict.fromkeys(FIELDS)})
             for key in ("description", *FIELDS):
@@ -159,6 +183,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         return result
     result.validation = document_validation(evidence) if evidence.available else Validation()
     result.warnings.extend(evidence.issues)
+    result.warnings.extend(quality_issues)
     assignments = [_assign(payload, evidence) for payload in passes]
     initial_bad_rows = []
     for index, row in enumerate(evidence.rows):
@@ -191,6 +216,8 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         key: sorted({n.value for n in evidence.totals.get(key, [])})
         for key in ("total_ht", "total_ttc")
     }
+    unqualified_totals = sorted({n.value for n in evidence.totals.get("total_candidate", [])})
+    total_candidate = unqualified_totals[0] if len(unqualified_totals) == 1 else None
     tax_keys = {(tax.rate.value if tax.rate else None, tax.amount.value) for tax in evidence.taxes}
     tax_rates = [rate for rate, _ in tax_keys]
     taxes_ambiguous = len(tax_rates) != len(set(tax_rates))
@@ -198,12 +225,46 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
     tax_available = bool(evidence.taxes) and not taxes_ambiguous
     ht = global_values["total_ht"][0] if len(global_values["total_ht"]) == 1 else None
     ttc = global_values["total_ttc"][0] if len(global_values["total_ttc"]) == 1 else None
+    candidate_totals = sorted({n.value for n in evidence.totals.get("total_candidate", [])})
+    total_candidate = candidate_totals[0] if len(candidate_totals) == 1 else None
+    derived_ht_from_lines = False
     if ht is None and ttc is not None and tax_available:
         candidate = numeric(initial.get("total_ht"), evidence.locale)
         if candidate in all_numbers and candidate is not None and close(candidate + tax_sum, ttc):
             ht = candidate
     printed_totals = [sorted({n.value for n in row.cells.get("total_ht", [])}) for row in evidence.rows]
     discount_total = sum((abs(number.value) for number in evidence.discounts), Decimal(0))
+    derived_ht_from_lines = False
+    if (
+        evidence.rows and len(options) == len(evidence.rows)
+        and all(len(row_options) == 1 for row_options in options)
+        and tax_available
+    ):
+        line_sum = sum(
+            (row_options[0].total_ht for row_options in options), Decimal(0),
+        ) - discount_total
+        if ht is None and (
+            (ttc is not None and close(line_sum + tax_sum, ttc))
+            or (ttc is None and total_candidate is not None and close(line_sum + tax_sum, total_candidate))
+        ):
+            ht = line_sum
+            derived_ht_from_lines = True
+        if ttc is None and total_candidate is not None and ht is not None and close(ht + tax_sum, total_candidate):
+            ttc = total_candidate
+    if (
+        evidence.rows and len(options) == len(evidence.rows)
+        and all(len(row_options) == 1 for row_options in options)
+        and tax_available
+    ):
+        row_sum = sum((row_options[0].total_ht for row_options in options), Decimal(0)) - discount_total
+        if ht is None and (
+            (ttc is not None and close(row_sum + tax_sum, ttc))
+            or (ttc is None and total_candidate is not None and close(row_sum + tax_sum, total_candidate))
+        ):
+            ht = row_sum
+            derived_ht_from_lines = True
+        if ttc is None and total_candidate is not None and ht is not None and close(ht + tax_sum, total_candidate):
+            ttc = total_candidate
     sum_supported = (
         ht is not None and bool(evidence.rows) and all(len(values) == 1 for values in printed_totals)
         and close(sum((values[0] for values in printed_totals), Decimal(0)) - discount_total, ht)
@@ -248,7 +309,10 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
             return converted
         return value
 
-    for key, source in (("supplier_name", evidence.supplier), ("invoice_date", evidence.invoice_date)):
+    supplier_source = evidence.supplier
+    if supplier_source and not evidence.supplier_is_explicit and evidence.source_kind != "consensus":
+        supplier_source = None
+    for key, source in (("supplier_name", supplier_source), ("invoice_date", evidence.invoice_date)):
         model_value = initial.get(key)
         if source is not None:
             status = VALID if isinstance(model_value, str) and folded(model_value) == folded(source) else RECOVERED
@@ -277,7 +341,9 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         description_same = isinstance(original_description, str) and folded(original_description) == folded(row.description)
         invariant_row = invariant_fields[index] if invariant_fields else {}
         row_unique = bool(invariant_row) and all(value is not None for value in invariant_row.values())
-        description_clear = bool(row.description.strip()) and folded(row.description) not in {"error", "invalid"} and (description_same or (
+        description_clear = description_is_usable(row.description) and (
+            folded(row.description) not in {"error", "invalid"}
+        ) and (description_same or (
             row.description_confident and (
                 description_score >= .9 or all(len({number.value for number in row.cells.get(key, [])}) == 1 for key in FIELDS) or any(
                     isinstance(proposal.get("description"), str)
@@ -382,13 +448,23 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         ("total_ttc", ttc, tax_ok),
     ):
         previous = numeric(initial.get(key), evidence.locale)
-        if source is not None and source in all_numbers:
+        if source is not None and (source in all_numbers or key == "total_ht" and derived_ht_from_lines):
             status = VALID if previous == source else RECOVERED
+            source_numbers = evidence.totals.get(key) or (
+                [
+                    number
+                    for row in evidence.rows
+                    for number in row.cells.get("total_ht", [])
+                ] if key == "total_ht" and derived_ht_from_lines else
+                [number for number in evidence.numbers if number.value == source]
+            )
             result.payload[key] = record(
                 key, source, status, "" if status == VALID else (
+                    "total HT égal à la somme des lignes imprimées, corroboré par HT + TVA = total TTC"
+                    if key == "total_ht" and derived_ht_from_lines else
                     "montant documentaire corroboré par les contraintes" if corroborated
                     else "montant global lu et ancré, conservé malgré les lignes douteuses"
-                ), evidence.totals.get(key) or [number for number in evidence.numbers if number.value == source],
+                ), source_numbers,
             )
         else:
             result.payload[key] = record(key, None, NULL, "total non ancré ou contrainte globale non résolue")
@@ -526,7 +602,14 @@ def run_grounded_inference(
     initial = None
     passes_requested = 0
     request_elapsed_seconds = 0.0
-    if evidence.available and not document_quality(evidence):
+    initial_quality_issues = document_quality(evidence)
+    may_attempt_partial_layout = partial_layout_is_usable(evidence, initial_quality_issues)
+    model_input_available = bool(evidence.text.strip() and evidence.tokens)
+    if (
+        evidence.available
+        and model_input_available
+        and (not initial_quality_issues or may_attempt_partial_layout)
+    ):
         passes_requested += 1
         started = time.perf_counter()
         try:

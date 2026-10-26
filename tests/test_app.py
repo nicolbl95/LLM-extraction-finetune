@@ -61,8 +61,9 @@ class AppTests(unittest.TestCase):
             ("invoice-0110", "en-GB"),
             ("invoice-0435", "en-US"),
         ]
-        self.assertEqual(len(main.EXAMPLES), 3)
-        for (_, path), (identifier, locale) in zip(main.EXAMPLES, sources):
+        self.assertEqual(len(main.REGIONAL_EXAMPLES), 3)
+        self.assertEqual(main.EXAMPLES, [*main.REGIONAL_EXAMPLES, *main.ADDITIONAL_EXAMPLES])
+        for (_, path), (identifier, locale) in zip(main.REGIONAL_EXAMPLES, sources):
             row = rows[identifier]
             self.assertEqual(row["locale"], locale)
             self.assertEqual(path.read_bytes(), (main.ROOT / row["image_path"]).read_bytes())
@@ -152,7 +153,7 @@ class AppTests(unittest.TestCase):
             row["id"]: row
             for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
         }
-        for label, path in main.EXAMPLES:
+        for label, path in main.REGIONAL_EXAMPLES:
             with self.subTest(example=label):
                 text = main.document_text(str(path))
                 self.assertGreater(len(text), 100)
@@ -194,7 +195,9 @@ class AppTests(unittest.TestCase):
             for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
         }
         reference_ids = ("invoice-0406", "invoice-0110", "invoice-0435")
-        for index, ((_, path), reference_id) in enumerate(zip(main.EXAMPLES, reference_ids, strict=True)):
+        for index, ((_, path), reference_id) in enumerate(
+            zip(main.REGIONAL_EXAMPLES, reference_ids, strict=True)
+        ):
             with self.subTest(example=path.name):
                 loaded = load_handler((index, [str(path)]))
                 loaded_outputs = loaded if isinstance(loaded, (list, tuple)) else [loaded]
@@ -243,7 +246,7 @@ class AppTests(unittest.TestCase):
             extract_handler = app.fns[extract_event["id"]].fn
 
             for index, ((_, source), reference_id) in enumerate(
-                zip(main.EXAMPLES, reference_ids, strict=True)
+                zip(main.REGIONAL_EXAMPLES, reference_ids, strict=True)
             ):
                 with self.subTest(example=source.name):
                     selected = load_handler((index, [str(source)]))
@@ -272,6 +275,85 @@ class AppTests(unittest.TestCase):
                     ))
                     self.assertEqual(frames[-1][0], rows[reference_id]["output"])
                     self.assertNotIn("Traceback", str(frames[-1]))
+
+    def test_additional_example_buttons_are_usable_from_the_gradio_interface(self):
+        """Joanna Binet, printed-error US and the blank template work from the buttons."""
+        if not shutil.which("tesseract"):
+            self.skipTest("Tesseract is not installed")
+        if not {"fra", "eng"} <= set(pytesseract.get_languages()):
+            self.skipTest("Tesseract fra/eng languages are missing")
+        app = main.build_app()
+        dependencies = {
+            dependency["api_name"]: dependency for dependency in app.config["dependencies"]
+        }
+        load_event = dependencies["load_example"]
+        preview_event = dependencies["preview_ui"]
+        extract_event = dependencies["run_extraction_ui"]
+        load_handler = app.fns[load_event["id"]].fn
+        preview_handler = app.fns[preview_event["id"]].fn
+        extract_handler = app.fns[extract_event["id"]].fn
+        joanna = json.loads((main.ROOT / "tests/fixtures/layout-joanna-binet.json").read_text())
+
+        self.assertEqual(
+            [label for label, _ in main.ADDITIONAL_EXAMPLES],
+            [
+                "France · Joanna Binet (mise en page inhabituelle)",
+                "États-Unis · erreur d'impression",
+                "Modèle vierge à compléter",
+            ],
+        )
+        for offset, (label, path) in enumerate(main.ADDITIONAL_EXAMPLES):
+            index = len(main.REGIONAL_EXAMPLES) + offset
+            self.assertTrue(path.is_file(), label)
+            with self.subTest(example=label):
+                loaded = load_handler((index, [str(path)]))
+                self.assertEqual(len([loaded]), len(load_event["outputs"]))
+                selected = loaded["value"]["path"]
+                self.assertTrue(Path(selected).is_file())
+                self.assertEqual(len(preview_handler(selected)), len(preview_event["outputs"]))
+
+                with patch.object(
+                    main, "predict_invoice",
+                    side_effect=main.gr.Error("ZeroGPU quota exceeded; try again in 36 min"),
+                ):
+                    frames = list(extract_handler(str(path)))
+                self.assertTrue(frames)
+                self.assertTrue(all(
+                    len(frame) == len(extract_event["outputs"]) for frame in frames
+                ))
+                payload, report, technical, advanced, first_pass_raw, validation, download = frames[-1]
+                self.assertNotIn("Traceback", report + technical)
+                self.assertTrue(download)
+
+                if label == "France · Joanna Binet (mise en page inhabituelle)":
+                    self.assertEqual(payload, joanna["reference"])
+                    self.assertEqual(validation["flags"], [])
+                    self.assertTrue(report.startswith("**✅ Facture cohérente : 16 champs vérifiés sur 16**"))
+                elif label == "États-Unis · erreur d'impression":
+                    warning = next(
+                        flag for flag in validation["flags"]
+                        if flag["code"] == "corroborated_line_amount_mismatch"
+                    )
+                    self.assertEqual(warning["severity"], "avertissement")
+                    self.assertIn("Ligne 3", warning["reason"])
+                    line = payload["line_items"][2]
+                    self.assertIsNone(line["description"])
+                    self.assertIsNone(line["quantity"])
+                    self.assertIsNone(line["unit_price"])
+                    self.assertEqual(line["total_ht"], 369.07)
+                    self.assertIn("369.07", report)
+                else:
+                    # A blank template confirms nothing: no value, no anomaly, no crash.
+                    self.assertIsNone(payload["supplier_name"])
+                    self.assertIsNone(payload["invoice_date"])
+                    self.assertIsNone(payload["total_ht"])
+                    self.assertIsNone(payload["total_ttc"])
+                    self.assertEqual(
+                        [value for item in payload["line_items"] for value in item.values()],
+                        [None] * (4 * len(payload["line_items"])),
+                    )
+                    self.assertEqual(validation["flags"], [])
+                    self.assertIn("0 champs vérifiés", report)
 
     def test_missing_uploaded_temp_file_returns_reimport_message_without_trace(self):
         with tempfile.TemporaryDirectory(
@@ -786,6 +868,18 @@ class AppTests(unittest.TestCase):
             component for component in demo.config["components"] if component["type"] == "dataset"
         ]
         self.assertEqual(examples[0]["props"]["label"], "")
+        self.assertEqual(
+            examples[0]["props"]["headers"],
+            ["Importer une facture — PDF ou image"],
+        )
+        self.assertEqual(
+            examples[0]["props"]["samples"],
+            [[path.name] for _, path in main.EXAMPLES],
+        )
+        self.assertEqual(
+            examples[0]["props"]["sample_labels"],
+            [label for label, _ in main.EXAMPLES],
+        )
         markdown = [
             component["props"]["value"] for component in demo.config["components"]
             if component["type"] == "markdown"
@@ -801,7 +895,8 @@ class AppTests(unittest.TestCase):
             markdown[1:3],
             [
                 "PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais",
-                "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽",
+                "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis "
+                "/ Joanna Binet / erreur d'impression / modèle vierge 🔽",
             ],
         )
         help_components = [
