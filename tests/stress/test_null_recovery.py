@@ -1,6 +1,7 @@
 import copy
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -13,7 +14,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts"), str(ROOT / "tests/stre
 from cases import error_profile, REFERENCES
 from experiment_ocr import split_cases
 from invoice_evidence import from_text
-from invoice_grounding import read_model, reconcile, run_grounded_inference
+from invoice_grounding import NULL, UNVERIFIED, read_model, reconcile, run_grounded_inference
 from invoice_validation import render_report
 from ocr_consensus import build_consensus
 from ocr_preprocessing import estimate_skew
@@ -25,6 +26,27 @@ TEXT = (
     "Clavier sans fil | 5,1 | 77,66 | 396,07\n"
     "Subtotal: 396,07\nVAT (0%): 0\nInvoice total: 396,07"
 )
+
+ACCENT_TEXT = (
+    "Supplier: Joanna Binet\nInvoice date: 2019-01-29\nCurrency: EUR\n"
+    "Description | Quantity | Net unit price | Net amount\n"
+    "Facile {accent} jouer accordéon | 3 | 5.00 | 15.00\n"
+    "Subtotal: 15.00\nVAT (0%): 0.00\nInvoice total: 15.00"
+)
+
+
+def _reading(quantity, price, total, description="Logo design"):
+    return from_text(
+        "Supplier: Oak Studio Ltd\nInvoice date: 2026-01-01\nCurrency: GBP\n"
+        "Description | Quantity | Net unit price | Net amount\n"
+        f"{description} | {quantity} | {price} | {total}\n"
+        f"Subtotal: {total}\nVAT (0%): 0.00\nInvoice total: {total}",
+        locale="en-GB",
+    )
+
+
+def _uk_reading(quantity, *, total="5912.17"):
+    return _reading(quantity, "757.97", total)
 
 
 def test_two_segmentations_of_one_preprocessing_family_are_not_independent_votes():
@@ -43,6 +65,196 @@ def test_two_preprocessing_families_recover_without_inventing_a_number():
     }
     assert not final.validation.flags
     assert final.payload["total_ht"] == 396.07
+
+
+def test_single_family_decimal_is_not_recovered_even_when_arithmetic_confirms_it():
+    result = build_consensus({
+        "deskew": [_uk_reading("78")],
+        "clahe": [_uk_reading("78")],
+        "crop": [_uk_reading("78")],
+        "denoise": [_uk_reading("78")],
+        "scale3": [_uk_reading("7.8")],
+    }, confidence=40)
+    line = result.rows[0]
+    assert line.cells["quantity"] == []
+    assert line.cells["unit_price"] == []
+    assert [number.value for number in line.cells["total_ht"]] == [Decimal("5912.17")]
+
+    model = read_model(json.dumps({
+        "line_items": [{
+            "description": "Logo design", "quantity": 7.8,
+            "unit_price": 757.97, "total_ht": 5912.17,
+        }],
+    }))
+    final = reconcile(result, [model])
+    item = final.payload["line_items"][0]
+    assert item["description"] == "Logo design"
+    assert item["quantity"] is None
+    assert item["unit_price"] is None
+    assert item["total_ht"] == 5912.17
+    assert final.statuses["line_items.0.quantity"] in {NULL, UNVERIFIED}
+    assert final.statuses["line_items.0.unit_price"] in {NULL, UNVERIFIED}
+    assert 7.8 not in item.values()
+
+
+def test_two_family_decimal_is_recovered_with_corroborated_price_and_total():
+    result = build_consensus({
+        "deskew": [_uk_reading("7.8")],
+        "clahe": [_uk_reading("7.8")],
+    }, confidence=40)
+    line = result.rows[0]
+    assert [number.value for number in line.cells["quantity"]] == [Decimal("7.8")]
+    assert [number.value for number in line.cells["unit_price"]] == [Decimal("757.97")]
+    assert [number.value for number in line.cells["total_ht"]] == [Decimal("5912.17")]
+
+    model = read_model(json.dumps({
+        "line_items": [{
+            "description": "Logo design", "quantity": 7.8,
+            "unit_price": 757.97, "total_ht": 5912.17,
+        }],
+    }))
+    item = reconcile(result, [model]).payload["line_items"][0]
+    assert item["quantity"] == 7.8
+    assert item["unit_price"] == 757.97
+    assert item["total_ht"] == 5912.17
+
+
+def test_multiple_conflicting_quantity_candidates_are_not_recovered():
+    result = build_consensus({
+        "deskew": [_uk_reading("78")],
+        "clahe": [_uk_reading("78")],
+        "crop": [_uk_reading("78")],
+        "denoise": [_uk_reading("78")],
+        "scale3": [_uk_reading("7.8")],
+        "extra": [_uk_reading("8.7")],
+    }, confidence=40)
+    line = result.rows[0]
+    assert line.cells["quantity"] == []
+    assert line.cells["unit_price"] == []
+
+    model = read_model(json.dumps({
+        "line_items": [{
+            "description": "Logo design", "quantity": 7.8,
+            "unit_price": 757.97, "total_ht": 5912.17,
+        }],
+    }))
+    item = reconcile(result, [model]).payload["line_items"][0]
+    assert item["quantity"] is None
+    assert item["unit_price"] is None
+    assert 7.8 not in item.values()
+    assert 8.7 not in item.values()
+
+
+def test_multiple_quantities_within_arithmetic_tolerance_are_not_recovered():
+    result = build_consensus({
+        "deskew": [_reading("10.00", "100", "1000")],
+        "clahe": [_reading("10.00", "100", "1000")],
+        "crop": [_reading("10.0001", "100", "1000")],
+        "denoise": [_reading("10.0001", "100", "1000")],
+    }, confidence=40)
+    line = result.rows[0]
+    assert {number.value for number in line.cells["quantity"]} == {
+        Decimal("10.00"), Decimal("10.0001"),
+    }
+
+    model = read_model(json.dumps({
+        "line_items": [{
+            "description": "Logo design", "quantity": 10.0,
+            "unit_price": 100.0, "total_ht": 1000.0,
+        }],
+    }))
+    item = reconcile(result, [model]).payload["line_items"][0]
+    assert item["quantity"] is None
+    assert item["unit_price"] == 100.0
+    assert item["total_ht"] == 1000.0
+
+
+def test_wrong_mutually_consistent_price_and_total_do_not_justify_single_family_quantity():
+    result = build_consensus({
+        "deskew": [_reading("78", "100", "1000")],
+        "clahe": [_reading("78", "100", "1000")],
+        "scale3": [_reading("10", "100", "1000")],
+    }, confidence=40)
+    line = result.rows[0]
+    assert line.cells["quantity"] == []
+    assert line.cells["unit_price"] == []
+
+    model = read_model(json.dumps({
+        "line_items": [{
+            "description": "Logo design", "quantity": 78,
+            "unit_price": 12.82, "total_ht": 1000.0,
+        }],
+    }))
+    item = reconcile(result, [model]).payload["line_items"][0]
+    assert item["quantity"] is None
+    assert item["unit_price"] is None
+
+
+def test_single_family_decimal_without_arithmetic_support_is_not_exported():
+    result = build_consensus({
+        "deskew": [_uk_reading("78", total="6000.00")],
+        "clahe": [_uk_reading("78", total="6000.00")],
+        "scale3": [_uk_reading("7.8", total="6000.00")],
+    }, confidence=40)
+    line = result.rows[0]
+    assert line.cells["quantity"] == []
+    assert line.cells["unit_price"] == []
+
+    model = read_model(json.dumps({
+        "line_items": [{
+            "description": "Logo design", "quantity": 7.8,
+            "unit_price": 757.97, "total_ht": 6000.0,
+        }],
+    }))
+    item = reconcile(result, [model]).payload["line_items"][0]
+    assert item["quantity"] is None
+    assert item["unit_price"] is None
+
+
+def test_majority_numeric_reading_is_never_exported_without_a_decimal_candidate():
+    result = build_consensus({
+        "deskew": [_uk_reading("78")],
+        "clahe": [_uk_reading("78")],
+    }, confidence=40)
+    line = result.rows[0]
+    assert line.cells["quantity"] == []
+    assert line.cells["unit_price"] == []
+
+    model = read_model(json.dumps({
+        "line_items": [{
+            "description": "Logo design", "quantity": 7.8,
+            "unit_price": 757.97, "total_ht": 5912.17,
+        }],
+    }))
+    item = reconcile(result, [model]).payload["line_items"][0]
+    assert item["quantity"] is None
+    assert item["unit_price"] is None
+    assert 78 not in item.values()
+
+
+def test_consensus_preserves_accented_description_when_folded_readings_agree():
+    plain = from_text(ACCENT_TEXT.format(accent="a"), locale="fr-FR")
+    accented = from_text(ACCENT_TEXT.format(accent="à"), locale="fr-FR")
+    for readings in (
+        {"deskew": [plain], "clahe": [accented]},
+        {"deskew": [accented], "clahe": [plain]},
+    ):
+        result = build_consensus(readings, confidence=40)
+        assert result.rows[0].description == "Facile à jouer accordéon"
+
+
+def test_consensus_keeps_plain_description_when_no_read_has_an_accent():
+    plain = from_text(ACCENT_TEXT.format(accent="a"), locale="fr-FR")
+    result = build_consensus({"deskew": [plain], "clahe": [plain]}, confidence=40)
+    assert result.rows[0].description == "Facile a jouer accordéon"
+
+
+def test_consensus_does_not_merge_different_description_words_for_an_accent():
+    accented = from_text(ACCENT_TEXT.format(accent="à"), locale="fr-FR")
+    different_word = from_text(ACCENT_TEXT.format(accent="e"), locale="fr-FR")
+    result = build_consensus({"deskew": [accented], "clahe": [different_word]}, confidence=40)
+    assert result.rows[0].description == ""
+    assert not result.rows[0].description_confident
 
 
 def test_repeated_wrong_description_is_vetoed_by_a_contradictory_preprocessing_family():

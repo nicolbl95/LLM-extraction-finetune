@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from invoice_evidence import EvidenceText, from_text, from_tsv, parse_number
 from invoice_grounding import (
-    NULL, RECOVERED, VALID, inference_error, read_model, reconcile, run_grounded_inference,
+    NULL, RECOVERED, UNVERIFIED, VALID, inference_error, read_model, reconcile, run_grounded_inference,
 )
 
 
@@ -357,8 +357,18 @@ def test_real_tesseract_evidence_with_simulated_wrong_model_outputs_on_all_three
         text = main.document_text(str(ROOT / "app/examples" / images[case["id"]]))
         result = reconcile(text.evidence, [read_model(raw)])
         assert len(text.evidence.rows) == len(row["output"]["line_items"])
-        assert result.payload == row["output"]
-        assert result.failed_rows == []
+        expected = copy.deepcopy(row["output"])
+        if case["id"] == "invoice-0110":
+            expected["line_items"][0]["quantity"] = None
+            expected["line_items"][0]["unit_price"] = None
+        assert result.payload == expected
+        if case["id"] == "invoice-0110":
+            assert result.failed_rows == [0]
+            assert result.statuses["line_items.0.quantity"] in {NULL, UNVERIFIED}
+            assert result.statuses["line_items.0.unit_price"] in {NULL, UNVERIFIED}
+            assert 78 not in result.payload["line_items"][0].values()
+        else:
+            assert result.failed_rows == []
         assert all(
             "%" not in n.raw for row in text.evidence.rows
             for key in ("quantity", "unit_price", "total_ht") for n in row.cells[key]

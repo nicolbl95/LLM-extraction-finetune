@@ -23,12 +23,20 @@ LETTER = re.compile(r"[^\W\d_]", re.UNICODE)
 
 
 def description_is_usable(text: str | None) -> bool:
-    """A description must carry at least one letter: a purely numeric cell is never one.
+    """A description must carry a letter and must not be a whole monetary value.
 
-    A number where the description column is expected proves the header/data alignment is
-    broken, so the caller must keep the line unverified instead of exporting a false value.
+    A number or currency-coded amount where the description column is expected proves the
+    header/data alignment is broken, so the caller must keep the line unverified instead of
+    exporting a false value.
     """
-    return bool(LETTER.search(text or ""))
+    stripped = (text or "").strip()
+    if not LETTER.search(stripped):
+        return False
+    try:
+        parse_number(stripped)
+    except ValueError:
+        return True
+    return False
 
 
 def supplier_is_usable(name: str | None) -> bool:

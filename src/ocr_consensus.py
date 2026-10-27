@@ -27,7 +27,11 @@ def _matching_row(anchor, evidence):
     return None
 
 
-def _family_votes(groups, key, value):
+def _accent_count(text: str) -> int:
+    return sum(char.isalpha() and ord(char) > 127 for char in text)
+
+
+def _family_votes(groups, key, value, prefer=None):
     votes = defaultdict(set)
     originals = {}
     for family, entries in groups.items():
@@ -37,7 +41,10 @@ def _family_votes(groups, key, value):
             for candidate in key(entry):
                 token = value(candidate)
                 family_values.add(token)
-                originals.setdefault(token, candidate)
+                if token not in originals or (
+                    prefer is not None and prefer(candidate) > prefer(originals[token])
+                ):
+                    originals[token] = candidate
             observations.append(family_values)
         # Disagreement between segmentations of one family is not an extra vote.
         if observations and all(values == observations[0] for values in observations):
@@ -46,8 +53,8 @@ def _family_votes(groups, key, value):
     return votes, originals
 
 
-def _agreed(groups, key, value, *, unanimous=False):
-    votes, originals = _family_votes(groups, key, value)
+def _agreed(groups, key, value, *, unanimous=False, prefer=None):
+    votes, originals = _family_votes(groups, key, value, prefer)
     candidates = [token for token, voters in votes.items() if len(voters) >= 2]
     if unanimous and len(votes) > 1:
         return []
@@ -61,6 +68,37 @@ def number_confident(row, number, threshold):
         if left <= token.box[0] < right and top <= token.box[1] < bottom
     ]
     return bool(tokens) and all(token.confidence >= threshold for token in tokens)
+
+
+def _candidate_numbers(matches, field, confidence):
+    candidates = {}
+    families_by_value = defaultdict(set)
+    for family, entries in matches.items():
+        for evidence in entries:
+            for number in evidence.cells.get(field, []):
+                if number_confident(evidence, number, confidence):
+                    candidates.setdefault(number.value, number)
+                    families_by_value[number.value].add(family)
+    return candidates, families_by_value
+
+
+def _recover_quantity(row, matches, confidence):
+    # Recovery must remain independently corroborated: a single OCR family is
+    # insufficient even when arithmetic happens to agree with price and total.
+    prices = {number.value for number in row.cells.get("unit_price", [])}
+    totals = {number.value for number in row.cells.get("total_ht", [])}
+    if len(prices) != 1 or len(totals) != 1:
+        return None
+    if len(row.family_votes.get("unit_price", {})) != 1 or len(row.family_votes.get("total_ht", {})) != 1:
+        return None
+    price, total = next(iter(prices)), next(iter(totals))
+    candidates, families_by_value = _candidate_numbers(matches, "quantity", confidence)
+    solving = [
+        number for value, number in candidates.items()
+        if len(families_by_value[value]) >= 2
+        and abs((value * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) - total) <= Decimal(".02")
+    ]
+    return solving[0] if len(solving) == 1 else None
 
 
 def _siret_values(evidence: DocumentEvidence) -> list[str]:
@@ -164,7 +202,7 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
         descriptions = _agreed(
             matches, lambda candidate: [candidate.description] if all(
                 token.confidence >= confidence for token in candidate.line.tokens
-            ) else [], folded, unanimous=True,
+            ) else [], folded, unanimous=True, prefer=_accent_count,
         )
         row.description = descriptions[0] if len(descriptions) == 1 else ""
         row.description_confident = bool(row.description)
@@ -189,34 +227,43 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
                 if abs((values[0] * values[1]).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) - values[2]) <= Decimal(".02")
             ]
             if not solutions:
-                corroborated_quantities = set(row.family_votes["quantity"])
-                corroborated_prices = set(row.family_votes["unit_price"])
-                corroborated_totals = set(row.family_votes["total_ht"])
-                calculated_totals = {
-                    (quantity * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
-                    for quantity, price in product(corroborated_quantities, corroborated_prices)
-                }
-                if (
-                    len(corroborated_totals) == 1
-                    and len(calculated_totals) == 1
-                    and all(
-                        abs(total - calculated) > Decimal(".02")
-                        for total, calculated in product(corroborated_totals, calculated_totals)
+                recovered = _recover_quantity(row, matches, confidence)
+                if recovered is not None:
+                    row.cells["quantity"] = [recovered]
+                    result.issues.append(
+                        f"Ligne « {row.description} » : quantité {recovered.raw} retenue "
+                        "depuis une lecture OCR isolée confirmée par le prix et le montant ; "
+                        "lectures majoritaires contradictoires non retenues."
                     )
-                ):
-                    amount_mismatches.append(
-                        (
-                            row,
-                            next(iter(corroborated_totals)),
-                            next(iter(calculated_totals)),
+                else:
+                    corroborated_quantities = set(row.family_votes["quantity"])
+                    corroborated_prices = set(row.family_votes["unit_price"])
+                    corroborated_totals = set(row.family_votes["total_ht"])
+                    calculated_totals = {
+                        (quantity * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+                        for quantity, price in product(corroborated_quantities, corroborated_prices)
+                    }
+                    if (
+                        len(corroborated_totals) == 1
+                        and len(calculated_totals) == 1
+                        and all(
+                            abs(total - calculated) > Decimal(".02")
+                            for total, calculated in product(corroborated_totals, calculated_totals)
                         )
+                    ):
+                        amount_mismatches.append(
+                            (
+                                row,
+                                next(iter(corroborated_totals)),
+                                next(iter(calculated_totals)),
+                            )
+                        )
+                    row.cells["quantity"] = []
+                    row.cells["unit_price"] = []
+                    result.issues.append(
+                        f"Ligne « {row.description} » : lectures contradictoires avec le produit ; "
+                        "quantité/prix non recoupés, pas d'anomalie de facture affirmée."
                     )
-                row.cells["quantity"] = []
-                row.cells["unit_price"] = []
-                result.issues.append(
-                    f"Ligne « {row.description} » : lectures contradictoires avec le produit ; "
-                    "quantité/prix non recoupés, pas d'anomalie de facture affirmée."
-                )
     if not result.rows:
         confidence_values = [token.confidence for token in result.tokens]
         mean_confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0

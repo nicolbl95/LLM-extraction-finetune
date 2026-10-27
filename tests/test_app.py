@@ -273,7 +273,15 @@ class AppTests(unittest.TestCase):
                         len(frame) == len(extract_event["outputs"])
                         for frame in frames
                     ))
-                    self.assertEqual(frames[-1][0], rows[reference_id]["output"])
+                    payload = frames[-1][0]
+                    expected = json.loads(json.dumps(rows[reference_id]["output"]))
+                    if reference_id == "invoice-0110":
+                        expected["line_items"][0]["quantity"] = None
+                        expected["line_items"][0]["unit_price"] = None
+                        self.assertIsNone(payload["line_items"][0]["quantity"])
+                        self.assertIsNone(payload["line_items"][0]["unit_price"])
+                        self.assertNotIn(78, payload["line_items"][0].values())
+                    self.assertEqual(payload, expected)
                     self.assertNotIn("Traceback", str(frames[-1]))
 
     def test_additional_example_buttons_are_usable_from_the_gradio_interface(self):
@@ -337,7 +345,7 @@ class AppTests(unittest.TestCase):
                     self.assertEqual(warning["severity"], "avertissement")
                     self.assertIn("Ligne 3", warning["reason"])
                     line = payload["line_items"][2]
-                    self.assertIsNone(line["description"])
+                    self.assertEqual(line["description"], "Web development")
                     self.assertIsNone(line["quantity"])
                     self.assertIsNone(line["unit_price"])
                     self.assertEqual(line["total_ht"], 369.07)
@@ -410,7 +418,26 @@ class AppTests(unittest.TestCase):
             row["output"] for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
             if row["id"] == "invoice-0110"
         )
-        self.assertEqual(payload, reference)
+        expected = json.loads(json.dumps(reference))
+        expected["line_items"][0]["quantity"] = None
+        expected["line_items"][0]["unit_price"] = None
+        self.assertEqual(payload, expected)
+        self.assertIsNone(payload["line_items"][0]["quantity"])
+        self.assertIsNone(payload["line_items"][0]["unit_price"])
+        self.assertNotIn(78, payload["line_items"][0].values())
+        self.assertIn(
+            diagnostics["field_statuses"]["line_items.0.quantity"],
+            {"neutralisé (non fiable)", "non vérifié"},
+        )
+        self.assertIn(
+            diagnostics["field_statuses"]["line_items.0.unit_price"],
+            {"neutralisé (non fiable)", "non vérifié"},
+        )
+        self.assertEqual(payload["line_items"][0]["description"], "Logo design")
+        self.assertEqual(
+            diagnostics["field_statuses"]["line_items.0.description"],
+            "récupéré (corroboré par OCR)",
+        )
         report = diagnostics["report"]
         self.assertIn("GB-2025-00110", report)
         self.assertIn("Ligne 1", report)
@@ -422,7 +449,11 @@ class AppTests(unittest.TestCase):
         self.assertIn("Devise lue : GBP", report)
         self.assertEqual(report.count("Devise"), 1)
         self.assertIn("Nouvel essai possible dans 36 min.", report)
-        self.assertTrue(report.startswith("**✅ Facture cohérente"))
+        self.assertTrue(report.startswith("**⚠️ Lecture incomplète"))
+        self.assertIn(
+            "Ligne 1 : calcul non vérifiable",
+            "\n".join(diagnostics["validation"]["not_verified"]),
+        )
         for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
             self.assertNotIn(forbidden, report)
         self.assertTrue(payload["line_items"])

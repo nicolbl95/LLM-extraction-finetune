@@ -60,6 +60,68 @@ def test_a_number_in_the_description_column_is_never_accepted_as_a_description()
     assert any("contenu numérique" in issue for issue in evidence.issues)
 
 
+INVALID_MONETARY_DESCRIPTIONS = (
+    "1 234,56 EUR",
+    "USD 50",
+    "GBP 757.97",
+    "£1,234.56",
+    "50 %",
+)
+
+VALID_DESCRIPTIONS = (
+    "Manuel",
+    "Installation",
+    "Web development",
+    "Article 2",
+)
+
+MONETARY_LINE = (
+    '{"line_items":[{"description":"1 234,56 EUR","quantity":2,'
+    '"unit_price":617.28,"total_ht":1234.56}]}'
+)
+
+
+@pytest.mark.parametrize("description", INVALID_MONETARY_DESCRIPTIONS)
+def test_monetary_values_are_never_accepted_as_descriptions(description):
+    assert not description_is_usable(description)
+
+
+@pytest.mark.parametrize("description", VALID_DESCRIPTIONS)
+def test_legitimate_text_descriptions_remain_accepted(description):
+    assert description_is_usable(description)
+
+
+def test_shifted_monetary_description_is_rejected_and_never_exported():
+    shifted = (
+        "Item | Qty | P.U. | Amount\n"
+        "1 234,56 EUR | 2 | 617.28 | Installation"
+    )
+    evidence = from_text(LAYOUT_HEADER + shifted + LAYOUT_TOTALS)
+    assert evidence.rows == []
+    assert any("contenu numérique" in issue for issue in evidence.issues)
+
+    shifted_result = reconcile(evidence, [read_model(MONETARY_LINE)])
+    assert shifted_result.payload["line_items"] == [{
+        "description": None, "quantity": None, "unit_price": None, "total_ht": None,
+    }]
+    assert shifted_result.statuses["line_items.0.description"] == NULL
+
+    grounded = from_text(
+        LAYOUT_HEADER
+        + "Item | Qty | P.U. | Amount\nInstallation | 2 | 617.28 | 1,234.56"
+        + LAYOUT_TOTALS
+    )
+    assert len(grounded.rows) == 1
+    grounded.rows[0].description = "1 234,56 EUR"
+    result = reconcile(grounded, [read_model(MONETARY_LINE)])
+    line = result.payload["line_items"][0]
+    assert line["description"] is None
+    assert line["quantity"] == 2
+    assert line["unit_price"] == 617.28
+    assert line["total_ht"] == 1234.56
+    assert result.statuses["line_items.0.description"] in {NULL, UNVERIFIED}
+
+
 def test_grounding_never_exports_a_purely_numeric_description():
     # Defence in depth: even if a foreign snapshot still carries a numeric description,
     # grounding refuses it while keeping the numbers corroborated by the document.

@@ -341,18 +341,29 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         description_same = isinstance(original_description, str) and folded(original_description) == folded(row.description)
         invariant_row = invariant_fields[index] if invariant_fields else {}
         row_unique = bool(invariant_row) and all(value is not None for value in invariant_row.values())
-        description_clear = description_is_usable(row.description) and (
+        description_usable = description_is_usable(row.description) and (
             folded(row.description) not in {"error", "invalid"}
-        ) and (description_same or (
-            row.description_confident and (
-                description_score >= .9 or all(len({number.value for number in row.cells.get(key, [])}) == 1 for key in FIELDS) or any(
-                    isinstance(proposal.get("description"), str)
-                    and similarity(proposal["description"], row.description) >= .9 for proposal in proposals
-                ) or row_unique or sum(
-                    numeric(original.get(key), evidence.locale) in {n.value for n in row.cells.get(key, [])}
-                    for key in FIELDS
-                ) >= 2
-            ))
+        )
+        no_model_description = not any(
+            isinstance(proposal.get("description"), str) for proposal in proposals
+        )
+        ocr_description_without_model = (
+            row.description_confident
+            and no_model_description
+            and any(row.cells.get(key) for key in FIELDS)
+        )
+        description_clear = description_usable and (
+            description_same or ocr_description_without_model or (
+                row.description_confident and (
+                    description_score >= .9 or all(len({number.value for number in row.cells.get(key, [])}) == 1 for key in FIELDS) or any(
+                        isinstance(proposal.get("description"), str)
+                        and similarity(proposal["description"], row.description) >= .9 for proposal in proposals
+                    ) or row_unique or sum(
+                        numeric(original.get(key), evidence.locale) in {n.value for n in row.cells.get(key, [])}
+                        for key in FIELDS
+                    ) >= 2
+                )
+            )
         )
         item = {}
         result.provenance[f"{prefix}.description"] = [
