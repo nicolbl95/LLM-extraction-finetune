@@ -5,6 +5,7 @@ colorFrom: blue
 colorTo: indigo
 sdk: gradio
 sdk_version: 6.30.0
+python_version: "3.12"
 app_file: app/main.py
 pinned: false
 ---
@@ -357,3 +358,82 @@ ou l'omettre des deux runs ; le rapport v3 synthétique ne précise pas ce régl
 ├── docs/                 # notes de conception
 └── requirements*.txt     # dépendances données et inférence
 ```
+
+## 🔒 Données et confidentialité
+
+- Les factures importées et le JSON exporté restent dans le cache temporaire de l'application ;
+  un nettoyage supprime les fichiers de plus de dix minutes (au plus tard en deux passages).
+- Par défaut et sur Hugging Face : aucune base de données ni stockage permanent de révision.
+  Le stockage SQLite local facultatif est décrit ci-dessous. Aucun service d'inférence tiers :
+  le modèle s'exécute dans l'espace Hugging Face, les poids sont publics.
+- Les journaux techniques ne contiennent ni texte de facture ni montant : seuls les codes de
+  contrôle et leur emplacement sont écrits.
+- N'importez pas de document que vous ne pouvez pas partager : tant qu'un fichier est en cache,
+  son URL Gradio (aléatoire, non authentifiée) est accessible à toute personne qui la connaît.
+
+## Révision humaine locale
+
+L'interface de révision humaine Phase 2A est désactivée par défaut. Pour l'activer localement,
+définissez `INVOICE_REVIEW_UI=1` et `INVOICE_REVIEW_EDIT=1`. Les corrections, décisions de
+proposition et confirmations restent dans l'état Gradio de la session en cours ; elles ne sont
+ni enregistrées durablement ni exportées. Accepter une proposition ne confirme pas le champ.
+Le JSON strict de l'extraction reste distinct et inchangé.
+
+### Brouillons SQLite — Windows local uniquement
+
+Le stockage est **désactivé par défaut**. Pour l'utiliser depuis la racine du projet :
+
+```powershell
+$env:INVOICE_REVIEW_UI = "1"
+$env:INVOICE_REVIEW_EDIT = "1"
+$env:INVOICE_REVIEW_PERSIST = "1"
+.\.venv\Scripts\python.exe -m app.local_review
+```
+
+Le lanceur dédié impose `127.0.0.1`, `share=False`, des contrôles de requêtes locales
+(hôte, origine, en-têtes de transfert) et le blocage des fichiers de stockage dans Gradio.
+L'interface ordinaire refuse le drapeau de persistance. Les environnements Hugging Face
+Spaces, publics **ou privés**, sont refusés ; leur disque ordinaire peut être éphémère.
+Ne configurez **aucun tunnel, proxy, partage Gradio ou transfert de port** : les contrôles
+applicatifs ne prouvent pas l'absence d'une redirection réseau extérieure.
+
+Les données sont conservées dans `.local-review/drafts.sqlite3`, exclu de Git, séparé du
+cache Gradio et accessible uniquement au compte Windows courant (DACL vérifiée).
+**SQLite n'est pas chiffré.** Un administrateur, un compte compromis ou une copie de
+sauvegarde peut donner accès aux données. Le stockage n'est pas destiné à un usage
+multi-utilisateur ou réseau.
+
+Seuls les boutons **Enregistrer**, **Ouvrir** et **Supprimer** provoquent des opérations
+de persistance explicites : aucun enregistrement à chaque modification ou fermeture.
+Avant le premier enregistrement, l'utilisateur doit accepter le stockage local des
+données sensibles. Le brouillon conserve :
+
+- les instantanés strict/P1/modèle et les preuves/provenances capturées ;
+- l'empreinte SHA-256, la taille et le type du document source ;
+- les corrections, décisions de proposition, identités des lignes et confirmations historiques ;
+- les versions de compatibilité et le numéro de révision.
+
+Les images/PDF originaux, aperçus, chemins temporaires, clés/jetons HMAC d'exécution et
+résultats de validation mis en cache ne sont **jamais** enregistrés dans SQLite.
+Le JSON strict reste séparé des corrections humaines. Un brouillon incomplet ou
+arithmétiquement incohérent peut être enregistré ; il n'est pas pour autant confirmé,
+finalisé ou exportable en comptabilité.
+
+Après un rafraîchissement ou redémarrage, utilisez **Ouvrir**, puis **Rattacher le document
+source original** et **Vérifier**. Sans ce document, le brouillon est consultable mais les
+modifications/confirmations sont bloquées. Le contenu exact doit correspondre au SHA-256 :
+un nom identique ne suffit pas. Aucune nouvelle OCR/inférence n'est effectuée pour restaurer.
+Les confirmations compatibles sont revalidées avec de nouveaux jetons d'exécution.
+Un changement de politique/validation exige une nouvelle confirmation ; les décisions
+historiques restent distinctes. Les instantanés incompatibles ne sont jamais fusionnés.
+
+Les révisions concurrentes sont refusées au lieu d'écraser une sauvegarde plus récente.
+La suppression exige une case de confirmation et retire la copie enregistrée ainsi que
+son instantané inutilisé, **sans effacer la session courante**. Une ancienne session ne
+peut pas recréer silencieusement le brouillon supprimé.
+
+La suppression logique ne garantit pas l'effacement physique des journaux SQLite,
+supports SSD ou sauvegardes. Aucun service de sauvegarde/récupération n'est fourni.
+Pour une copie cohérente, arrêtez l'application avant de sauvegarder le dossier protégé ;
+protégez aussi cette copie. Une base corrompue, une version non prise en charge ou des
+permissions insuffisantes sont signalées sans changement automatique d'emplacement.

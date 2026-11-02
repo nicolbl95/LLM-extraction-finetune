@@ -43,3 +43,17 @@ results/ocr-*.json
 data/templates/5.png
 data/templates/
 data/templates/
+
+# Copies locales des factures de diagnostic
+diagnostics/
+
+# Évaluation indépendante de factures réelles (local/privé)
+real-scans/
+real-scans-supplementary/
+real-scans-truth*.json
+real-scans-review-notes*.json
+real-scans-provenance*.json
+results/real-scans*.json
+
+# Local single-user human-review drafts (sensitive, not encrypted)
+.local-review/

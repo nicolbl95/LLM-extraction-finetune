@@ -54,7 +54,7 @@ class AppTests(unittest.TestCase):
     def test_three_distributable_examples_match_existing_regional_invoices(self):
         rows = {
             row["id"]: row
-            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
         }
         sources = [
             ("invoice-0406", "fr-FR"),
@@ -151,7 +151,7 @@ class AppTests(unittest.TestCase):
         }
         rows = {
             row["id"]: row
-            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
         }
         for label, path in main.REGIONAL_EXAMPLES:
             with self.subTest(example=label):
@@ -170,7 +170,9 @@ class AppTests(unittest.TestCase):
                         payload = main.extract_invoice(text, diagnostics=diagnostics)
                     self.assertEqual(payload, rows[reference_id]["output"])
                     report = diagnostics["report"]
-                    self.assertTrue(report.startswith("**✅ Facture cohérente : 20 champs vérifiés sur 20**"))
+                    self.assertTrue(report.startswith(
+                        "**✅ Lecture cohérente : 0 champs vérifiés, 20 récupérés sur 20**"
+                    ))
                     self.assertIn(
                         "SIRET : la clé de contrôle ne correspond pas. À vérifier si ce numéro est réel.",
                         report,
@@ -192,7 +194,7 @@ class AppTests(unittest.TestCase):
         extract_handler = app.fns[extract_event["id"]].fn
         rows = {
             row["id"]: row
-            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
         }
         reference_ids = ("invoice-0406", "invoice-0110", "invoice-0435")
         for index, ((_, path), reference_id) in enumerate(
@@ -229,7 +231,7 @@ class AppTests(unittest.TestCase):
     def test_selected_examples_survive_gradio_cache_cleanup(self):
         rows = {
             row["id"]: row
-            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+            for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
         }
         reference_ids = ("invoice-0406", "invoice-0110", "invoice-0435")
         with tempfile.TemporaryDirectory(
@@ -300,7 +302,7 @@ class AppTests(unittest.TestCase):
         load_handler = app.fns[load_event["id"]].fn
         preview_handler = app.fns[preview_event["id"]].fn
         extract_handler = app.fns[extract_event["id"]].fn
-        joanna = json.loads((main.ROOT / "tests/fixtures/layout-joanna-binet.json").read_text())
+        joanna = json.loads((main.ROOT / "tests/fixtures/layout-joanna-binet.json").read_text(encoding="utf-8"))
 
         self.assertEqual(
             [label for label, _ in main.ADDITIONAL_EXAMPLES],
@@ -336,7 +338,9 @@ class AppTests(unittest.TestCase):
                 if label == "France · Joanna Binet (mise en page inhabituelle)":
                     self.assertEqual(payload, joanna["reference"])
                     self.assertEqual(validation["flags"], [])
-                    self.assertTrue(report.startswith("**✅ Facture cohérente : 16 champs vérifiés sur 16**"))
+                    self.assertTrue(report.startswith(
+                        "**✅ Lecture cohérente : 0 champs vérifiés, 16 récupérés sur 16**"
+                    ))
                 elif label == "États-Unis · erreur d'impression":
                     warning = next(
                         flag for flag in validation["flags"]
@@ -415,7 +419,7 @@ class AppTests(unittest.TestCase):
         ):
             payload = main.extract_invoice(text, diagnostics=diagnostics)
         reference = next(
-            row["output"] for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text().splitlines())
+            row["output"] for row in map(json.loads, (main.ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
             if row["id"] == "invoice-0110"
         )
         expected = json.loads(json.dumps(reference))
@@ -706,7 +710,7 @@ class AppTests(unittest.TestCase):
                     updates = list(main.run_extraction(str(main.EXAMPLES[0][1])))
                 payload, status = updates[-1]
                 self.assertEqual(payload, self.gold)
-                self.assertIn("Facture cohérente : 8 champs vérifiés sur 8", status)
+                self.assertIn("Lecture cohérente : 7 champs vérifiés, 1 récupéré sur 8", status)
                 self.assertNotIn("999", status)
                 self.assertIn("Aucune anomalie n’est affirmée", status)
                 demo = main.build_app()
@@ -954,6 +958,52 @@ class AppTests(unittest.TestCase):
             namespace = runpy.run_path(str(main.ROOT / "app/main.py"))
         gpu.assert_called_once_with(duration=namespace["gpu_duration"])
         backend.assert_not_called()
+
+    def test_startup_prefetch_is_a_noop_outside_the_space(self):
+        with patch.dict(os.environ, {"INVOICE_MODULE_PRELOAD": "1"}, clear=True), \
+                patch.object(main, "snapshot_download") as download, \
+                patch.object(main, "get_extractor") as extractor:
+            main.startup_prefetch()
+        download.assert_not_called()
+        extractor.assert_not_called()
+
+    def test_startup_prefetch_downloads_the_declared_base_weights(self):
+        base = "unsloth/Qwen2.5-3B-Instruct-unsloth-bnb-4bit"
+        with patch.dict(os.environ, {"SPACE_ID": "demo"}, clear=True), \
+                patch.object(main, "resolve_adapter_path", return_value=Path("adapter")), \
+                patch.object(main, "check_adapter", return_value={"base_model_name_or_path": base}), \
+                patch.object(main, "snapshot_download") as download, \
+                patch.object(main, "get_extractor") as extractor:
+            main.startup_prefetch()
+        download.assert_called_once_with(
+            repo_id=base, allow_patterns=["*.json", "*.safetensors", "*.txt", "*.jinja"])
+        extractor.assert_not_called()
+
+    def test_startup_prefetch_never_breaks_startup(self):
+        with patch.dict(os.environ, {"SPACE_ID": "demo", "INVOICE_MODULE_PRELOAD": "1"}, clear=True), \
+                patch.object(main, "resolve_adapter_path", side_effect=RuntimeError("hub down")), \
+                patch.object(main, "get_extractor", side_effect=RuntimeError("no cuda")) as extractor, \
+                self.assertLogs("app.main", level="ERROR"):
+            main.startup_prefetch()
+        extractor.assert_called_once_with()
+
+    def test_startup_prefetch_respects_its_kill_switch(self):
+        with patch.dict(os.environ, {"SPACE_ID": "demo", "INVOICE_PREFETCH": "0"}, clear=True), \
+                patch.object(main, "prefetch_model_artifacts") as prefetch:
+            main.startup_prefetch()
+        prefetch.assert_not_called()
+
+    def test_module_preload_is_opt_in(self):
+        with patch.dict(os.environ, {"SPACE_ID": "demo"}, clear=True), \
+                patch.object(main, "prefetch_model_artifacts"), \
+                patch.object(main, "get_extractor") as extractor:
+            main.startup_prefetch()
+        extractor.assert_not_called()
+        with patch.dict(os.environ, {"SPACE_ID": "demo", "INVOICE_MODULE_PRELOAD": "1"}, clear=True), \
+                patch.object(main, "prefetch_model_artifacts"), \
+                patch.object(main, "get_extractor", return_value=object()) as extractor:
+            main.startup_prefetch()
+        extractor.assert_called_once_with()
 
     def test_gpu_callback_returns_raw_predictions_without_pydantic_validation(self):
         prediction = {"raw": '{"supplier_name":"Incomplete invoice"}', "finish_reason": "stop"}

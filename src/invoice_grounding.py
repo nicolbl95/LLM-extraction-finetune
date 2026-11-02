@@ -14,9 +14,10 @@ from itertools import product
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from invoice_evidence import (
-    DocumentEvidence, TableRow, description_is_usable, folded, parse_number, reading_issue_category,
+    DocumentEvidence, Number, TableRow, description_is_usable, folded, has_replacement_character,
+    number_tokens, parse_number, reading_issue_category, total_label_field,
 )
-from invoice_validation import Validation, document_validation, render_report
+from invoice_validation import Validation, anomaly_digest, document_validation, render_report
 from ocr_quality import document_quality
 from ocr_config import OCR_CONFIG
 
@@ -41,7 +42,7 @@ def partial_layout_is_usable(evidence: DocumentEvidence, issues: list[str]) -> b
         not evidence.available
         or evidence.source_kind != "consensus"
         or not evidence.ocr_cross_checked
-        or evidence.rows
+        or (evidence.rows and evidence.rows_provenance != "recovered")
         or not evidence.tokens
         or not issues
         or reading_issue_category(evidence) not in {"layout", "partial"}
@@ -51,6 +52,61 @@ def partial_layout_is_usable(evidence: DocumentEvidence, issues: list[str]) -> b
         return False
     confidence = sum(token.confidence for token in evidence.tokens) / len(evidence.tokens)
     return confidence >= OCR_CONFIG.fast_mean_confidence
+
+
+def labelled_total_is_legible(evidence: DocumentEvidence, key: str, value: Decimal) -> bool:
+    """Whether the consensus reading carries exactly one legible line for this labelled total.
+
+    The label and the amount are read from the same tokens, so a strict per-token bar on that
+    line is the only evidence that survives when the rest of the page is too noisy to trust.
+    """
+    labelled = [line for line in evidence.lines if total_label_field(line.text) == key]
+    if len(labelled) != 1:
+        return False
+    line = labelled[0]
+    if not line.tokens or has_replacement_character(line.text):
+        return False
+    if any(token.confidence < OCR_CONFIG.fast_token_confidence for token in line.tokens):
+        return False
+    amounts = [number for number in number_tokens(line.text, line, evidence.locale) if "%" not in number.raw]
+    return len(amounts) == 1 and amounts[0].value == value
+
+
+def selective_total_recovery(evidence: DocumentEvidence) -> dict[str, Number]:
+    """Totals a rejected document still supports field by field.
+
+    ``ocr_consensus`` only records a labelled total when at least two independent
+    preprocessing families read the same amount under the same label, so that corroboration
+    is field-local evidence the average confidence of the whole page cannot invalidate.
+    A reconstructed table stays with the normal constraint path, and anything else in a
+    rejected document remains unverified.
+    """
+    if (
+        not evidence.available
+        or evidence.source_kind != "consensus"
+        or not evidence.ocr_cross_checked
+        or evidence.rows
+        or evidence.locale is None
+    ):
+        return {}
+    values = {
+        key: sorted({number.value for number in evidence.totals.get(key, [])})
+        for key in ("total_ht", "total_ttc")
+    }
+    if set(values["total_ht"]) & set(values["total_ttc"]):
+        return {}
+    retained = {}
+    for key, candidates in values.items():
+        if len(candidates) != 1:
+            continue
+        value = candidates[0]
+        sources = [number for number in evidence.totals.get(key, []) if number.value == value]
+        if len(sources) != 1 or not labelled_total_is_legible(evidence, key, value):
+            continue
+        if not any(number.value == value for number in evidence.numbers):
+            continue
+        retained[key] = sources[0]
+    return retained
 
 
 def close(left: Decimal, right: Decimal) -> bool:
@@ -134,6 +190,21 @@ def _items(payload: dict) -> list[dict]:
     return [item if isinstance(item, dict) else {} for item in items] if isinstance(items, list) else []
 
 
+def _recovered_ordinals_match(evidence: DocumentEvidence, initial: dict) -> bool:
+    """Recovered rows become output only when their document ordinals cover the item slots exactly.
+
+    A single recovered row against a single proposed item has no ordering ambiguity even when the
+    document cannot prove its ordinal; anything else must be proven row by row.
+    """
+    items = len(_items(initial))
+    rows = evidence.rows
+    if len(rows) == 1 and items == 1:
+        return True
+    ordinals = [row.row_index for row in rows]
+    return (len(rows) == items and all(ordinal is not None for ordinal in ordinals)
+            and sorted(ordinals) == list(range(items)))
+
+
 def _assign(payload: dict, evidence: DocumentEvidence) -> dict[int, dict]:
     assignments: dict[int, list[dict]] = {}
     for item in _items(payload):
@@ -170,16 +241,48 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
     initial = passes[0] if passes else {}
     result = GroundedResult({"supplier_name": None, "invoice_date": None,
                              "total_ht": None, "total_ttc": None, "line_items": []})
+
+    def record(path: str, value: Decimal | str | None, status: str, reason: str, sources: list | None = None):
+        result.statuses[path] = status
+        if sources:
+            result.provenance[path] = [
+                {"raw": n.raw, "value": str(n.value), "page": n.page, "box": list(n.box)} for n in sources
+            ]
+        if status != VALID or reason:
+            result.warnings.append(f"{path} : {status} — {reason}")
+        if isinstance(value, Decimal):
+            converted = float(value)
+            if not math.isfinite(converted) or Decimal(str(converted)) != value:
+                result.statuses[path] = NULL
+                result.warnings.append(f"{path} : {NULL} — nombre non sérialisable sans perte.")
+                return None
+            return converted
+        return value
+
     quality_issues = document_quality(evidence, initial)
     if not evidence.available or (quality_issues and not partial_layout_is_usable(evidence, quality_issues)):
+        # The document-level gate refuses the model, so nothing it could have proposed is
+        # consulted here: only totals already corroborated by the OCR families are retained.
+        retained = selective_total_recovery(evidence)
         for index in range(max(len(_items(initial)), len(evidence.rows))):
             result.payload["line_items"].append({"description": None, **dict.fromkeys(FIELDS)})
             for key in ("description", *FIELDS):
                 result.statuses[f"line_items.{index}.{key}"] = UNVERIFIED
         result.statuses.update({key: UNVERIFIED for key in ("supplier_name", "invoice_date", "total_ht", "total_ttc")})
         reason = "insuffisantes" if quality_issues else "indisponibles"
-        result.warnings.append(f"Preuves OCR {reason} : extraction non recoupée ; aucun champ présenté comme vérifié.")
+        result.warnings.append(
+            f"Preuves OCR {reason} : extraction non recoupée ; "
+            + ("seuls les totaux libellés recoupés par l’OCR sont présentés comme récupérés."
+               if retained else "aucun champ présenté comme vérifié.")
+        )
         result.warnings.extend(quality_issues)
+        for key, number in retained.items():
+            result.payload[key] = record(
+                key, number.value, RECOVERED,
+                "montant libellé lu de façon concordante par plusieurs prétraitements OCR "
+                "et dont chaque token de la ligne dépasse le seuil de confiance strict",
+                [number],
+            )
         return result
     result.validation = document_validation(evidence) if evidence.available else Validation()
     result.warnings.extend(evidence.issues)
@@ -233,10 +336,25 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         if candidate in all_numbers and candidate is not None and close(candidate + tax_sum, ttc):
             ht = candidate
     printed_totals = [sorted({n.value for n in row.cells.get("total_ht", [])}) for row in evidence.rows]
+    # Unproven-ordinal rows (experimental geometry) may anchor model cells but must never drive
+    # document-total inference: a mislabelled "TOTAL HORS TAXE" would otherwise become the TTC.
+    rows_anchor_totals = bool(evidence.rows) and getattr(evidence, "rows_ordinal_proof", True)
     discount_total = sum((abs(number.value) for number in evidence.discounts), Decimal(0))
+    if (
+        ttc is None and ht is None and total_candidate is not None
+        and not tax_available and rows_anchor_totals
+        and printed_totals and all(len(values) == 1 for values in printed_totals)
+        and close(
+            sum((values[0] for values in printed_totals), Decimal(0)) - discount_total,
+            total_candidate,
+        )
+    ):
+        # An explicit final total without VAT/HT can be the payable total, but
+        # never becomes an invented HT amount.
+        ttc = total_candidate
     derived_ht_from_lines = False
     if (
-        evidence.rows and len(options) == len(evidence.rows)
+        rows_anchor_totals and len(options) == len(evidence.rows)
         and all(len(row_options) == 1 for row_options in options)
         and tax_available
     ):
@@ -252,7 +370,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         if ttc is None and total_candidate is not None and ht is not None and close(ht + tax_sum, total_candidate):
             ttc = total_candidate
     if (
-        evidence.rows and len(options) == len(evidence.rows)
+        rows_anchor_totals and len(options) == len(evidence.rows)
         and all(len(row_options) == 1 for row_options in options)
         and tax_available
     ):
@@ -266,7 +384,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         if ttc is None and total_candidate is not None and ht is not None and close(ht + tax_sum, total_candidate):
             ttc = total_candidate
     sum_supported = (
-        ht is not None and bool(evidence.rows) and all(len(values) == 1 for values in printed_totals)
+        ht is not None and rows_anchor_totals and all(len(values) == 1 for values in printed_totals)
         and close(sum((values[0] for values in printed_totals), Decimal(0)) - discount_total, ht)
     )
     tax_ok = tax_available and ht is not None and ttc is not None and close(ht + tax_sum, ttc)
@@ -274,7 +392,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
     total_combinations = math.prod(len(values) for values in options)
     invariant_fields: list[dict[str, Decimal | None]] = []
     solutions_found = 0
-    if ht is not None and evidence.rows and 0 < total_combinations <= MAX_SOLUTIONS and not tax_conflict:
+    if ht is not None and rows_anchor_totals and 0 < total_combinations <= MAX_SOLUTIONS and not tax_conflict:
         for combination in product(*options):
             if close(sum((line.total_ht for line in combination), Decimal(0)) - discount_total, ht):
                 solutions_found += 1
@@ -292,30 +410,19 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
     if total_combinations > MAX_SOLUTIONS:
         result.warnings.append("Recherche bornée : trop de combinaisons OCR ; aucune réparation automatique.")
 
-    def record(path: str, value: Decimal | str | None, status: str, reason: str, sources: list | None = None):
-        result.statuses[path] = status
-        if sources:
-            result.provenance[path] = [
-                {"raw": n.raw, "value": str(n.value), "page": n.page, "box": list(n.box)} for n in sources
-            ]
-        if status != VALID or reason:
-            result.warnings.append(f"{path} : {status} — {reason}")
-        if isinstance(value, Decimal):
-            converted = float(value)
-            if not math.isfinite(converted) or Decimal(str(converted)) != value:
-                result.statuses[path] = NULL
-                result.warnings.append(f"{path} : {NULL} — nombre non sérialisable sans perte.")
-                return None
-            return converted
-        return value
-
     supplier_source = evidence.supplier
     if supplier_source and not evidence.supplier_is_explicit and evidence.source_kind != "consensus":
         supplier_source = None
     for key, source in (("supplier_name", supplier_source), ("invoice_date", evidence.invoice_date)):
         model_value = initial.get(key)
         if source is not None:
-            status = VALID if isinstance(model_value, str) and folded(model_value) == folded(source) else RECOVERED
+            agrees = isinstance(model_value, str) and folded(model_value) == folded(source)
+            # A supplier name read without an explicit label is documentary, never verified: the model
+            # echoing a shared OCR misread must not promote it (see the benchmark typo regression).
+            if key == "supplier_name" and not evidence.supplier_is_explicit:
+                status = RECOVERED
+            else:
+                status = VALID if agrees else RECOVERED
             result.payload[key] = record(key, source, status, "" if status == VALID else "texte lu dans le document")
         else:
             result.payload[key] = record(key, None, NULL, "texte absent ou ambigu dans les preuves")
@@ -324,7 +431,13 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
             f"supplier_name : normalisation typographique {evidence.supplier_raw!r} → {evidence.supplier!r} ; aucune substitution OCR."
         )
 
+    export_recovered = (evidence.rows_provenance != "recovered"
+                        or _recovered_ordinals_match(evidence, initial))
     for index, row in enumerate(evidence.rows):
+        if not export_recovered:
+            # Recovered rows that do not cover the item slots exactly stay evidence-only: the
+            # payload keeps one null item per model proposal instead of an ambiguous row.
+            break
         prefix = f"line_items.{index}"
         original = assignments[0].get(index, {}) if assignments else {}
         proposals = [assignment.get(index, {}) for assignment in assignments]
@@ -444,7 +557,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
             result.failed_rows.append(index)
         result.payload["line_items"].append(item)
 
-    if not evidence.rows:
+    if not result.payload["line_items"]:
         for index, _ in enumerate(_items(initial)):
             item = {"description": None, **dict.fromkeys(FIELDS)}
             result.payload["line_items"].append(item)
@@ -480,7 +593,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         else:
             result.payload[key] = record(key, None, NULL, "total non ancré ou contrainte globale non résolue")
     if ht is not None and not sum_supported:
-        known_amounts = bool(evidence.rows) and all(len(values) == 1 for values in printed_totals)
+        known_amounts = rows_anchor_totals and all(len(values) == 1 for values in printed_totals)
         if not known_amounts:
             affected = ", ".join(
                 str(index + 1) for index, values in enumerate(printed_totals) if len(values) != 1
@@ -537,6 +650,25 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
         for path, status in result.statuses.items():
             if status == NULL:
                 result.statuses[path] = UNVERIFIED
+    if evidence.rows_provenance == "recovered":
+        result.payload["recovered_rows"] = [
+            {
+                "page": (row.row_evidence or {}).get("page", 0),
+                "description": row.description,
+                "method": (row.row_evidence or {}).get("method", "recovery"),
+                "corroboration": dict((row.row_evidence or {}).get("corroboration") or {}),
+                "row_index": row.row_index,
+                "row_index_confidence": (row.row_evidence or {}).get("row_index_confidence"),
+                "exported_in_line_items": export_recovered,
+                "printed": dict((row.row_evidence or {}).get("printed") or {}),
+                "values": {role: str(cells[0].value) for role, cells in row.cells.items()},
+                "statuses": {role: RECOVERED for role in row.cells},
+                "positions": dict((row.row_evidence or {}).get("positions") or {}),
+                "refused_cells": list((row.row_evidence or {}).get("refused_cells") or []),
+            }
+            for row in evidence.rows
+        ]
+
     return result
 
 
@@ -604,7 +736,7 @@ def run_grounded_inference(
     evidence: DocumentEvidence, row: dict, messages: list[dict],
     predict: Callable[[dict, list[dict]], dict],
     *, recoverable_errors: tuple[type[Exception], ...] = (OSError, ValueError, RuntimeError, ImportError),
-    allow_correction: bool = True,
+    allow_correction: bool = True, source_size: tuple[int, int] | None = None,
 ) -> dict:
     attempts = []
     passes = []
@@ -719,7 +851,8 @@ def run_grounded_inference(
     if any(status != VALID for status in grounded.statuses.values()):
         LOGGER.warning("Document grounding for %s: %s", row.get("id", "invoice"), grounded.statuses)
     if any(flag.severity != "information" for flag in grounded.validation.flags):
-        LOGGER.warning("Document anomalies for %s: %s", row.get("id", "invoice"), grounded.validation.export())
+        LOGGER.warning("Document anomalies for %s: %s", row.get("id", "invoice"),
+                       anomaly_digest(grounded.validation.export()))
     return {
         "raw": initial["raw"] if initial is not None else "",
         "finish_reason": initial["finish_reason"] if initial is not None else "error",
@@ -729,7 +862,7 @@ def run_grounded_inference(
         "report": render_report(
             evidence, grounded.validation, grounded.statuses, errors, available=evidence.available,
             insufficient=bool(document_quality(evidence, passes[0] if passes else {})),
-            suggestions=suggestions, model_info=model_info,
+            suggestions=suggestions, model_info=model_info, source_size=source_size,
         ),
         "unverified_model_readings": suggestions,
         "provenance": grounded.provenance, "attempts": attempts,

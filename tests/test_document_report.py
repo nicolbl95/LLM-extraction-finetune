@@ -13,10 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from invoice_evidence import DocumentEvidence, EvidenceText, from_text, invoice_number_from_text
-from invoice_grounding import VALID, UNVERIFIED, read_model, reconcile, run_grounded_inference
+from invoice_grounding import RECOVERED, VALID, UNVERIFIED, read_model, reconcile, run_grounded_inference
 from ocr_consensus import build_consensus
 from invoice_validation import (
-    IDENTIFIER_CALIBRATION, IDENTIFIER_SEVERITIES, canonical_name, document_validation,
+    IDENTIFIER_CALIBRATION, IDENTIFIER_SEVERITIES, anomaly_digest, canonical_name, document_validation,
     identifier_checks, luhn, parse_date, render_report, valid_ein, valid_fr_vat, valid_iban,
     valid_siret, valid_uk_vat,
 )
@@ -40,7 +40,7 @@ def model():
 
 
 def test_capture_replay_is_recovered_without_a_document_anomaly():
-    row = next(row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines()) if row["id"] == "invoice-0435")
+    row = next(row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines()) if row["id"] == "invoice-0435")
     payload = read_model(json.dumps(row["output"]))
     payload["line_items"][2].update(quantity=Decimal(54), unit_price=Decimal("77.68"), total_ht=Decimal("4210.32"))
     evidence = from_text(row["input"])
@@ -52,7 +52,11 @@ def test_capture_replay_is_recovered_without_a_document_anomaly():
     assert "Aucune anomalie" in report
     assert "4210" not in report
     assert "Pydantic" not in report
-    assert f"{sum(value in {'valide', 'récupéré (corroboré par OCR)'} for value in result.statuses.values())} champs vérifiés" in report
+    verified = sum(value == "valide" for value in result.statuses.values())
+    recovered = sum(value == "récupéré (corroboré par OCR)" for value in result.statuses.values())
+    assert f"{verified} champs vérifiés" in report
+    if recovered:
+        assert f"{recovered} récupéré" in report
 
 
 def test_printed_arithmetic_error_is_retained_and_flagged_outside_scored_json():
@@ -128,7 +132,7 @@ def test_successful_model_generation_is_distinguished_from_ocr_fallback():
 @pytest.mark.parametrize("invoice_id", ["invoice-0406", "invoice-0435"])
 def test_fr_and_us_fallback_reports_are_human_readable_without_duplicates(invoice_id):
     row = next(
-        row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())
+        row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
         if row["id"] == invoice_id
     )
     evidence = from_text(row["input"], locale=row["locale"])
@@ -175,7 +179,7 @@ def test_fixture_with_corroborated_printed_line_total_reports_warning_without_re
     text = main.document_text(str(fixture))
     evidence = text.evidence
     reference = next(
-        row["output"] for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())
+        row["output"] for row in map(json.loads, (ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
         if row["id"] == "invoice-0435"
     )
     result = reconcile(evidence, [read_model(json.dumps(reference))])
@@ -276,7 +280,9 @@ def test_real_ocr_equivalent_invoice_with_unusual_french_layout_is_grounded():
     response.assert_called_once()
     assert payload == LAYOUT_REFERENCE
     assert diagnostics["model_info"]["passes_succeeded"] == 1
-    assert diagnostics["report"].startswith("**✅ Facture cohérente : 16 champs vérifiés sur 16**")
+    assert diagnostics["report"].startswith(
+        "**✅ Lecture cohérente : 15 champs vérifiés, 1 récupéré sur 16**"
+    )
     assert any(
         "Total « TOTAL » retenu comme TTC" in item
         for item in diagnostics["validation"]["passed"]
@@ -285,9 +291,12 @@ def test_real_ocr_equivalent_invoice_with_unusual_french_layout_is_grounded():
         flag for flag in diagnostics["validation"]["flags"]
         if flag["severity"] != "information"
     ]
+    # The supplier is read without an explicit label, so it stays documentary ("récupéré"):
+    # the model echoing it can no longer promote it to "valide" (benchmark regression).
+    statuses = diagnostics["field_statuses"]
+    assert statuses["supplier_name"] == RECOVERED
     assert all(
-        value == VALID
-        for value in diagnostics["field_statuses"].values()
+        value == VALID for path, value in statuses.items() if path != "supplier_name"
     )
 
 
@@ -492,7 +501,7 @@ def test_report_distinguishes_blurred_text_from_unrecognized_table_layout():
 
 def _reference_report(invoice_id, *, invoice_number_readable=True, siret_readable=True):
     row = next(
-        row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())
+        row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())
         if row["id"] == invoice_id
     )
     text = row["input"]
@@ -690,7 +699,7 @@ def test_fr_vat_key_and_siren_match():
 
 def test_sixty_reference_documents_have_no_error_level_false_positives_and_reproduce_calibration():
     counts = Counter()
-    for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines()):
+    for row in map(json.loads, (ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines()):
         for kind, value, ok in identifier_checks(row["input"]):
             counts[kind, "checked"] += 1
             counts[kind, "failed"] += not ok
@@ -829,7 +838,7 @@ def test_ui_technical_details_are_compact_and_json_download_matches_result():
         assert "non utilisé — quota ZeroGPU indisponible" in technical
         assert "passes demandées : 1 ; réussies : 0" in technical
         assert "| Champ | Valeur | Statut | Source |" in technical
-        assert "| Ligne 1 — Quantité | 7.8 | vérifié | document seul |" in technical
+        assert "| Ligne 1 — Quantité | 7.8 | récupéré (document) | document seul |" in technical
         assert "durée des appels" not in technical
         assert "prétraitements" not in technical
         assert "Prétraitements utilisés" in advanced
@@ -837,7 +846,7 @@ def test_ui_technical_details_are_compact_and_json_download_matches_result():
         assert "Aucune réponse du modèle à comparer." in technical
         assert "Aucune réponse brute" in raw
         assert len(re.search(r"[a-f0-9]{64}", advanced).group()) == 64
-        assert json.loads(Path(download).read_text()) == payload
+        assert json.loads(Path(download).read_text(encoding="utf-8")) == payload
         for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
             assert forbidden not in report + technical
         assert not validation["flags"]
@@ -925,3 +934,14 @@ def test_deployment_ocr_packages_and_startup_status_are_explicit(caplog):
         assert package in caplog.text
     footer = next(component for component in demo.config["components"] if component["type"] == "html")
     assert "OCR : indisponible" in footer["props"]["value"]
+
+
+def test_anomaly_digest_keeps_codes_and_locations_only():
+    export = {
+        "flags": [{"code": "corroborated_line_amount_mismatch", "severity": "avertissement",
+                   "location": "Ligne 3", "printed": "369.07", "expected": "396.07"}],
+        "passed": [], "not_verified": [],
+    }
+    assert anomaly_digest(export) == [
+        {"code": "corroborated_line_amount_mismatch", "location": "Ligne 3"}]
+    assert anomaly_digest({}) == []

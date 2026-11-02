@@ -49,6 +49,12 @@ class Validation:
         }
 
 
+def anomaly_digest(export: dict) -> list[dict]:
+    """What a validation export may say in a log: which check failed and where, never the amounts."""
+    return [{"code": flag.get("code"), "location": flag.get("location")}
+            for flag in (export or {}).get("flags") or []]
+
+
 def rounded(value: Decimal) -> Decimal:
     with localcontext() as context:
         context.prec = max(50, len(value.as_tuple().digits) + abs(value.adjusted()) + 4)
@@ -591,26 +597,46 @@ def _human_field_name(path: str) -> str:
 
 def render_report(evidence: DocumentEvidence, validation: Validation, statuses: dict[str, str],
                   technical_errors: list[str], *, available: bool = True, insufficient: bool = False,
-                  suggestions: dict | None = None, model_info: dict | None = None) -> str:
+                  suggestions: dict | None = None, model_info: dict | None = None,
+                  source_size: tuple[int, int] | None = None) -> str:
+    from ocr_quality import quality_hint
+
     insufficient = insufficient or bool(evidence.quality_issues) or (
         evidence.source_kind in {"ocr", "mixed"} and not evidence.ocr_cross_checked
     )
     title = f"Analyse de la facture {evidence.invoice_number}" if evidence.invoice_number else "Analyse de la facture"
-    verified = sum(value in {"valide", "récupéré (corroboré par OCR)"} for value in statuses.values())
-    to_check = max(0, len(statuses) - verified)
+    verified = sum(value == "valide" for value in statuses.values())
+    recovered = sum(value == "récupéré (corroboré par OCR)" for value in statuses.values())
+    to_check = max(0, len(statuses) - verified - recovered)
     anomalies = [flag for flag in validation.flags if flag.severity in {"erreur", "avertissement"}]
     information = [flag for flag in validation.flags if flag.severity == "information"]
     reading_issue = reading_issue_category(evidence)
+    hint = quality_hint(evidence, source_size)
     if anomalies:
         verdict = f"⚠️ {len(anomalies)} anomalie(s) dans la facture"
-    elif to_check:
-        verdict = f"⚠️ Lecture incomplète : {to_check} champs à vérifier"
+    elif not statuses or hint or to_check:
+        verdict = (
+            f"⚠️ Lecture incomplète : {to_check} champs à vérifier"
+            if to_check else "⚠️ Lecture incomplète"
+        )
+    elif recovered:
+        verdict = (
+            f"✅ Lecture cohérente : {verified} champs vérifiés, "
+            f"{recovered} récupéré{'s' if recovered > 1 else ''} sur {len(statuses)}"
+        )
     else:
         verdict = f"✅ Facture cohérente : {verified} champs vérifiés sur {len(statuses)}"
     lines = [f"**{verdict}**"]
-    if reading_issue == "layout":
+    if hint == "low_quality":
         lines.append(
-            "**Mise en page non reconnue : le texte est lisible, mais le tableau n’a pas pu être interprété.**"
+            "**Tableau attendu mais illisible : l’image est peut-être trop petite ou trop peu nette. "
+            "Les champs vérifiés restent affichés ; les lignes manquantes ne sont pas inventées. "
+            "Importez une image plus nette ou le PDF original (scan ≥ 300 dpi).**"
+        )
+    elif hint == "layout":
+        lines.append(
+            "**Mise en page non reconnue : le texte est lisible, mais le tableau attendu n’a pas pu être interprété. "
+            "Les champs vérifiés restent affichés ; les lignes non vérifiées restent vides.**"
         )
     elif reading_issue == "blur":
         lines.append(
@@ -688,7 +714,11 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
         lines.append("### Points non vérifiés")
         lines.extend(f"- {message}" for message in points_non_verifies)
     uncertain_label = f"{to_check} champ incertain" if to_check <= 1 else f"{to_check} champs incertains"
-    lines.append(f"**{verified} champs vérifiés dans le document ; {uncertain_label}.**")
+    counts = [f"{verified} champs vérifiés dans le document"]
+    if recovered:
+        counts.append(f"{recovered} récupéré{'s' if recovered > 1 else ''}")
+    counts.append(uncertain_label)
+    lines.append("**" + " ; ".join(counts) + ".**")
     if to_check:
         lines.append("Valeur non recoupée : à vérifier manuellement.")
     if suggestions:

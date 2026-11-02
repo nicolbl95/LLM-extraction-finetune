@@ -2,13 +2,18 @@
 
 import logging
 import re
+import time
 
 from invoice_evidence import UnreadableOCR, from_tsv, invoice_number_from_text
 from ocr_consensus import build_consensus
+from ocr_fast_path import attempt_fast_path, fast_path_enabled
 from ocr_preprocessing import deskew, transform
 from ocr_quality import assess_ocr
 from ocr_config import OCR_CONFIG
 from ocr_budget import ProcessingBudget
+import table_geometry
+import table_recovery
+import table_shadow
 
 LOGGER = logging.getLogger(__name__)
 FAMILIES = OCR_CONFIG.families
@@ -40,6 +45,7 @@ def table_crop(data, prepared, reader):
 
 def recover_image(image, reader, *, budget=None):
     budget = budget or ProcessingBudget()
+    started = time.perf_counter()
     budget.remaining()
     rotated, angle = deskew(image)
     budget.remaining()
@@ -58,6 +64,43 @@ def recover_image(image, reader, *, budget=None):
         readings[family].append(evidence)
         completed[family].add(psm)
         budget.remaining()
+
+    def record_ocr_metadata(evidence):
+        evidence.ocr_pages = 1
+        evidence.preprocessing_used = list(readings)
+        return evidence
+
+    def observe(evidence):
+        """Shadow reconstruction (diagnostic) then optional recovery; both OFF by default."""
+        evidence = table_shadow.observe(
+            evidence, readings, rotated_size=rotated.size, prepared=prepared_images,
+            reader=reader, budget=budget,
+        )
+        evidence = table_recovery.recover(
+            evidence, readings, rotated_size=rotated.size, prepared=prepared_images)
+        return table_geometry.recover(
+            evidence, readings, rotated_size=rotated.size, prepared=prepared_images)
+
+    fast_outcome = None
+    fast_metadata = None
+    if fast_path_enabled():
+        def fast_reader(prepared, psm, label):
+            return from_tsv(reader(prepared, psm))
+
+        fast_outcome = attempt_fast_path(first_readings, prepared_images, fast_reader)
+        fast_metadata = fast_outcome.record(time.perf_counter() - started)
+        LOGGER.info(
+            "OCR fast path %s: %s; calls=%d; decision=%.3fs",
+            "accepted" if fast_outcome.accepted else "rejected",
+            fast_outcome.reason,
+            fast_metadata["calls"],
+            fast_metadata["elapsed_seconds"],
+        )
+        if fast_outcome.accepted:
+            evidence = record_ocr_metadata(fast_outcome.evidence)
+            evidence.fast_path = fast_metadata
+            return observe(evidence)
+
     primary = assess_ocr(first_readings[0], first_readings[1])
     has_invoice_heading = any(
         re.search(r"^\s*(?:invoice|facture)(?!\s+(?:date|total))\b", line.text, re.I)
@@ -70,18 +113,19 @@ def recover_image(image, reader, *, budget=None):
     if has_invoice_heading and needs_header_confirmation and not primary.quality_issues:
         primary.quality_issues.append("Numéro de facture non lu.")
 
-    def record_ocr_metadata(evidence):
-        evidence.ocr_pages = 1
-        evidence.preprocessing_used = list(readings)
-        return evidence
-
     if not primary.quality_issues:
-        return record_ocr_metadata(primary)
+        evidence = record_ocr_metadata(primary)
+        if fast_metadata is not None:
+            evidence.fast_path = fast_metadata
+        return observe(evidence)
     # assess_ocr adds refusal annotations; consensus needs the original evidence.
     for evidence in first_readings:
         evidence.quality_issues = []
         evidence.issues = []
-    header_candidates = []
+    header_candidates = (
+        list(fast_outcome.header_candidates)
+        if fast_outcome is not None and confirm_header else []
+    )
     for family in FAMILIES:
         budget.remaining()
         if family == "scale3" and rotated.width * rotated.height * 9 > OCR_CONFIG.max_pixels:
@@ -103,6 +147,8 @@ def recover_image(image, reader, *, budget=None):
                 ) else None
             )
             if confirm_header and header_psm is not None:
+                if len(header_candidates) == 2:
+                    continue
                 crop = prepared.crop(
                     (0, 0, prepared.width, max(1, int(prepared.height * .22)))
                 )
@@ -129,4 +175,7 @@ def recover_image(image, reader, *, budget=None):
     consensus = build_consensus(readings, confidence=CONFIDENCE)
     if confirmed_invoice_number is not None:
         consensus.invoice_number = confirmed_invoice_number
-    return record_ocr_metadata(consensus)
+    evidence = record_ocr_metadata(consensus)
+    if fast_metadata is not None:
+        evidence.fast_path = fast_metadata
+    return observe(evidence)

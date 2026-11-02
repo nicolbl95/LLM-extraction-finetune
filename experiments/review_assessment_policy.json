@@ -1,0 +1,173 @@
+{
+ "policy_id": "review-assessment-p1",
+ "version": "1.0.0",
+ "frozen_at_utc": "2026-10-31T23:02:55+00:00",
+ "status": "frozen-before-implementation",
+ "source_research": {
+  "structural_gate": ".venv/contract-1/structural_gate.py",
+  "structural_gate_sha256": "31618717e94124717492b709bc6e84f9af2acad22417c57a9ea4cf3bfcbcc758",
+  "frozen_replay": ".venv/contract-1/contract-replay-structural.json",
+  "frozen_replay_sha256": "c87faa2221c15989e11b625de5b631583f5df825c8a60562e81ac568dea1def2",
+  "signal_analysis_sha256": "78d25bd9e17b7ed3de5a2f0ccbd81fe6429425ec9a007581168d8268bbbb6f4f"
+ },
+ "inputs": {
+  "evidence": "Mapping with text, lines[{text,confidence,page,box}], supplier, supplier_explicit, invoice_date, totals{total_ht,total_ttc,total_candidate}, rows[{description,cells}], quality_issues",
+  "raw_payload": "Model JSON with supplier_name, invoice_date, total_ht, total_ttc, line_items[{description,quantity,unit_price,total_ht}]",
+  "strict_result": "Mapping with payload (verified-only JSON) and statuses (path -> status string or {status})"
+ },
+ "verified_statuses": [
+  "vérifié",
+  "valide",
+  "récupéré (corroboré par ocr)"
+ ],
+ "constants": {
+  "description_completeness_ratio": 0.6,
+  "description_line_min_confidence": null,
+  "row_line_min_matching_numbers": 2,
+  "row_line_total_word_guard": "reject a numeric row line containing 'total' when fewer than 3 row numbers match",
+  "supplier_line_max_words": 12,
+  "supplier_line_must_contain_no_digits": true,
+  "quantity_equals_unit_price_rejects": true,
+  "numeric_line_tolerance": "0.02",
+  "number_parsing": "strip spaces/NBSP; both comma and dot: last separator decimal; comma only with 3 trailing digits = thousands; otherwise comma decimal"
+ },
+ "proposal_gate": {
+  "row_identity": [
+   "Build row numbers from raw quantity, unit_price, total_ht when non-null.",
+   "Find the best description OCR line by min(word coverage, raw/prefix length ratio).",
+   "If that line contains at least 2 of the row numbers, it is the row line.",
+   "Otherwise choose the evidence line with the most row-number matches; require at least 2.",
+   "Reject a chosen numeric line containing 'total' when fewer than 3 row numbers match.",
+   "If no row line, the row is not proposed."
+  ],
+  "description": {
+   "requires": "row line exists; best description line is the same object as the row line; raw description contains every word of the OCR line description prefix and is at least as long",
+   "reject_reasons": ["row_line_not_found", "row_attribution_conflict", "incomplete_description"],
+   "proposal_reason": "ocr_complete_description"
+  },
+  "line_numeric": {
+   "requires": "row line exists and the normalized value occurs on that OCR line",
+   "total_ht_guard": "reject if the value equals any evidence total_ht, total_ttc or total_candidate",
+   "quantity_guard": "reject quantity if it equals the same row's unit_price",
+   "reject_reasons": ["row_line_not_found", "not_on_row_line", "global_total_as_line", "quantity_equals_unit_price"],
+   "proposal_reason": "ocr_row_line"
+  },
+  "supplier": {
+   "requires": "no documentary supplier contradiction; value matches a documentary line of at most 12 words with no digits, or matches evidence.supplier",
+   "reject_reasons": ["contradicted_supplier", "supplier_not_found"],
+   "proposal_reasons": ["ocr_supplier_line", "ocr_supplier_evidence_supplier"]
+  },
+  "date": {
+   "requires": "no documentary date contradiction; ISO date occurs in OCR text as numeric day/month/year, ISO, or month-name form",
+   "reject_reasons": ["contradicted_date", "date_not_found"],
+   "proposal_reason": "ocr_date"
+  },
+  "top_totals": {
+   "total_ht": [
+    "value in evidence.totals.total_ht -> propose labelled_ht",
+    "value in total_ttc or total_candidate -> reject ttc_as_ht",
+    "value in OCR numbers -> propose missing_label with label_conflict",
+    "otherwise reject not_in_document"
+   ],
+   "total_ttc": [
+    "value in total_ttc -> propose labelled_ttc",
+    "value in total_ht -> reject ht_as_ttc",
+    "value in total_candidate -> propose unqualified_total with label_conflict",
+    "value in OCR numbers -> propose missing_label with label_conflict",
+    "otherwise reject not_in_document"
+   ]
+  }
+ },
+ "missing_rule": {
+  "supplier_name": "missing_printed if evidence.supplier is non-empty; otherwise absent",
+  "invoice_date": "missing_printed if evidence.invoice_date is non-empty; otherwise absent",
+  "total_ht": "missing_printed if evidence.totals.total_ht is non-empty; otherwise absent",
+  "total_ttc": "missing_printed if evidence.totals.total_ttc or total_candidate is non-empty; otherwise absent",
+  "line_fields": "missing_printed only when evidence.rows contains that row and the field has a documentary cell/description; otherwise absent",
+  "principle": "absent is used when documentary evidence cannot establish that a printable value exists; the assessment never asserts a printed value from model output alone"
+ },
+ "verification_conflict": {
+  "rule": "If strict status is verified and both strict and raw values are non-null and differ, keep status verified, include model_value, set verification_conflict=true and review_required=true.",
+  "effect": "The existing verified value is never silently replaced or redefined; the conflict stays visible for diagnostics."
+ },
+ "serialization": {
+  "strict": "Return a deep copy of the existing strict payload unchanged. No new keys.",
+  "review": "Deep copy existing primary fields, add mode=review_assisted, schema_version=2.1, field_assessments keyed by path, review_summary counts, and verification_conflicts count.",
+  "primary_fields": ["supplier_name", "invoice_date", "total_ht", "total_ttc", "line_items"],
+  "invariant": "Proposed values never appear in primary fields. Field assessments carry status, value/model_value, evidence, reason, checks, review_required, verification_conflict and row identity."
+ },
+ "reason_codes": [
+  "final_status",
+  "ocr_complete_description",
+  "ocr_row_line",
+  "ocr_supplier_line",
+  "ocr_supplier_evidence_supplier",
+  "ocr_date",
+  "labelled_ht",
+  "labelled_ttc",
+  "unqualified_total",
+  "missing_label",
+  "row_line_not_found",
+  "row_attribution_conflict",
+  "incomplete_description",
+  "not_on_row_line",
+  "global_total_as_line",
+  "quantity_equals_unit_price",
+  "contradicted_supplier",
+  "supplier_not_found",
+  "contradicted_date",
+  "date_not_found",
+  "ttc_as_ht",
+  "ht_as_ttc",
+  "not_in_document",
+  "no_model_value",
+  "no_evidence"
+ ],
+ "frozen_results": {
+  "scope": "six new-layout documents",
+  "overall": {
+   "fields": 104,
+   "verified_total": 8,
+   "verified_correct": 8,
+   "verified_incorrect": 0,
+   "proposed_total": 68,
+   "proposed_correct": 64,
+   "proposed_incorrect": 4,
+   "proposed_precision": 0.9412,
+   "rejected_total": 24,
+   "rejected_correct": 23,
+   "rejected_incorrect": 1,
+   "missing_printed": 3,
+   "absent": 1,
+   "visible_total": 76,
+   "visible_correct": 72,
+   "visible_incorrect": 4,
+   "visible_precision": 0.9474,
+   "visible_coverage": 0.7308
+  },
+  "rows": {
+   "truth_rows": 20,
+   "full_rows_same_index": 6,
+   "numeric_rows_same_index": 12,
+   "description_rows_same_index": 12,
+   "proposed_row_fields_same_index": 55,
+   "proposed_row_fields_misattributed": 0,
+   "proposed_row_fields_incorrect": 3
+  },
+  "documents": {
+   "sumup-avoir": {"verified_correct": 2, "proposed_correct": 2, "proposed_incorrect": 0, "rejected_correct": 4, "rejected_incorrect": 0, "missing_printed": 3, "absent": 1},
+   "photographer": {"verified_correct": 4, "proposed_correct": 9, "proposed_incorrect": 1, "rejected_correct": 2, "rejected_incorrect": 0, "missing_printed": 0, "absent": 0},
+   "consulting": {"verified_correct": 1, "proposed_correct": 17, "proposed_incorrect": 1, "rejected_correct": 12, "rejected_incorrect": 1, "missing_printed": 0, "absent": 0},
+   "retail": {"verified_correct": 1, "proposed_correct": 12, "proposed_incorrect": 2, "rejected_correct": 1, "rejected_incorrect": 0, "missing_printed": 0, "absent": 0},
+   "service": {"verified_correct": 0, "proposed_correct": 14, "proposed_incorrect": 0, "rejected_correct": 2, "rejected_incorrect": 0, "missing_printed": 0, "absent": 0},
+   "travel": {"verified_correct": 0, "proposed_correct": 10, "proposed_incorrect": 0, "rejected_correct": 2, "rejected_incorrect": 0, "missing_printed": 0, "absent": 0}
+  }
+ },
+ "non_goals": [
+  "No model or OCR calls.",
+  "No threshold optimization against the six development documents.",
+  "No production wiring, API/UI change, flag activation, commit, push or deployment.",
+  "No promotion of a proposal to verified because its value appears in OCR text.",
+  "No derived value presented as a printed field."
+ ]
+}

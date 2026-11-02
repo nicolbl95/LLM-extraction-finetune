@@ -86,7 +86,9 @@ def test_deadline_after_first_read_stops_all_additional_work():
     assert calls == [4]
 
 
-def test_clear_first_pair_never_runs_extra_families():
+def test_clear_first_pair_never_runs_extra_families(monkeypatch):
+    monkeypatch.delenv("INVOICE_OCR_FAST_PATH", raising=False)
+
     def parsed(data):
         return from_text(TEXT)
     with patch("ocr_recovery.from_tsv", side_effect=parsed), \

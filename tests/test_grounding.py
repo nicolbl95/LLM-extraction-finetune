@@ -17,8 +17,8 @@ from invoice_grounding import (
 
 
 def replay_cases():
-    cases = json.loads((ROOT / "tests/fixtures/invoice_model_errors.json").read_text())
-    rows = {row["id"]: row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text().splitlines())}
+    cases = json.loads((ROOT / "tests/fixtures/invoice_model_errors.json").read_text(encoding="utf-8"))
+    rows = {row["id"]: row for row in map(json.loads, (ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines())}
     for case in cases:
         row = rows[case["id"]]
         raw = copy.deepcopy(row["output"])
@@ -463,7 +463,7 @@ def test_accounting_negatives_do_not_change_tax_percent_sign_or_lose_credit_sign
 
 def test_sixty_reference_texts_keep_only_documented_values():
     from evaluate_grounding import flatten
-    for line in (ROOT / "data/test.jsonl").read_text().splitlines():
+    for line in (ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         evidence = from_text(row["input"], locale=row["locale"])
         result = reconcile(evidence, [read_model(json.dumps(row["output"]))])
@@ -477,3 +477,72 @@ def test_sixty_reference_texts_keep_only_documented_values():
             assert result.payload == row["output"], row["id"]
             assert not result.failed_rows, row["id"]
             assert not result.global_failure, row["id"]
+
+def supplier_evidence(name, *, explicit):
+    evidence = from_text(
+        "Supplier: Acme Ltd\nInvoice date: 2026-10-22\nCurrency: GBP\n"
+        "Description | Quantity | Net unit price | Net amount\n"
+        "Service | 2 | 10 | 20\n"
+        "Subtotal (net): GBP 20\nVAT (0%): GBP 0.00\nInvoice total: GBP 20",
+        locale="en-GB",
+    )
+    evidence.supplier = name
+    evidence.supplier_raw = name
+    evidence.supplier_is_explicit = explicit
+    evidence.source_kind = "consensus"
+    return evidence
+
+
+def test_inferred_supplier_is_never_verified_by_model_agreement():
+    # Benchmark regression: every OCR family read the stylised logo as "Fast Photohgraphy", so the
+    # name is implicit and wrong; the model echoing it must not turn it into a verified value.
+    evidence = supplier_evidence("Fast Photohgraphy", explicit=False)
+    model = simple_model()
+    model["supplier_name"] = "Fast Photohgraphy"
+    result = reconcile(evidence, [model])
+    assert result.payload["supplier_name"] == "Fast Photohgraphy"
+    assert result.statuses["supplier_name"] == RECOVERED
+
+
+def test_model_spelling_never_replaces_the_documentary_name():
+    evidence = supplier_evidence("Fast Photohgraphy", explicit=False)
+    model = simple_model()
+    model["supplier_name"] = "Fast Photography"
+    result = reconcile(evidence, [model])
+    assert result.payload["supplier_name"] == "Fast Photohgraphy"
+    assert result.statuses["supplier_name"] == RECOVERED
+
+
+def test_explicit_supplier_agreement_stays_verified():
+    evidence = supplier_evidence("Acme Ltd", explicit=True)
+    result = reconcile(evidence, [simple_model()])
+    assert result.payload["supplier_name"] == "Acme Ltd"
+    assert result.statuses["supplier_name"] == VALID
+
+
+def test_explicit_supplier_variant_keeps_the_ocr_spelling():
+    evidence = supplier_evidence("Acme Ltd", explicit=True)
+    model = simple_model()
+    model["supplier_name"] = "ACME LIMITED"
+    result = reconcile(evidence, [model])
+    assert result.payload["supplier_name"] == "Acme Ltd"
+    assert result.statuses["supplier_name"] == RECOVERED
+
+
+def test_explicit_supplier_verification_tolerates_case_and_accents():
+    evidence = supplier_evidence("Société Générale", explicit=True)
+    model = simple_model()
+    model["supplier_name"] = "SOCIETE GENERALE"
+    result = reconcile(evidence, [model])
+    assert result.payload["supplier_name"] == "Société Générale"
+    assert result.statuses["supplier_name"] == VALID
+
+
+def test_unresolved_supplier_names_stay_null_even_when_the_model_proposes_one():
+    evidence = supplier_evidence("Acme Ltd", explicit=True)
+    evidence.supplier = None
+    evidence.supplier_raw = None
+    result = reconcile(evidence, [simple_model()])
+    assert result.payload["supplier_name"] is None
+    # No documentary source: the field is either neutralised or reported as not read.
+    assert result.statuses["supplier_name"] in {NULL, UNVERIFIED}

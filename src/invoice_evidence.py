@@ -19,6 +19,80 @@ def folded(text: str) -> str:
     return " ".join("".join(c for c in text if not unicodedata.combining(c)).casefold().split())
 
 
+LABEL_PREFIX = " \t:;,.‘’'\"`´£€$–—-"
+
+
+def normalized_label(text: str) -> str:
+    return folded(text).lstrip(LABEL_PREFIX)
+
+
+TOTAL_HT_LABEL = re.compile(
+    r"^(?:sous.total(?: ht)?|subtotal(?: \(net\))?|total excl\. tax|total ht|"
+    r"total hors taxes?|total avant taxes?|total\s*\(\s*ht\s*\)|net total|net a payer ht)\s*:?\s*"
+)
+TOTAL_TTC_LABEL = re.compile(
+    r"^(?:net a payer ttc|invoice total|total ttc|grand total|total due|"
+    r"total tva comprises?|total toutes taxes comprises?|amount payable|"
+    r"total\s*\(\s*ttc\s*\))\s*:?\s*"
+)
+INVOICE_TOTAL_LABELS = {"total_ht": TOTAL_HT_LABEL, "total_ttc": TOTAL_TTC_LABEL}
+UNQUALIFIED_TOTAL_LABEL = re.compile(r"^total(?:\s*:\s*|\s+)")
+TOTAL_QUALIFIER = re.compile(r"\b(?:ht|ttc|vat|tva)\b")
+
+
+def total_label_field(text: str) -> str | None:
+    """Which invoice total a line declares in its own label, or None for any other line.
+
+    Only explicit wording decides: bare "total", "montant HT/TTC" and table column labels stay
+    unqualified and must be resolved by structure or arithmetic, never by the label alone.
+    """
+    label = normalized_label(text)
+    for key, pattern in INVOICE_TOTAL_LABELS.items():
+        if pattern.match(label):
+            return key
+    if UNQUALIFIED_TOTAL_LABEL.match(label) and not TOTAL_QUALIFIER.search(label):
+        return "total_candidate"
+    return None
+
+
+LINE_TOTAL_HEADER = re.compile(r"\b(?:amount|total|line total|amount due)\b")
+LINE_TOTAL_EXCLUDED = re.compile(
+    r"\b(?:gross|brut|subtotal|tax|vat|tva|discount|remise)\b"
+)
+
+
+def is_line_total_header(text: str, *, at_start: bool = False) -> bool:
+    normalized = folded(text)
+    if LINE_TOTAL_EXCLUDED.search(normalized):
+        return False
+    matcher = LINE_TOTAL_HEADER.match if at_start else LINE_TOTAL_HEADER.search
+    return bool(matcher(normalized))
+
+
+DATE_EXCLUDED_LABEL = re.compile(
+    r"\b(?:due\s+date|delivery\s+date|payment\s+date|paid\s+date|"
+    r"date\s+d['’]?\s*echeance|date\s+de\s+(?:livraison|paiement)|echeance)\b"
+)
+DATE_INVOICE_LABEL = re.compile(
+    r"\b(?:invoice\s+date|issue\s+date|date\s+of\s+invoice|date\s+of\s+issue|"
+    r"date\s+de\s+facture|facture\s+date|date)\b"
+)
+
+
+def is_invoice_date_line(text: str) -> bool:
+    normalized = folded(text)
+    if DATE_EXCLUDED_LABEL.search(normalized):
+        return False
+    return bool(DATE_INVOICE_LABEL.search(normalized))
+
+
+REPLACEMENT_CHARACTER = "\ufffd"
+
+
+def has_replacement_character(text: str | None) -> bool:
+    return REPLACEMENT_CHARACTER in (text or "")
+
+
 LETTER = re.compile(r"[^\W\d_]", re.UNICODE)
 
 
@@ -30,7 +104,7 @@ def description_is_usable(text: str | None) -> bool:
     exporting a false value.
     """
     stripped = (text or "").strip()
-    if not LETTER.search(stripped):
+    if has_replacement_character(stripped) or not LETTER.search(stripped):
         return False
     try:
         parse_number(stripped)
@@ -128,8 +202,13 @@ class TableRow:
     cells: dict[str, list[Number]]
     line: TextLine
     description_confident: bool = True
+    # Document ordinal of the row (page-relative vertical order). None for production rows, whose
+    # order is already the OCR line order.
+    row_index: int | None = None
+    row_evidence: dict | None = None
     family_votes: dict[str, dict[Decimal, tuple[str, ...]]] = field(default_factory=dict)
     corroborated_amount_mismatch: tuple[Decimal, Decimal] | None = None
+    secondary_description: str = ""
 
 
 @dataclass(frozen=True)
@@ -165,6 +244,11 @@ class DocumentEvidence:
     ocr_pages: int = 0
     ocr_elapsed_seconds: float = 0
     preprocessing_used: list[str] = field(default_factory=list)
+    fast_path: dict | None = None
+    table_shadow: dict | None = None
+    # "recovered" marks rows injected by the experimental table recovery: they are evidence for
+    # their own cells, never a completed production reconstruction of the table.
+    rows_provenance: str | None = None
 
 
 def reading_issue_category(evidence: DocumentEvidence) -> str | None:
@@ -296,34 +380,208 @@ def _header_matches(key: str, text: str, *, at_start: bool = False) -> bool:
     return bool(pattern and matcher(pattern, normalized))
 
 
-def _implicit_supplier_candidate_lines(lines: list[TextLine]) -> list[TextLine]:
-    client_markers = [
-        index for index, line in enumerate(lines)
-        if re.search(r"\b(?:bill\s+to|facture\s+a|facture\s+au|client|customer)\b", folded(line.text))
-    ]
-    stop = min(client_markers) if client_markers else len(lines)
-    header_lines = lines[:stop]
-    table_indices = [
-        index for index, line in enumerate(header_lines)
-        if all(_header_matches(key, line.text) for key in HEADERS)
-    ]
-    if table_indices:
-        header_lines = header_lines[:table_indices[0]]
-    candidates = []
-    excluded = re.compile(
-        r"\b(?:facture|invoice|date|currency|devise|order|commande|siret|iban|vat|tva|"
-        r"subtotal|total|bill|payment|echeance)\b",
-        re.I,
+SUPPLIER_LEGAL_SUFFIX = re.compile(
+    r"\b(?:ltd|limited|llc|inc|corp(?:oration)?|plc|llp|gmbh|sas|sarl|sa|bv|ag|co)\b\.?",
+    re.I,
+)
+SUPPLIER_CLIENT_MARKER = re.compile(
+    r"\b(?:bill\s+to|ship\s+to|sold\s+to|deliver\s+to|invoice\s+to|"
+    r"facture\s+a|facture\s+au)\b|^\s*(?:customer|client)\s*:"
+)
+SUPPLIER_CONTACT_MARKER = re.compile(
+    r"\b(?:contact|email|e-mail|phone|telephone|tel|www)\b|@"
+)
+SUPPLIER_EXCLUDED_LINE = re.compile(
+    r"\b(?:facture|invoice|date|currency|devise|order|commande|siret|iban|vat|tva|"
+    r"subtotal|total|bill|payment|echeance|due|delivery|sincerely|thank|"
+    r"registration|bank|account|email|phone|tel|website)\b"
+)
+CONTINUATION_EXCLUDED = re.compile(
+    r"\b(?:payment|invoice|facture|total|subtotal|vat|tva|tax|bank|iban|"
+    r"sort\s+code|account|due|delivery|date|reference|terms|sincerely|"
+    r"thank|email|phone|tel|website|registration|siret)\b"
+)
+SUPPLIER_STOPWORDS = {
+    "the", "and", "for", "from", "with", "you", "your", "our", "this", "that",
+    "thank", "trusting", "sending", "dear", "please", "payment", "invoice",
+    "is", "are", "we", "to", "of", "by", "at", "as", "a", "an",
+    "issued", "signature", "sincerely",
+}
+
+# Form labels, section headings and table vocabulary: never a displayed supplier name.
+SUPPLIER_CONTEXT_STOPWORDS = {
+    "adresse", "adresses", "livraison", "facturation", "conditions", "description",
+    "specification", "specifications", "incoterm", "pays", "origine", "coordonnees",
+    "details", "siege", "merci", "signature", "devis", "reference", "nombre",
+    "colis", "poids", "taille", "quantite", "unite", "unites", "informations",
+    "renseignements", "modalites", "remarque",
+}
+
+ADDRESS_STREET = re.compile(
+    r"\b\d{1,4}\s*(?:bis|ter|quater)?\s*,?\s*"
+    r"(?:rue|avenue|av\.?|boulevard|bd\.?|chemin|route|place|impasse|all[ée]e|quai|cours|"
+    r"street|st\.?|road|rd\.?|lane|drive|way|high\s+street|park|square|gardens?)\b",
+    re.IGNORECASE,
+)
+ADDRESS_POSTAL = re.compile(r"\b\d{4,5}\s+[A-ZÀ-ÖØ-Ý]")
+ADDRESS_UK_POSTCODE = re.compile(r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b")
+ADDRESS_HOUSE_NUMBER = re.compile(r"^\s*\d{1,4}\b")
+ADDRESS_PLACE_NAME = re.compile(r"\b[A-ZÀ-ÖØ-Ý][\w'’.-]*")
+
+
+@dataclass(frozen=True)
+class SupplierCandidate:
+    name: str
+    line: TextLine
+    tier: int
+
+
+def _looks_table_header(line: TextLine) -> bool:
+    return all(
+        _header_matches(key, line.text)
+        or key == "total_ht" and is_line_total_header(line.text)
+        for key in HEADERS
     )
-    for line in header_lines:
+
+
+def _client_line_indices(lines: list[TextLine]) -> set[int]:
+    excluded = set()
+    for start, line in enumerate(lines):
+        if not SUPPLIER_CLIENT_MARKER.search(folded(line.text)):
+            continue
+        end = next(
+            (index for index in range(start + 1, len(lines)) if _looks_table_header(lines[index])),
+            len(lines),
+        )
+        excluded.update(range(start, end))
+    return excluded
+
+
+def _contact_line_indices(lines: list[TextLine]) -> set[int]:
+    markers = [
+        index for index, line in enumerate(lines)
+        if SUPPLIER_CONTACT_MARKER.search(folded(line.text))
+    ]
+    excluded = set()
+    for index in markers:
+        excluded.update(range(max(0, index - 2), min(len(lines), index + 3)))
+    return excluded
+
+
+def _clean_supplier_name(name: str) -> str | None:
+    name = " ".join(name.split()).strip(" ,;:.-–—")
+    name = re.sub(r"\b(?:Ltd|Limited)\.?$", "Ltd", name, flags=re.I)
+    words = name.split()
+    if not 2 <= len(words) <= 4:
+        return None
+    if any(re.search(r"[\d@|/]", word) for word in words):
+        return None
+    normalized_words = {folded(word).strip(".,") for word in words}
+    if normalized_words & {"logo", "invoice", "facture", "bill", "customer", "client"}:
+        return None
+    if normalized_words & SUPPLIER_STOPWORDS:
+        return None
+    return name or None
+
+
+def _legal_supplier_name(line: TextLine) -> str | None:
+    for match in SUPPLIER_LEGAL_SUFFIX.finditer(line.text):
+        prefix = line.text[:match.start()]
+        words = re.findall(r"[^\W\d_][\w'’.-]*", prefix, re.UNICODE)
+        selected = []
+        for word in reversed(words):
+            normalized = folded(word).strip(".-")
+            if not normalized or normalized in SUPPLIER_STOPWORDS or any(char.isdigit() for char in word):
+                break
+            selected.insert(0, word)
+            if len(selected) == 4:
+                break
+        if selected:
+            suffix = match.group().strip(".,;:")
+            name = _clean_supplier_name(" ".join([*selected, suffix]))
+            if name:
+                return name
+    return None
+
+
+def _address_shaped(text: str) -> bool:
+    # Streets, postcodes and house numbers only count when a capitalised place name follows:
+    # "36 Terrick gt 2N" is an address, "3 tailles disponibles" and "75002 exemplaires" are prose.
+    return bool(
+        ADDRESS_STREET.search(text)
+        or ADDRESS_UK_POSTCODE.search(text)
+        or (ADDRESS_POSTAL.search(text) and ADDRESS_PLACE_NAME.search(text))
+        or (ADDRESS_HOUSE_NUMBER.match(text) and ADDRESS_PLACE_NAME.search(text))
+    )
+
+
+def _supplier_context_ok(text: str) -> bool:
+    """Reject labels and prose before they can become a displayed supplier name."""
+    stripped = text.strip()
+    if not stripped or stripped[-1] in ".:;!?" or ":" in stripped or "," in stripped:
+        return False
+    if re.search(r"\betc\b", stripped, re.IGNORECASE):
+        return False
+    words = stripped.split()
+    if not any(word[:1].isupper() for word in words):
+        return False
+    return not {folded(word).strip(".,;:") for word in words} & SUPPLIER_CONTEXT_STOPWORDS
+
+
+def _address_supplier_name(line: TextLine) -> str | None:
+    text = " ".join(line.text.split()).strip()
+    parts = re.split(r"\s*[,–—]\s*|\s+-\s+", text, maxsplit=1)
+    if len(parts) < 2:
+        return None
+    prefix, remainder = parts
+    if not _address_shaped(remainder) or not _supplier_context_ok(prefix):
+        return None
+    return _clean_supplier_name(prefix)
+
+
+def _supplier_candidates(lines: list[TextLine]) -> list[SupplierCandidate]:
+    client_lines = _client_line_indices(lines)
+    contact_lines = _contact_line_indices(lines)
+    header_index = next(
+        (index for index, line in enumerate(lines) if _looks_table_header(line)),
+        None,
+    )
+    candidates = []
+    for index, line in enumerate(lines):
+        if index in client_lines:
+            continue
         text = " ".join(line.text.split()).strip()
+        if not text or SUPPLIER_EXCLUDED_LINE.search(folded(text)):
+            continue
+        if not line.tokens or any(token.confidence < OCR_CONFIG.confidence for token in line.tokens):
+            continue
+        legal = _legal_supplier_name(line)
+        if legal:
+            candidates.append(SupplierCandidate(legal, line, 3))
+            continue
+        if index in contact_lines or (header_index is not None and index > header_index):
+            continue
+        address = _address_supplier_name(line)
+        if address:
+            candidates.append(SupplierCandidate(address, line, 2))
+            continue
         words = text.split()
-        if not 2 <= len(words) <= 4 or re.search(r"[\d@|:]", text) or excluded.search(folded(text)):
-            continue
-        if not re.fullmatch(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*(?:\s+[^\W\d_]+(?:[-'’][^\W\d_]+)*){1,3}", text, re.UNICODE):
-            continue
-        candidates.append(line)
+        if 2 <= len(words) <= 4 and _supplier_context_ok(text):
+            name = _clean_supplier_name(text)
+            if name:
+                candidates.append(SupplierCandidate(name, line, 1))
     return candidates
+
+
+def _implicit_supplier_name(lines: list[TextLine]) -> str | None:
+    candidates = _supplier_candidates(lines)
+    for tier in (3, 2, 1):
+        names = {candidate.name for candidate in candidates if candidate.tier == tier}
+        if len(names) == 1:
+            return next(iter(names))
+        if names:
+            return None
+    return None
 
 
 def union_box(tokens: list[Token]) -> tuple[float, float, float, float]:
@@ -418,6 +676,10 @@ def combine_pages(pages: list[DocumentEvidence], *, contains_ocr: bool = False) 
             row.line.page = index
             row.cells = {key: [replace(number, page=index) for number in values] for key, values in row.cells.items()}
         result.rows.extend(evidence.rows)
+        if evidence.rows:
+            result.rows_provenance = (
+                "recovered" if all(source.rows_provenance == "recovered"
+                                   for source in pages if source.rows) else None)
         for key, values in evidence.totals.items():
             result.totals.setdefault(key, []).extend(replace(number, page=index) for number in values)
         result.numbers.extend(replace(number, page=index) for number in evidence.numbers)
@@ -435,6 +697,12 @@ def combine_pages(pages: list[DocumentEvidence], *, contains_ocr: bool = False) 
             family for family in evidence.preprocessing_used
             if family not in result.preprocessing_used
         )
+        if evidence.table_shadow:
+            if result.table_shadow is None:
+                result.table_shadow = {
+                    "flag": evidence.table_shadow.get("flag"), "enabled": True, "pages": [],
+                }
+            result.table_shadow["pages"].append(dict(evidence.table_shadow, page=index))
     result.text = "\n\n".join(texts)
     result.supplier = next(iter(suppliers)) if len(suppliers) == 1 else None
     result.supplier_raw = result.supplier
@@ -477,15 +745,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 key = re.sub(r"\b(?:ltd|limited)\.?$", "ltd", folded(name))
                 key = re.sub(r"\bs[. ]*a[. ]*s\.?$", "sas", key)
                 suppliers[key] = name
-        is_due_date = bool(re.search(
-            r"\b(?:due\s+date|date\s+d[' ]?echeance|date\s+de\s+(?:livraison|paiement)|echeance)\b",
-            normalized,
-        ))
-        has_invoice_date_label = bool(
-            re.search(r"\b(?:invoice\s+date|date\s+de\s+facture)\b", normalized)
-            or re.search(r"\bdate\b", normalized)
-        )
-        if has_invoice_date_label and not is_due_date:
+        if is_invoice_date_line(line.text):
             date_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", line.text)
             local_date = re.search(r"\b(\d{2})[./](\d{2})[./](\d{4})\b", line.text)
             if date_match:
@@ -503,6 +763,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 elif month_first and month_first[1] in MONTHS:
                     dates.add(f"{month_first[3]}-{MONTHS[month_first[1]]:02d}-{int(month_first[2]):02d}")
         amounts = number_tokens(line.text, line, locale)
+        label = normalized_label(line.text)
         if re.match(r"^(?:remise|discount|rabais)\b.*:", normalized) and not re.search(
             r"inclu|appliqu|already applied", normalized,
         ):
@@ -510,15 +771,14 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             if len(money) == 1:
                 evidence.discounts.append(money[0])
                 continue
-        tax_label = re.match(r"^(?:tva|vat|sales tax)\s*(?:\(|:|\d)", normalized)
+        tax_label = re.match(r"^(?:tva|vat|sales tax)\s*(?:\(|:|\d)", label)
         total_field = None
-        if re.match(r"^(?:sous.total(?: ht)?|subtotal(?: \(net\))?|total excl\. tax|total ht|net total|net a payer ht)\s*:?\s*", normalized):
+        if TOTAL_HT_LABEL.match(label):
             total_field = "total_ht"
-        elif re.match(r"^(?:net a payer ttc|invoice total|total ttc|grand total|total due)\s*:?\s*", normalized):
+        elif TOTAL_TTC_LABEL.match(label):
             total_field = "total_ttc"
         unqualified_total = bool(
-            re.match(r"^total(?:\s*:\s*|\s+)", normalized)
-            and not re.search(r"\b(?:ht|ttc|vat|tva)\b", normalized)
+            UNQUALIFIED_TOTAL_LABEL.match(label) and not TOTAL_QUALIFIER.search(label)
         )
         if tax_label or total_field or unqualified_total:
             columns, starts = {}, {}
@@ -550,6 +810,8 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 evidence.rows.append(TableRow(inline[0].strip(), inline_values, line))
                 continue
         matches = {key: _header_matches(key, line.text) for key in HEADERS}
+        if not matches["total_ht"]:
+            matches["total_ht"] = is_line_total_header(line.text)
         if all(matches.values()):
             if "|" in line.text:
                 cells = line.text.split("|")
@@ -558,6 +820,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                     indexes = [
                         index for index, cell in enumerate(cells)
                         if _header_matches(key, cell)
+                        or key == "total_ht" and is_line_total_header(cell)
                     ]
                     if len(indexes) == 1:
                         columns[key] = indexes[0]
@@ -578,7 +841,9 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 for key, pattern in HEADERS.items():
                     for index in range(len(line.tokens)):
                         suffix = " ".join(token.text for token in line.tokens[index:])
-                        if _header_matches(key, suffix, at_start=True):
+                        if _header_matches(key, suffix, at_start=True) or (
+                            key == "total_ht" and is_line_total_header(suffix, at_start=True)
+                        ):
                             starts[key] = line.tokens[index].box[0]
                             break
                 for token in line.tokens:
@@ -627,6 +892,12 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             for key in ("quantity", "unit_price", "total_ht", *OPTIONAL_HEADERS)
         }
         description_cell = cell_texts.get("description", "")
+        if description_cell.strip() and has_replacement_character(description_cell):
+            evidence.issues.append(
+                "Colonne description corrompue (U+FFFD) : "
+                f"caractère non récupérable pour {line.text!r}."
+            )
+            continue
         if description_cell.strip() and not description_is_usable(description_cell):
             # A number where the description column is expected proves the header and the
             # data rows do not agree: keep the whole line unverified instead of guessing.
@@ -646,8 +917,22 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             ))
         elif evidence.rows and starts and cell_texts.get("description") and not any(values.values()):
             last = evidence.rows[-1]
-            if line.page == last.line.page and line.box[1] - last.line.box[3] < 20:
-                last.description += " " + cell_texts["description"]
+            description_start = starts.get("description")
+            description_text = cell_texts["description"]
+            if (
+                line.page == last.line.page
+                and description_start is not None
+                and line.tokens
+                and 0 <= line.box[1] - last.line.box[3] < 20
+                and abs(min(token.box[0] for token in line.tokens) - description_start) <= 8
+                and all(token.confidence >= 60 for token in line.tokens)
+                and description_is_usable(description_text)
+                and not has_replacement_character(description_text)
+                and not CONTINUATION_EXCLUDED.search(folded(description_text))
+            ):
+                last.secondary_description = " ".join(
+                    filter(None, (last.secondary_description, description_text))
+                )
     if len(suppliers) == 1:
         supplier = next(iter(suppliers.values()))
         evidence.supplier_raw = supplier
@@ -659,11 +944,10 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
     elif suppliers:
         evidence.issues.append("supplier_name : plusieurs fournisseurs incompatibles dans le document.")
     else:
-        candidates = _implicit_supplier_candidate_lines(lines)
-        candidate_names = {" ".join(line.text.split()) for line in candidates}
-        if len(candidate_names) == 1:
-            evidence.supplier_raw = next(iter(candidate_names))
-            evidence.supplier = evidence.supplier_raw
+        implicit = _implicit_supplier_name(lines)
+        if implicit:
+            evidence.supplier_raw = implicit
+            evidence.supplier = implicit
     if len(dates) == 1:
         candidate = next(iter(dates))
         try:

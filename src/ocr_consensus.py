@@ -7,7 +7,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from difflib import SequenceMatcher
 from itertools import product
 
-from invoice_evidence import DocumentEvidence, folded
+from invoice_evidence import (
+    DocumentEvidence, description_is_usable, folded, has_replacement_character,
+    is_invoice_date_line,
+)
+from invoice_validation import parse_date
 from ocr_config import OCR_CONFIG
 
 
@@ -142,23 +146,25 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
                 else:
                     relevant = [
                         line for line in evidence.lines
-                        if folded(line.text) == expected_name
+                        if expected_name in folded(line.text)
                     ]
             else:
                 relevant = [
                     line for line in evidence.lines
-                    if (
-                        "invoice date" in folded(line.text)
-                        or "date de facture" in folded(line.text)
-                        or (
-                            re.search(r"\bdate\b", folded(line.text))
-                            and not re.search(
-                                r"\b(?:due\s+date|date\s+d[' ]?echeance|date\s+de\s+(?:livraison|paiement)|echeance)\b",
-                                folded(line.text),
-                            )
-                        )
-                    )
+                    if is_invoice_date_line(line.text)
                 ]
+                if not relevant:
+                    return []
+                for line in relevant:
+                    for token in line.tokens:
+                        parsed, _ = parse_date(token.text, evidence.locale)
+                        if (
+                            parsed is not None
+                            and parsed.isoformat() == candidate
+                            and token.confidence >= confidence
+                        ):
+                            return [candidate]
+                return []
             if not relevant or any(token.confidence < confidence for line in relevant for token in line.tokens):
                 return []
             return [candidate]
@@ -200,12 +206,27 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
             for family, entries in readings.items()
         }
         descriptions = _agreed(
-            matches, lambda candidate: [candidate.description] if all(
-                token.confidence >= confidence for token in candidate.line.tokens
+            matches, lambda candidate: [candidate.description] if (
+                all(token.confidence >= confidence for token in candidate.line.tokens)
+                and not has_replacement_character(candidate.description)
             ) else [], folded, unanimous=True, prefer=_accent_count,
         )
         row.description = descriptions[0] if len(descriptions) == 1 else ""
         row.description_confident = bool(row.description)
+        secondary = _agreed(
+            matches,
+            lambda candidate: [candidate.secondary_description] if (
+                candidate.secondary_description
+                and description_is_usable(candidate.secondary_description)
+                and not has_replacement_character(candidate.secondary_description)
+            ) else [],
+            folded, unanimous=True, prefer=_accent_count,
+        )
+        if row.description_confident and len(secondary) == 1:
+            row.secondary_description = secondary[0]
+            row.description = f"{row.description} {secondary[0]}"
+        else:
+            row.secondary_description = ""
         for key in ("quantity", "unit_price", "total_ht"):
             candidates_for_family = lambda candidate: [
                     number for number in candidate.cells.get(key, [])
