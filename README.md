@@ -96,15 +96,42 @@ surapprentissage, sans garantir son absence.
 - **Fidélité au document :** une valeur imprimée lisible est conservée même
   si le calcul de la facture est faux ; l'anomalie est signalée séparément
   dans `validation.flags`, hors du schéma scoré. Lecture incertaine : `null`.
+- **Structures difficiles :** si les deux premières lectures ne trouvent aucune ligne,
+  une région de tableau bordé peut être relue deux fois après retrait des traits, avec
+  les coordonnées et les familles de prétraitement conservées. Les colonnes TTC/TVA
+  restent distinctes du HT : aucun montant net de ligne absent n'est calculé pour
+  remplir le JSON. Une ambiguïté de point décimal déjà observée peut déclencher au plus
+  deux lectures de cellule ; les deux doivent confirmer la même valeur documentaire.
+  Ces étapes partagent le budget OCR existant, sans relèvement des seuils ni des limites.
+- **Dates et identité :** les dates d'émission et d'échéance sont analysées séparément,
+  même lorsqu'elles partagent une ligne. Un jour supérieur à 12 établit l'ordre des dates
+  numériques indépendamment de la devise ; un conflit reste non résolu. Les régions
+  « Billed from » et « Billed to » sont séparées géométriquement. Aucune correction
+  floue d'un nom de fournisseur n'est autorisée. Une date OCR sans séparateurs n'est
+  interprétée que si ses chiffres permettent une seule date calendaire.
+- **Tableaux et libellés français :** les en-têtes « Titre du livre » et « Prix /
+  unitaire » sur deux lignes sont reconnus sans transformer les bordures OCR en
+  séparateurs de données PDF natifs. Les frais de livraison récapitulatifs ne
+  deviennent pas un article à quantité inventée. Un montant de ligne unique peut
+  rester récupéré si sa cellule est lisible et recoupée par deux familles, même
+  lorsqu'une référence voisine est mal lue. Une locale numérique française ou le
+  symbole `$` seul ne prouve ni EUR, ni USD, ni CAD ; les totaux nets ambigus restent
+  non confirmés. Les avertissements compacts partagent la décision documentaire de
+  devise avec la validation : aucun code monétaire n'est affiché si la devise reste
+  non vérifiée. Ces règles n'assouplissent aucun seuil OCR.
+- **Exemples et cache :** les trois copies des factures d'exemple restent disponibles
+  pendant la vie de l'application. Les fichiers importés et les résultats JSON restent
+  soumis au nettoyage temporaire ; ils ne sont pas protégés par cette règle.
 - **Seconde passe ciblée :** uniquement les lignes non résolues et leur texte
-  OCR, jamais toute la facture. Si l'OCR suffit, aucune seconde inférence.
+  OCR, jamais toute la facture. Si l'OCR suffit, aucune seconde inférence. Une valeur
+  absente des preuves ne justifie pas une nouvelle passe destinée à la deviner.
   Budget ZeroGPU dynamique (15–60 s initialement, 8–30 s pour la correction),
   repli OCR sans GPU et message dédié en cas de quota ; traces complètes en logs.
-- **Rapport avant le JSON :** anomalies de la facture avec justification,
-  contrôles réussis, puis résumé des lectures récupérées/neutralisées.
-  Statuts par champ et erreurs du modèle dans « Détails techniques » replié,
-  jamais confondus avec une erreur de la facture. Hash et disponibilité OCR
-  dans le pied de page. Les réponses brutes restent séparées de l'export sécurisé.
+- **Statut compact avant le JSON :** anomalies actionnables, propositions incertaines
+  séparées du résultat et limitations regroupées lorsqu'elles ont la même cause.
+  Le nombre de lignes documentées n'est pas présenté comme une preuve d'exhaustivité.
+  Les réponses brutes, contrôles détaillés et versions restent disponibles dans les
+  diagnostics internes, sans panneau technique ou comparaison dupliquant le JSON.
   Les métriques historiques du modèle ne sont pas remplacées par les résultats OCR.
 - **Contrôles documentaires :** noms répétés, échéance/conditions de paiement,
   devise/pays, taxes, doublons et identifiants. Calibration sur 60 références :
@@ -123,6 +150,26 @@ python src/evaluate_grounding.py --replays tests/fixtures/invoice_model_errors.j
 # Appels réels sur les images ; échoue si le modèle ne peut pas générer.
 python src/diagnose_pipeline.py --require-real-model
 ```
+
+Pour restaurer les PNG synthétiques absents avant la suite hors ligne :
+
+```powershell
+& .\.venv\Scripts\python.exe scripts\prepare_offline_test_assets.py
+& .\.venv\Scripts\python.exe -m pytest -q
+```
+
+La restauration vérifie l'identité des 600 enregistrements avec `data/dataset.jsonl`,
+ne réécrit aucun JSON cible et ne remplace aucun PNG existant. Les chemins
+`data/templates/*.png` sont des références de provenance : le générateur dessine
+les neuf compositions sans lire ces images externes. Leur artwork historique
+n'est pas recréé ni présenté comme récupéré.
+
+`constraints-hf.txt` fixe les versions OCR/Gradio observées sur le staging Linux
+Python 3.12 ; il ne constitue pas un lockfile transitif complet. Les versions
+Torch/Transformers/PEFT/bitsandbytes restent bornées par `requirements.txt` tant
+qu'un inventaire exact du runtime Linux n'a pas été validé. Les révisions immuables
+du modèle/adaptateur doivent être consignées et la variable
+`INVOICE_ADAPTER_REVISION` planifiée séparément avant un déploiement reproductible.
 
 Le test réel opt-in est exclu par défaut. Il nécessite des poids **locaux**
 explicitement configurés, les dépendances d'inférence et le matériel adapté :
@@ -364,76 +411,66 @@ ou l'omettre des deux runs ; le rapport v3 synthétique ne précise pas ce régl
 - Les factures importées et le JSON exporté restent dans le cache temporaire de l'application ;
   un nettoyage supprime les fichiers de plus de dix minutes (au plus tard en deux passages).
 - Par défaut et sur Hugging Face : aucune base de données ni stockage permanent de révision.
-  Le stockage SQLite local facultatif est décrit ci-dessous. Aucun service d'inférence tiers :
+  Les modules SQLite conservés sont décrits ci-dessous. Aucun service d'inférence tiers :
   le modèle s'exécute dans l'espace Hugging Face, les poids sont publics.
 - Les journaux techniques ne contiennent ni texte de facture ni montant : seuls les codes de
   contrôle et leur emplacement sont écrits.
 - N'importez pas de document que vous ne pouvez pas partager : tant qu'un fichier est en cache,
   son URL Gradio (aléatoire, non authentifiée) est accessible à toute personne qui la connaît.
+- Sur un Espace Hugging Face public, les fichiers importés sont transmis à l'infrastructure
+  Hugging Face pour traitement. N'y soumettez que des factures synthétiques, publiques ou que
+  vous êtes explicitement autorisé à partager. Les fichiers peuvent rester dans le cache Gradio
+  jusqu'au nettoyage périodique ou au redémarrage ; aucune suppression immédiate n'est garantie.
 
-## Révision humaine locale
+## Interface simplifiée
 
-L'interface de révision humaine Phase 2A est désactivée par défaut. Pour l'activer localement,
-définissez `INVOICE_REVIEW_UI=1` et `INVOICE_REVIEW_EDIT=1`. Les corrections, décisions de
-proposition et confirmations restent dans l'état Gradio de la session en cours ; elles ne sont
-ni enregistrées durablement ni exportées. Accepter une proposition ne confirme pas le champ.
-Le JSON strict de l'extraction reste distinct et inchangé.
+La démo propose uniquement les exemples **France · EUR**, **Royaume-Uni · GBP** et
+**États-Unis · USD**, l'import PDF/image, l'extraction, le JSON strict et son téléchargement,
+le statut compact et les performances réelles disponibles (modèle/repli OCR, passes,
+temps OCR et génération). Les autres factures de test restent dans
+le dépôt et peuvent toujours être importées comme fichiers.
+
+Les échecs d'inférence conservent une catégorie interne sans contenu de facture
+(`model_info.failures` : phase, catégorie, étape observable, type d'exception).
+Un arrêt du worker ZeroGPU ne prouve pas une erreur de chargement ou de génération :
+la cause interne reste inconnue si le service ne la renvoie pas. Le repli OCR reste
+séparé d'une génération modèle réussie ; aucun nouvel essai GPU automatique n'est ajouté.
+
+L'en-tête redondant des exemples est masqué avec les paramètres du composant Gradio,
+sans CSS spécifique. Les valeurs non confirmées restent `null`. Les limites de lecture
+et les identifiants invalides restent visibles sans répéter les contrôles réussis.
+
+Les panneaux de révision P1 et de correction humaine ne sont plus affichés, même avec
+`INVOICE_REVIEW_UI=1` ou `INVOICE_REVIEW_EDIT=1`. Cette suppression concerne aussi le
+lanceur local. Les modules de révision/correction, les tests et la politique P1 gelée sont
+conservés ; leur absence de l'interface n'assouplit ni les exigences de preuve ni le
+schéma du JSON strict.
+
+Le rapport local [PRODUCT-REVIEW-34](docs/PRODUCT_REVIEW_34.md) distingue les résultats
+OCR réels, les propositions modèle simulées et les cas encore partiellement résolus.
 
 ### Brouillons SQLite — Windows local uniquement
 
-Le stockage est **désactivé par défaut**. Pour l'utiliser depuis la racine du projet :
+Les modules de stockage sont conservés dans le dépôt, mais l'interface simplifiée n'expose
+aucune commande de brouillon. `INVOICE_REVIEW_PERSIST=1` et le lanceur
+`python -m app.local_review` sont refusés avant le démarrage du serveur ou la préparation
+du stockage. Un dossier ou une base `.local-review` existant reste inchangé.
 
-```powershell
-$env:INVOICE_REVIEW_UI = "1"
-$env:INVOICE_REVIEW_EDIT = "1"
-$env:INVOICE_REVIEW_PERSIST = "1"
-.\.venv\Scripts\python.exe -m app.local_review
-```
+Pour référence, SQLite n'est pas chiffré et n'est pas destiné à un usage multi-utilisateur ou
+réseau. Le lanceur local conserve ses contrôles loopback, d'origine et d'accès aux fichiers ;
+les environnements Hugging Face Spaces, publics ou privés, restent interdits. Aucun tunnel,
+proxy, partage Gradio ou transfert de port n'est pris en charge.
 
-Le lanceur dédié impose `127.0.0.1`, `share=False`, des contrôles de requêtes locales
-(hôte, origine, en-têtes de transfert) et le blocage des fichiers de stockage dans Gradio.
-L'interface ordinaire refuse le drapeau de persistance. Les environnements Hugging Face
-Spaces, publics **ou privés**, sont refusés ; leur disque ordinaire peut être éphémère.
-Ne configurez **aucun tunnel, proxy, partage Gradio ou transfert de port** : les contrôles
-applicatifs ne prouvent pas l'absence d'une redirection réseau extérieure.
+### Déploiement Hugging Face — préparation seulement
 
-Les données sont conservées dans `.local-review/drafts.sqlite3`, exclu de Git, séparé du
-cache Gradio et accessible uniquement au compte Windows courant (DACL vérifiée).
-**SQLite n'est pas chiffré.** Un administrateur, un compte compromis ou une copie de
-sauvegarde peut donner accès aux données. Le stockage n'est pas destiné à un usage
-multi-utilisateur ou réseau.
+La persistance `.local-review` est strictement locale et doit rester désactivée sur les
+Espaces (`INVOICE_REVIEW_PERSIST` absent). Les anciens drapeaux `INVOICE_REVIEW_UI` et
+`INVOICE_REVIEW_EDIT` ne réactivent pas les panneaux retirés. Le matériel effectif se choisit
+dans les paramètres de l'Espace :
+`suggested_hardware` dans le YAML n'est qu'une recommandation.
 
-Seuls les boutons **Enregistrer**, **Ouvrir** et **Supprimer** provoquent des opérations
-de persistance explicites : aucun enregistrement à chaque modification ou fermeture.
-Avant le premier enregistrement, l'utilisateur doit accepter le stockage local des
-données sensibles. Le brouillon conserve :
-
-- les instantanés strict/P1/modèle et les preuves/provenances capturées ;
-- l'empreinte SHA-256, la taille et le type du document source ;
-- les corrections, décisions de proposition, identités des lignes et confirmations historiques ;
-- les versions de compatibilité et le numéro de révision.
-
-Les images/PDF originaux, aperçus, chemins temporaires, clés/jetons HMAC d'exécution et
-résultats de validation mis en cache ne sont **jamais** enregistrés dans SQLite.
-Le JSON strict reste séparé des corrections humaines. Un brouillon incomplet ou
-arithmétiquement incohérent peut être enregistré ; il n'est pas pour autant confirmé,
-finalisé ou exportable en comptabilité.
-
-Après un rafraîchissement ou redémarrage, utilisez **Ouvrir**, puis **Rattacher le document
-source original** et **Vérifier**. Sans ce document, le brouillon est consultable mais les
-modifications/confirmations sont bloquées. Le contenu exact doit correspondre au SHA-256 :
-un nom identique ne suffit pas. Aucune nouvelle OCR/inférence n'est effectuée pour restaurer.
-Les confirmations compatibles sont revalidées avec de nouveaux jetons d'exécution.
-Un changement de politique/validation exige une nouvelle confirmation ; les décisions
-historiques restent distinctes. Les instantanés incompatibles ne sont jamais fusionnés.
-
-Les révisions concurrentes sont refusées au lieu d'écraser une sauvegarde plus récente.
-La suppression exige une case de confirmation et retire la copie enregistrée ainsi que
-son instantané inutilisé, **sans effacer la session courante**. Une ancienne session ne
-peut pas recréer silencieusement le brouillon supprimé.
-
-La suppression logique ne garantit pas l'effacement physique des journaux SQLite,
-supports SSD ou sauvegardes. Aucun service de sauvegarde/récupération n'est fourni.
-Pour une copie cohérente, arrêtez l'application avant de sauvegarder le dossier protégé ;
-protégez aussi cette copie. Une base corrompue, une version non prise en charge ou des
-permissions insuffisantes sont signalées sans changement automatique d'emplacement.
+Le code utilise déjà `@spaces.GPU`, une durée dynamique et le préchargement conditionnel
+sur Space. ZeroGPU peut réduire le coût mais impose quotas, files d'attente et compatibilité
+de versions ; `INVOICE_MODULE_PRELOAD=1` active le chargement anticipé prévu pour ce mode.
+Vérifier le cache froid et les versions PyTorch/bitsandbytes avant toute publication.
+Ces notes ne signifient pas que la version locale est déployée.
