@@ -57,3 +57,9 @@ results/real-scans*.json
 
 # Local single-user human-review drafts (sensitive, not encrypted)
 .local-review/
+
+# Captures de revue produit contenant le texte OCR verbatim des factures reelles (prive)
+/PRODUCT_REVIEW_64_REPRODUCTION_RESULTS.json
+/INVOICE_BENCHMARK_MANIFEST.json
+/PRODUCT_REVIEW_63_DIAGNOSTIC_CAPTURES.json
+/PRODUCT_REVIEW_62_REGRESSION_MATRIX.json
