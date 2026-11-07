@@ -8,7 +8,10 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 from difflib import SequenceMatcher
 from itertools import combinations
 
-from invoice_evidence import DocumentEvidence, MONTHS, folded, reading_issue_category
+from invoice_evidence import (
+    DocumentEvidence, document_date_locale, document_date_readings, folded, parse_document_date,
+    reading_issue_category,
+)
 
 CENT = Decimal(".01")
 TOLERANCE = Decimal(".02")
@@ -64,6 +67,22 @@ def rounded(value: Decimal) -> Decimal:
 def unique_value(numbers: list) -> Decimal | None:
     values = {number.value for number in numbers}
     return next(iter(values)) if len(values) == 1 else None
+
+
+def document_currency(evidence: DocumentEvidence) -> str | None:
+    """Return a uniquely printed currency, never one inferred from numeric locale."""
+    if not evidence.locale:
+        return None
+    printed_codes = set(re.findall(r"\b(?:EUR|GBP|USD|CAD)\b", evidence.text))
+    if printed_codes:
+        return next(iter(printed_codes)) if len(printed_codes) == 1 else None
+    unambiguous_symbols = [
+        code for symbol, code in (("€", "EUR"), ("£", "GBP"))
+        if symbol in evidence.text
+    ]
+    if len(unambiguous_symbols) == 1 and "$" not in evidence.text:
+        return unambiguous_symbols[0]
+    return None
 
 
 def luhn(number: str) -> bool:
@@ -125,29 +144,7 @@ def identifier_checks(text: str) -> list[tuple[str, str, bool]]:
 
 
 def parse_date(text: str, locale: str | None) -> tuple[date | None, str | None]:
-    iso = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", text)
-    local = re.search(r"\b(\d{1,2})([./])(\d{1,2})\2(\d{4})\b", text)
-    normalized = folded(text)
-    day_first = re.search(r"\b(\d{1,2}) ([a-z]+) (\d{4})\b", normalized)
-    month_first = re.search(r"\b([a-z]+) (\d{1,2}),? (\d{4})\b", normalized)
-    parts = None
-    style = None
-    if iso:
-        parts, style = tuple(map(int, iso.groups())), "AAAA-MM-JJ"
-    elif local:
-        first, separator, second, year = local.groups()
-        day, month = (second, first) if locale == "en-US" else (first, second)
-        parts, style = (int(year), int(month), int(day)), f"numérique ({separator})"
-    elif day_first and day_first[2] in MONTHS:
-        parts, style = (int(day_first[3]), MONTHS[day_first[2]], int(day_first[1])), "mois en lettres"
-    elif month_first and month_first[1] in MONTHS:
-        parts, style = (int(month_first[3]), MONTHS[month_first[1]], int(month_first[2])), "mois en lettres"
-    if parts is None:
-        return None, None
-    try:
-        return date(*parts), style
-    except ValueError:
-        return None, style
+    return parse_document_date(text, locale)
 
 
 def canonical_name(name: str) -> str:
@@ -169,7 +166,7 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
         line for line in evidence.lines
         if cross_checked or all(token.confidence >= 60 for token in line.tokens)
     ]
-    evidence = replace(evidence, text="\n".join(line.text for line in certain_lines))
+    evidence = replace(evidence, text="\n".join(line.text for line in certain_lines), lines=certain_lines)
 
     def issue(code, severity, location, printed, expected, difference, reason):
         result.flags.append(Flag(code, severity, location, str(printed), str(expected), str(difference), reason))
@@ -203,6 +200,34 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
             if len(compatible) == 1:
                 values["quantity"] = compatible[0]
         certain = cross_checked or all(token.confidence >= 60 for token in row.line.tokens)
+        if certain and values["total_ht"] is not None:
+            printed_rows.append(values["total_ht"])
+        if cross_checked and values["total_ht"] is None:
+            roles = ("quantity", "unit_price", "tax_rate", "tax_amount", "gross_amount")
+            quantity, price, rate, tax, gross = (
+                unique_value(row.cells.get(key, [])) for key in roles
+            )
+            if (
+                quantity is not None and price is not None and rate is not None
+                and tax is not None and gross is not None
+                and all(
+                    len(row.family_votes.get(key, {})) == 1
+                    and all(len(set(families)) >= 2 for families in row.family_votes[key].values())
+                    for key in roles
+                )
+            ):
+                net_calculation = rounded(quantity * price)
+                expected_tax = rounded(net_calculation * rate / 100)
+                if (
+                    abs(net_calculation + expected_tax - gross) <= TOLERANCE
+                    and abs(expected_tax - tax) > TOLERANCE
+                ):
+                    issue(
+                        "corroborated_line_tax_mismatch", "avertissement", f"Ligne {index + 1} — TVA",
+                        tax, expected_tax, abs(expected_tax - tax),
+                        "La TVA imprimée diffère du calcul quantité × prix HT × taux ; "
+                        "le montant TTC imprimé confirme ce calcul. Le HT calculé n'est pas ajouté au JSON.",
+                    )
         if not certain or any(value is None for value in values.values()):
             result.not_verified.append(
                 f"Ligne {index + 1} : calcul non vérifiable, une ou plusieurs valeurs imprimées "
@@ -211,7 +236,6 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
             continue
         quantity, price, amount = (values[key] for key in ("quantity", "unit_price", "total_ht"))
         expected = rounded(quantity * price)
-        printed_rows.append(amount)
         location = f"Ligne {index + 1} « {row.description} »"
         if abs(expected - amount) > TOLERANCE:
             bad_lines.append(index + 1)
@@ -419,14 +443,13 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
                   if kind == "siret" else
                   "La structure ou la clé imprimée ne satisfait pas le contrôle ; identifiant à vérifier.")
     _country(evidence, result, issue)
-    if evidence.locale:
-        currency = {"fr-FR": "EUR", "en-GB": "GBP", "en-US": "USD"}.get(evidence.locale)
-        if currency and not any(
-            message.startswith(f"Devise {currency} cohérente avec le préfixe")
-            for message in result.passed
-        ):
-            result.passed.append(f"Devise lue : {currency}.")
-    else:
+    currency = document_currency(evidence)
+    if currency and not any(
+        message.startswith(f"Devise {currency} cohérente avec le préfixe")
+        for message in result.passed
+    ):
+        result.passed.append(f"Devise lue : {currency}.")
+    elif currency is None:
         result.not_verified.append("Devise : non vérifiable, aucune devise unique n’a été lue.")
     if evidence.source_kind == "consensus":
         corroborated_sirets = {
@@ -434,8 +457,18 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
         }
         retained_flags = []
         for flag in result.flags:
-            if flag.code == "corroborated_line_amount_mismatch":
+            if flag.code in {"corroborated_line_amount_mismatch", "corroborated_line_tax_mismatch"}:
                 retained_flags.append(flag)
+                continue
+            if (
+                flag.code == "subtotal"
+                and any(row.corroborated_amount_mismatch is not None for row in evidence.rows)
+                and all(
+                    len(row.family_votes.get("total_ht", {})) == 1
+                    for row in evidence.rows
+                )
+            ):
+                retained_flags.append(replace(flag, severity="avertissement"))
                 continue
             if flag.code == "identifier_siret" and flag.printed in corroborated_sirets:
                 retained_flags.append(flag)
@@ -474,18 +507,11 @@ def _names(evidence, issue):
 def _dates(evidence, result, issue, today):
     dates = {}
     styles = set()
-    for line in evidence.text.replace(" ; ", "\n").splitlines():
-        normalized = folded(line)
-        due_label = re.search(
-            r"\b(?:due\s+date|date\s+d[' ]?echeance|date\s+de\s+(?:livraison|paiement)|echeance)\b",
-            normalized,
-        )
-        kind = "échéance" if due_label else (
-            "facture" if re.search(r"\b(?:invoice\s+date|date\s+de\s+facture|date)\b", normalized) else None
-        )
-        if kind is None:
-            continue
-        value, style = parse_date(line, evidence.locale)
+    readings = document_date_readings(evidence.lines)
+    date_locale = document_date_locale(readings, evidence.locale)
+    for label, line, _ in readings:
+        kind = "échéance" if label == "due" else "facture"
+        value, style = parse_date(line, date_locale)
         if style:
             styles.add(style)
         if value:

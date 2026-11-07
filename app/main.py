@@ -1,6 +1,7 @@
 """Gradio demo: invoice document -> text/OCR -> fine-tuned LoRA -> Invoice."""
 
 import json
+import html
 import logging
 import math
 import os
@@ -42,7 +43,8 @@ from invoice_evidence import (
     DocumentEvidence, EvidenceText, Token, UnreadableOCR, combine_pages, from_text,
     from_tokens, reading_issue_category,
 )
-from invoice_grounding import read_model, run_grounded_inference
+from invoice_grounding import RECOVERED, VALID, read_model, run_grounded_inference
+from invoice_validation import document_currency
 import invoice_review
 import invoice_review_edit
 from invoice_review_store import StoreError, persistence_requested
@@ -54,6 +56,8 @@ LOGGER = logging.getLogger(__name__)
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 10
 MAX_PIXELS = 25_000_000
+OCR_REQUESTED_LANGUAGES = ("fra", "eng")
+_OCR_LANGUAGES_CACHE: dict[tuple[str, str | None], frozenset[str]] = {}
 PROCESSING_STATUS = "Analyse des données, détection des erreurs"
 REGIONAL_EXAMPLES = [
     ("France · EUR", (ROOT / "app/examples/france.png").resolve()),
@@ -67,7 +71,7 @@ ADDITIONAL_EXAMPLES = [
      (ROOT / "tests/fixtures/us-line3-amount-error.png").resolve()),
     ("Modèle vierge à compléter", (ROOT / "app/examples/modele-vierge.png").resolve()),
 ]
-EXAMPLES = [*REGIONAL_EXAMPLES, *ADDITIONAL_EXAMPLES]
+EXAMPLES = REGIONAL_EXAMPLES
 DEFAULT_ADAPTER = (
     ROOT / "results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter"
 )
@@ -128,13 +132,15 @@ def checked_path(filename: str | None) -> Path:
     if not path.is_file():
         cached_path = path.resolve()
         cache_root = Path(gr.utils.get_upload_folder()).resolve()
-        for _, example_path in EXAMPLES:
+        for _, example_path in (*REGIONAL_EXAMPLES, *ADDITIONAL_EXAMPLES):
+            if not example_path.is_file():
+                continue
             expected_cache_path = (
                 cache_root
                 / processing_utils.hash_file(example_path)
                 / example_path.name
             ).resolve()
-            if cached_path == expected_cache_path and example_path.is_file():
+            if cached_path == expected_cache_path:
                 path = example_path
                 break
         else:
@@ -169,6 +175,20 @@ def check_pdf(document: pymupdf.Document) -> None:
         raise ValueError("Le PDF doit contenir entre 1 et 10 pages.")
 
 
+def sanitized_exception_detail(error: Exception) -> str:
+    detail = (
+        error.strerror
+        if isinstance(error, OSError) and error.strerror
+        else str(error)
+    )
+    detail = re.sub(
+        r"(?i)(?<![\w])(?:[a-z]:[\\/]|\\\\|/)[^'\"\r\n]+",
+        "<path>",
+        detail,
+    )
+    return detail[:240] or "No additional detail."
+
+
 def preview_document(filename: str | None):
     if not filename:
         return None, None, ""
@@ -184,8 +204,72 @@ def preview_document(filename: str | None):
             message = ""
         return image, None, message
     except (OSError, ValueError, RuntimeError, Image.DecompressionBombError) as exc:
-        LOGGER.exception("Invoice preview failed")
-        return None, None, f"Impossible de lire la facture : {exc}"
+        safe_validation_errors = {
+            "Formats acceptés : PDF, PNG et JPEG.",
+            "Le fichier n'est plus disponible : importez-le de nouveau.",
+            "Le fichier doit être non vide et ne pas dépasser 20 Mo.",
+            "Image ou page trop grande : limite de 25 mégapixels.",
+            "Les PDF protégés par mot de passe ne sont pas acceptés.",
+            "Le PDF doit contenir entre 1 et 10 pages.",
+        }
+        if isinstance(exc, ValueError):
+            reason = str(exc) if str(exc) in safe_validation_errors else "Fichier ou demande invalide."
+        elif isinstance(exc, RuntimeError):
+            reason = "Erreur technique lors de la lecture du document."
+        else:
+            reason = readable_read_failure(exc)
+        LOGGER.error(
+            "Invoice preview failed (%s): %s",
+            type(exc).__name__, sanitized_exception_detail(exc),
+        )
+        return None, None, f"Impossible de lire la facture : {reason}"
+
+
+def installed_ocr_languages(*, refresh: bool = False) -> frozenset[str]:
+    """Languages Tesseract can actually load, cached per installation, never per image."""
+    key = (str(pytesseract.pytesseract.tesseract_cmd or ""), os.environ.get("TESSDATA_PREFIX"))
+    if refresh or key not in _OCR_LANGUAGES_CACHE:
+        try:
+            _OCR_LANGUAGES_CACHE[key] = frozenset(pytesseract.get_languages(config=""))
+        except (OSError, RuntimeError, ValueError, pytesseract.TesseractError) as exc:
+            LOGGER.warning("Tesseract language listing failed (%s: %s)", type(exc).__name__, exc)
+            _OCR_LANGUAGES_CACHE[key] = frozenset()
+    return _OCR_LANGUAGES_CACHE[key]
+
+
+def ocr_language_plan(*, requested=OCR_REQUESTED_LANGUAGES, refresh: bool = False) -> dict:
+    """Split requested languages into what is actually usable, what is absent, and whether we fell back."""
+    installed = installed_ocr_languages(refresh=refresh)
+    requested = tuple(requested)
+    effective = tuple(language for language in requested if language in installed)
+    missing = tuple(language for language in requested if language not in installed)
+    return {
+        "requested": list(requested),
+        "effective": list(effective),
+        "missing": list(missing),
+        "fallback": bool(missing) and bool(effective),
+        "installed": sorted(installed),
+        "tessdata_prefix": os.environ.get("TESSDATA_PREFIX") or None,
+    }
+
+
+def require_ocr_languages(
+    *, requested=OCR_REQUESTED_LANGUAGES, require_all: bool = False, refresh: bool = False,
+) -> dict:
+    """Refuse an unusable language configuration; with require_all, refuse any missing required language."""
+    plan = ocr_language_plan(requested=requested, refresh=refresh)
+    if require_all and plan["missing"]:
+        raise RuntimeError(
+            f"Prérequis OCR manquant : {', '.join(plan['missing'])} absent"
+            f" (requises : {', '.join(plan['requested'])} ;"
+            f" installées : {', '.join(plan['installed']) or 'aucune'}"
+            f" ; tessdata : {plan['tessdata_prefix'] or 'défaut système'}).",
+        )
+    if not plan["effective"]:
+        raise RuntimeError(
+            "OCR indisponible : installez Tesseract et les langues fra/eng (voir packages.txt)."
+        )
+    return plan
 
 
 def ocr_image(image: Image.Image, *, budget: ProcessingBudget | None = None) -> str:
@@ -193,13 +277,21 @@ def ocr_image(image: Image.Image, *, budget: ProcessingBudget | None = None) -> 
     started = time.perf_counter()
     calls = 0
     check_pixels(image.width * 2, image.height * 2)
+    plan = require_ocr_languages()
+    if plan["missing"]:
+        LOGGER.warning(
+            "OCR language fallback: requested %s, effective %s, missing %s (tessdata prefix: %s)",
+            "+".join(plan["requested"]), "+".join(plan["effective"]),
+            "+".join(plan["missing"]), plan["tessdata_prefix"] or "system default",
+        )
+    language = "+".join(plan["effective"])
     def reader(prepared, psm):
         nonlocal calls
         calls += 1
         timeout = min(OCR_CONFIG.call_seconds, budget.remaining())
         try:
             data = pytesseract.image_to_data(
-                prepared, lang="fra+eng", config=f"--psm {psm}",
+                prepared, lang=language, config=f"--psm {psm}",
                 output_type=pytesseract.Output.DICT, timeout=timeout,
             )
         except RuntimeError as exc:
@@ -491,6 +583,7 @@ def run_extraction_ui(filename: str | None, diagnostics: dict | None = None):
     for payload, report in run_extraction(filename, diagnostics=diagnostics):
         if diagnostics:
             engine_available, _ = ocr_availability()
+            language_plan = ocr_language_plan()
             preprocessing = ", ".join(diagnostics.get("preprocessing_used", [])) or "aucun"
             read_reason = ""
             quality_reasons = " ".join(diagnostics.get("ocr_quality_issues", [])).casefold()
@@ -546,6 +639,16 @@ def run_extraction_ui(filename: str | None, diagnostics: dict | None = None):
             model_comparison = _model_comparison(
                 diagnostics.get("first_pass_raw", ""), payload, statuses,
             )
+            language_note = ""
+            if diagnostics.get("source_kind") in {"ocr", "consensus"}:
+                language_note = (
+                    f"\n- Langues de lecture : {'+'.join(language_plan['effective'])}."
+                    if not language_plan["missing"] else
+                    "\n- Langues de lecture : "
+                    f"{'+'.join(language_plan['requested'])} demandées ; "
+                    f"{'+'.join(language_plan['effective']) or 'aucune'} effectivement utilisées ; "
+                    f"absentes : {'+'.join(language_plan['missing'])}."
+                )
             details = (
                 "### Lecture du document\n"
                 f"- Outil de lecture de texte : {'disponible' if engine_available else 'indisponible'} ; "
@@ -553,7 +656,7 @@ def run_extraction_ui(filename: str | None, diagnostics: dict | None = None):
                 f"{diagnostics.get('ocr_lines', 0)} lignes lues ; "
                 f"{diagnostics.get('ocr_calls', 0)} lectures effectuées ; "
                 f"durée : {diagnostics.get('ocr_elapsed_seconds', 0):.2f} s."
-                + (f"\n- {read_reason}" if read_reason else "") + "\n\n"
+                + (f"\n- {read_reason}" if read_reason else "") + language_note + "\n\n"
                 "### Modèle\n"
                 f"- {model_state} ; passes demandées : {model_info.get('passes_requested', 0)} ; "
                 f"réussies : {model_info.get('passes_succeeded', 0)} ; "
@@ -579,7 +682,19 @@ def run_extraction_ui(filename: str | None, diagnostics: dict | None = None):
             details = ""
             advanced = ""
             first_pass_raw = ""
-        download = _download_json(payload) if payload is not None else None
+        download = None
+        if payload is not None:
+            try:
+                download = _download_json(payload)
+            except OSError as exc:
+                LOGGER.error(
+                    "Strict JSON download file could not be created (%s, errno=%s): %s",
+                    type(exc).__name__, exc.errno, sanitized_exception_detail(exc),
+                )
+                report += (
+                    "\n\nLe résultat est affiché, mais le téléchargement du JSON est "
+                    "indisponible. Réessayez plus tard."
+                )
         yield (
             payload, report, details, advanced, first_pass_raw,
             diagnostics.get("validation", {"flags": [], "passed": [], "not_verified": []}),
@@ -660,6 +775,330 @@ def _model_comparison(raw: str, payload: dict | None, statuses: dict[str, str]) 
     return "| Champ | Lu par le modèle | Retenu |\n|---|---|---|\n" + "\n".join(differences)
 
 
+def _summary_code(value: object) -> str:
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    text = text.replace("`", "'").replace("\r", " ").replace("\n", " ")
+    return f"`{html.escape(text)}`"
+
+
+def _flag_json_path(flag: dict) -> str | None:
+    code = str(flag.get("code", ""))
+    location = str(flag.get("location", ""))
+    line = re.search(r"\bLigne\s+(\d+)\b", location, re.I)
+    if line and code in {"corroborated_line_amount_mismatch", "line_arithmetic"}:
+        return f"line_items.{int(line.group(1)) - 1}.total_ht"
+    if line and code == "net_discount":
+        return f"line_items.{int(line.group(1)) - 1}.unit_price"
+    if line and code == "duplicate_line":
+        return f"line_items.{int(line.group(1)) - 1}.description"
+    if code == "subtotal":
+        return "total_ht"
+    if code == "tax_total":
+        return "total_ttc"
+    if code in {"date_invalid", "date_plausibility"} and "facture" in location.casefold():
+        return "invoice_date"
+    if code == "name_variant" and "fournisseur" in location.casefold():
+        return "supplier_name"
+    return None
+
+
+def _flag_json_disposition(flag: dict, payload: dict, statuses: dict[str, str]) -> str:
+    path = _flag_json_path(flag)
+    if path is None:
+        return "contrôle documentaire, sans modification du JSON."
+    value = _payload_field(payload, path)
+    status = statuses.get(path)
+    if value is None or status not in {VALID, RECOVERED}:
+        return "valeur non confirmée, exclue du JSON strict."
+    return "valeur confirmée conservée dans le JSON strict."
+
+
+def _reading_limitations(diagnostics: dict) -> list[str]:
+    limitations = []
+    if diagnostics.get("evidence_available") is False:
+        reasons = [
+            reason for reason in diagnostics.get("ocr_issues", [])
+            if not reason.startswith("Preuves OCR indisponibles")
+        ]
+        detail = reasons[0] if reasons else "lecture documentaire indisponible"
+        limitations.append(f"Lecture documentaire indisponible : {detail}")
+    category = diagnostics.get("ocr_issue_category")
+    if category == "layout":
+        limitations.append(
+            "Mise en page non reconnue : le tableau n'a pas pu être interprété."
+        )
+    elif category == "blur":
+        limitations.append("Image floue ou texte trop peu lisible ; certains champs restent incertains.")
+    elif category == "timeout":
+        limitations.append("Délai de lecture dépassé ; certains champs restent incertains.")
+    elif diagnostics.get("ocr_quality_issues"):
+        limitations.append("Lecture partielle : certains éléments n'ont pas pu être recoupés.")
+    evidence = diagnostics.get("evidence")
+    if (
+        diagnostics.get("source_kind") in {"ocr", "mixed"}
+        and evidence is not None
+        and not getattr(evidence, "ocr_cross_checked", False)
+    ):
+        limitations.append("Les preuves OCR n'ont pas toutes pu être recoupées.")
+    return list(dict.fromkeys(limitations))
+
+
+def _compact_validation_summary(payload: dict | None, diagnostics: dict, fallback: str) -> str:
+    if payload is None:
+        return fallback or "Lecture non résolue."
+
+    statuses = diagnostics.get("field_statuses") or {}
+    validation = diagnostics.get("validation") or {}
+    flags = [
+        flag for flag in validation.get("flags", [])
+        if flag.get("severity") in {"erreur", "avertissement"}
+        or flag.get("code") == "identifier_siret"
+    ]
+    not_verified = list(dict.fromkeys(validation.get("not_verified") or []))
+    limitations = _reading_limitations(diagnostics)
+    confirmed = sum(status in {VALID, RECOVERED} for status in statuses.values())
+    coverage = diagnostics.get("document_coverage") or {}
+    model_info = diagnostics.get("model_info") or {}
+    quota_unavailable = model_info.get("reason") == "quota"
+    line_items = payload.get("line_items") or []
+    no_product_lines = not any(
+        isinstance(item, dict)
+        and isinstance(item.get("description"), str)
+        and item["description"].strip()
+        for item in line_items
+    )
+    documented_rows = coverage.get("documented_rows")
+    total = len(statuses)
+    missing_rows = (
+        isinstance(documented_rows, int)
+        and documented_rows > len(payload.get("line_items", []))
+    )
+    if missing_rows:
+        total = max(total, 4 + 4 * documented_rows)
+    uncertain = [
+        path for path, status in statuses.items()
+        if status not in {VALID, RECOVERED}
+    ]
+    incomplete = bool(
+        not statuses or uncertain or not_verified or limitations or missing_rows
+        or diagnostics.get("evidence_available") is False or no_product_lines
+    )
+    if not flags and not incomplete:
+        summary = f"✅ **Extraction cohérente — {confirmed}/{total} champs recoupés**"
+        if documented_rows is not None and diagnostics.get("source_kind") in {"ocr", "consensus", "mixed"}:
+            summary += f"\n\n{documented_rows} lignes documentées ; exhaustivité de la lecture OCR non établie."
+        if quota_unavailable:
+            summary += (
+                "\n\nQwen indisponible (quota ZeroGPU) ; résultat fondé uniquement sur l'OCR."
+            )
+        return summary
+
+    if flags:
+        heading = f"Anomalies à vérifier — {confirmed}/{total} champs recoupés"
+    elif total:
+        heading = f"Vérification incomplète — {confirmed}/{total} champs recoupés"
+    else:
+        heading = "Vérification incomplète — aucun champ recoupé"
+    lines = [f"⚠️ **{heading}**"]
+    if quota_unavailable:
+        lines.append(
+            "- **Qwen indisponible** : quota ZeroGPU ; résultat fondé uniquement sur l'OCR."
+        )
+    if no_product_lines:
+        lines.append(
+            "- **Articles non reconnus** : aucune ligne de produit n'a pu être reconnue de façon fiable."
+        )
+    if documented_rows is not None:
+        lines.append(
+            f"- **Couverture** : {len(payload.get('line_items', []))}/{documented_rows} lignes documentées "
+            "présentes ; exhaustivité de la lecture non établie."
+        )
+
+    evidence = diagnostics.get("evidence")
+    unclassified_net_total = bool(
+        evidence is not None and payload.get("total_ht") is None
+        and payload.get("total_ttc") is not None
+        and not evidence.totals.get("total_ht") and not evidence.taxes
+    )
+    if unclassified_net_total:
+        not_verified = [
+            reason for reason in not_verified if not reason.startswith((
+                "Sous-total : non vérifiable, montant HT global absent",
+                "TVA par taux : non vérifiable, aucune ventilation",
+                "HT + TVA = TTC : non vérifiable, total HT, total TTC ou ventilation",
+            ))
+        ]
+        currency = document_currency(evidence)
+        currency_suffix = f" {currency}" if currency else ""
+        lines.append(
+            "- **Total HT non confirmé** : la facture indique un total de "
+            f"{_summary_code(payload['total_ttc'])}{currency_suffix} sans préciser le montant HT "
+            "ni la TVA applicable."
+        )
+
+    seen_flags = set()
+    flagged_paths = set()
+    for flag in flags:
+        key = tuple(str(flag.get(k, "")) for k in (
+            "code", "location", "printed", "expected", "difference",
+        ))
+        if key in seen_flags:
+            continue
+        seen_flags.add(key)
+        if flag.get("code") == "identifier_siret":
+            lines.append(
+                f"- **SIRET invalide** : le numéro {_summary_code(flag.get('printed'))} "
+                "ne passe pas la vérification de sa clé de contrôle. "
+                "Les champs du JSON restent vérifiés indépendamment."
+            )
+            continue
+        location = html.escape(str(flag.get("location") or "Champ à vérifier"))
+        parts = []
+        for key_name, label in (("printed", "imprimé"), ("expected", "attendu"),
+                                ("difference", "écart")):
+            value = flag.get(key_name)
+            if value not in (None, "") and str(value).casefold() != "none":
+                parts.append(f"{label} {_summary_code(value)}")
+        code = flag.get("code")
+        reasons = {
+            "corroborated_line_amount_mismatch": "quantité × prix ne correspond pas au montant imprimé",
+            "line_arithmetic": "quantité × prix ne correspond pas au montant imprimé",
+            "subtotal": "somme des lignes différente du sous-total imprimé",
+            "tax_total": "HT + taxes imprimées différent du TTC",
+            "identifier_siret": "clé de contrôle à vérifier",
+        }
+        reason = reasons.get(code, str(flag.get("reason") or "")).strip()
+        if reason:
+            parts.append(html.escape(reason))
+        lines.append(
+            f"- **{location}** : {' ; '.join(parts)} — "
+            f"{_flag_json_disposition(flag, payload, statuses)}"
+        )
+        path = _flag_json_path(flag)
+        if path:
+            flagged_paths.add(path)
+
+    proposals = diagnostics.get("unverified_model_readings") or {}
+    for path in uncertain:
+        if path == "total_ht" and unclassified_net_total:
+            continue
+        label = html.escape(_human_field_name(path))
+        strict_value = _payload_field(payload, path)
+        if path in proposals:
+            proposed = _summary_code(proposals[path])
+            if strict_value is None:
+                message = f"Qwen propose {proposed} ; valeur non confirmée, donc exclue du JSON strict."
+            else:
+                retained = _summary_code(strict_value)
+                message = (
+                    f"Qwen propose {proposed} ; le JSON strict conserve {retained}, "
+                    "mais le champ reste à confirmer."
+                )
+            lines.append(f"- **{label}** : {message}")
+        elif path not in flagged_paths:
+            message = (
+                "valeur non confirmée, exclue du JSON strict."
+                if strict_value is None else
+                f"valeur {_summary_code(strict_value)} présente dans le JSON strict, mais à vérifier."
+            )
+            lines.append(f"- **{label}** : {message}")
+
+    lines.extend(
+        f"- **Limitation** : {html.escape(reason)}"
+        for reason in limitations
+    )
+    lines.extend(
+        f"- **Vérification incomplète** : {html.escape(reason)}"
+        for reason in not_verified
+    )
+    return "\n".join(lines)
+
+
+def _performance_summary(diagnostics: dict) -> str:
+    lines = ["### Performances"]
+    if not diagnostics:
+        return "\n".join(lines)
+
+    model_info = diagnostics.get("model_info") or {}
+    used = bool(model_info.get("used") and model_info.get("passes_succeeded", 0) > 0)
+    reason = {
+        "quota": "quota ZeroGPU",
+        "preuves OCR insuffisantes": "preuves documentaires insuffisantes",
+        "indisponibilité technique": "indisponibilité technique",
+        "aucune passe n’a été demandée": "aucune passe demandée",
+    }.get(model_info.get("reason"))
+    lines.append(
+        "- Modèle : Qwen+LoRA"
+        if used else
+        "- Modèle : OCR seul — Qwen+LoRA non utilisé"
+        + (f" ({reason})" if reason else "")
+    )
+
+    requested = model_info.get("passes_requested", 0)
+    succeeded = model_info.get("passes_succeeded", 0)
+    if (
+        isinstance(requested, int) and not isinstance(requested, bool)
+        and isinstance(succeeded, int) and not isinstance(succeeded, bool)
+        and requested > 0
+    ):
+        lines.append(f"- Passes Qwen+LoRA : {succeeded}/{requested} réussies")
+    else:
+        lines.append("- Passes Qwen+LoRA : non lancées")
+
+    ocr_calls = diagnostics.get("ocr_calls", 0)
+    ocr_seconds = diagnostics.get("ocr_elapsed_seconds")
+    if isinstance(ocr_calls, int) and not isinstance(ocr_calls, bool) and ocr_calls > 0:
+        if (
+            isinstance(ocr_seconds, (int, float)) and not isinstance(ocr_seconds, bool)
+            and math.isfinite(ocr_seconds) and ocr_seconds >= 0
+        ):
+            lines.append(f"- OCR : {ocr_seconds:.2f} s")
+        else:
+            lines.append("- OCR : durée indisponible")
+    elif diagnostics.get("evidence_available") is False:
+        lines.append("- OCR : indisponible")
+    elif diagnostics.get("source_kind") in {"pdf", "text"}:
+        lines.append("- OCR : non nécessaire (texte disponible sans OCR)")
+    else:
+        lines.append("- OCR : durée indisponible")
+
+    generation = model_info.get("generation_seconds")
+    if used:
+        if (
+            isinstance(generation, (int, float)) and not isinstance(generation, bool)
+            and math.isfinite(generation) and generation > 0
+        ):
+            lines.append(f"- Génération Qwen+LoRA : {generation:.2f} s")
+        else:
+            lines.append("- Génération Qwen+LoRA : durée indisponible")
+    else:
+        lines.append("- Génération Qwen+LoRA : non effectuée")
+    return "\n".join(lines)
+
+
+def run_recruiter_extraction_ui(filename: str | None):
+    diagnostics: dict = {}
+    for frame in run_extraction_ui(filename, diagnostics):
+        payload, report, _, _, _, _, download = frame
+        summary = _compact_validation_summary(payload, diagnostics, report)
+        if payload is not None and download is None:
+            summary += (
+                "\n\nLe résultat est affiché, mais le téléchargement du JSON est "
+                "indisponible. Réessayez plus tard."
+            )
+        yield (
+            payload,
+            summary,
+            _performance_summary(diagnostics),
+            download,
+        )
+
+
 def _download_json(payload: dict) -> str:
     cache_dir = Path(gr.utils.get_upload_folder())
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -674,6 +1113,11 @@ def _download_json(payload: dict) -> str:
 def preview_ui(filename: str | None):
     image, payload, status = preview_document(filename)
     return image, payload, status, "", "", "", {"flags": [], "passed": [], "not_verified": []}, None
+
+
+def preview_recruiter_ui(filename: str | None):
+    image, payload, status, *_ = preview_ui(filename)
+    return image, payload, status, "### Performances", None
 
 
 REVIEW_PENDING_REASON = (
@@ -985,13 +1429,15 @@ def _add_edit_row(session_state: dict | None):
 def ocr_availability() -> tuple[bool, str]:
     if not shutil.which("tesseract"):
         return False, "Tesseract absent"
-    try:
-        languages = set(pytesseract.get_languages())
-    except (OSError, RuntimeError, pytesseract.TesseractError) as exc:
-        LOGGER.exception("Tesseract availability check failed")
-        return False, f"{type(exc).__name__}: {exc}"
-    missing = {"fra", "eng"} - languages
-    return (not missing, "fra+eng disponibles" if not missing else f"langues absentes : {', '.join(sorted(missing))}")
+    plan = ocr_language_plan()
+    if not plan["missing"]:
+        return True, "fra+eng disponibles"
+    if not plan["effective"]:
+        return False, f"langues absentes : {', '.join(plan['requested'])}"
+    return False, (
+        f"langues absentes : {', '.join(plan['missing'])}"
+        f" ; lecture effective : {'+'.join(plan['effective'])}"
+    )
 
 
 def deployed_revision() -> str:
@@ -1037,19 +1483,9 @@ def runtime_versions() -> dict[str, str]:
 
 
 def build_app(*, persistence=None) -> gr.Blocks:
-    if persistence_requested() and persistence is None:
-        raise StoreError("Use python -m app.local_review for local draft persistence.")
-    if persistence is not None:
-        from invoice_review_store import require_local_environment
-        from app.review_persistence import PersistenceUI
-
-        require_local_environment()
-        persistence_ui = PersistenceUI(persistence, sys.modules[__name__])
+    if persistence_requested() or persistence is not None:
+        raise StoreError("Local draft persistence is unavailable in the simplified interface.")
     available, reason = ocr_availability()
-    review_enabled = invoice_review.review_ui_enabled()
-    edit_enabled = review_enabled and invoice_review_edit.edit_ui_enabled()
-    if invoice_review_edit.edit_ui_enabled() and not review_enabled:
-        LOGGER.warning("INVOICE_REVIEW_EDIT requires INVOICE_REVIEW_UI=1; edit controls are disabled.")
     LOGGER.info("Startup OCR: available=%s; %s; revision=%s", available, reason, deployed_revision())
     versions = runtime_versions()
     LOGGER.info(
@@ -1067,6 +1503,13 @@ def build_app(*, persistence=None) -> gr.Blocks:
             "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
             "des données importantes standardisées."
         )
+        if os.environ.get("SPACE_ID"):
+            gr.Markdown(
+                "**Confidentialité — Espace Hugging Face :** les fichiers importés sont "
+                "transmis à l'infrastructure de cet Espace pour traitement OCR et modèle. "
+                "N'importez pas de facture confidentielle ou de document que vous n'êtes pas "
+                "autorisé à partager."
+            )
         with gr.Row():
             with gr.Column():
                 upload = gr.File(
@@ -1076,232 +1519,35 @@ def build_app(*, persistence=None) -> gr.Blocks:
                 )
                 gr.Markdown("PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais")
                 gr.Markdown(
-                    "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis "
-                    "/ Joanna Binet / erreur d'impression / modèle vierge 🔽"
+                    "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽"
                 )
-                gr.Examples(
+                examples = gr.Examples(
                     examples=[[str(path)] for _, path in EXAMPLES],
                     inputs=[upload],
                     label="",
                     example_labels=[label for label, _ in EXAMPLES],
                     cache_examples=False,
                 )
+                upload.keep_in_cache.update(upload.temp_files)
+                examples.dataset.show_label = False
+                examples.dataset.container = False
                 extract = gr.Button("Extraire les données", variant="primary")
                 preview = gr.Image(label="Aperçu de la facture", type="pil", interactive=False)
             with gr.Column():
                 status = gr.Markdown("", buttons=["copy"])
                 result = gr.JSON(label="Résultat de l'extraction — JSON structuré")
                 download = gr.DownloadButton("Télécharger le JSON")
-                with gr.Accordion("Détails techniques", open=False):
-                    technical = gr.Markdown("")
-                    with gr.Accordion("Réponse brute du modèle — première passe", open=False):
-                        first_pass_raw = gr.Code(
-                            language="json", label="Réponse brute", interactive=False, lines=10,
-                        )
-                    with gr.Accordion("Avancé", open=False):
-                        advanced = gr.Markdown("")
-                        validation = gr.JSON(label="Détails des contrôles — hors du résultat JSON")
-        if review_enabled:
-            with gr.Accordion("Révision — lecture seule", open=True):
-                gr.Markdown(
-                    "Le JSON « Résultat de l'extraction » reste le résultat strict vérifié. "
-                    "Cette révision affiche les statuts du contrôle documentaire P1 (vérifié, récupéré, "
-                    "proposition, rejeté, imprimé non extrait, absent) à côté du document source, "
-                    "sans modifier aucune valeur."
-                )
-                with gr.Row():
-                    review_pages_view = gr.Gallery(
-                        label="Document source", columns=1, rows=2, object_fit="contain",
-                        height=560,
-                    )
-                    with gr.Column(scale=3):
-                        review_summary_view = gr.Markdown("")
-                        review_table_view = gr.Dataframe(
-                            headers=list(invoice_review.COLUMN_HEADERS),
-                            label="Champs évalués par le contrôle P1",
-                            datatype="str", interactive=False, wrap=True, max_height=460,
-                            row_count=0,
-                            column_count=(len(invoice_review.COLUMN_HEADERS), "fixed"),
-                            column_widths=["145px", "100px", "125px", "165px", "165px", "155px"],
-                        )
-                        with gr.Accordion("JSON de révision — propositions hors du résultat strict",
-                                         open=False):
-                            review_json_view = gr.JSON(label="Contrat de révision")
-                        if edit_enabled:
-                            with gr.Accordion("Révision humaine — brouillon de session", open=True):
-                                gr.Markdown(
-                                    "Le tableau P1 ci-dessus reste en lecture seule ; cette couche de "
-                                    "révision humaine est distincte. Choisissez un champ pour examiner sa "
-                                    "valeur d'origine et ses éléments P1. Accepter une proposition ne la "
-                                    "confirme pas. Toute confirmation "
-                                    "reste partielle tant que tous les champs ne sont pas confirmés. "
-                                    + (
-                                        "Seul le bouton d'enregistrement local conserve le brouillon."
-                                        if persistence is not None else
-                                        "Ce brouillon n'est pas enregistré durablement."
-                                    )
-                                )
-                                edit_field = gr.Dropdown(
-                                    label="Champ ou cellule à réviser", choices=[], interactive=True,
-                                )
-                                with gr.Row():
-                                    edit_original = gr.Textbox(label="Valeur d'origine", interactive=False)
-                                    edit_proposal = gr.Textbox(
-                                        label="Candidat brut du modèle — statut P1 ci-dessous",
-                                        interactive=False,
-                                    )
-                                edit_evidence = gr.Textbox(
-                                    label="Preuves et motifs P1", interactive=False, lines=4,
-                                )
-                                edit_value = gr.Textbox(label="Valeur du brouillon — correction manuelle")
-                                with gr.Row():
-                                    accept_edit = gr.Button("Accepter la proposition")
-                                    reject_edit = gr.Button("Rejeter la proposition")
-                                    apply_edit = gr.Button("Appliquer la correction")
-                                    confirm_edit = gr.Button("Confirmer ce champ", variant="primary")
-                                    add_row = gr.Button("Ajouter une ligne manquante")
-                                edit_status = gr.Markdown("")
-                                confirmed_json = gr.JSON(label="Brouillon humain confirmé — distinct du JSON strict")
-                                if persistence is not None:
-                                    with gr.Accordion("Brouillons locaux — stockage SQLite", open=True):
-                                        gr.Markdown(
-                                            "Enregistrement explicite uniquement, sans chiffrement. "
-                                            "Les valeurs, propositions et preuves restent sur cet ordinateur ; "
-                                            "les images/PDF ne sont pas conservés. Ne pas exposer ce serveur "
-                                            "via un tunnel, un proxy ou une redirection de port."
-                                        )
-                                        persist_consent = gr.Checkbox(
-                                            label="J'accepte le stockage local des données sensibles",
-                                        )
-                                        persist_save = gr.Button("Enregistrer le brouillon")
-                                        persist_choices = gr.Dropdown(label="Brouillons enregistrés", choices=[])
-                                        persist_refresh = gr.Button("Actualiser la liste")
-                                        persist_replace = gr.Checkbox(
-                                            label="Remplacer le brouillon de session (modifications non enregistrées perdues)",
-                                        )
-                                        persist_open = gr.Button("Ouvrir le brouillon enregistré")
-                                        persist_document = gr.File(
-                                            label="Rattacher le document source original",
-                                            file_types=[".png", ".jpg", ".jpeg", ".pdf"], type="filepath",
-                                        )
-                                        persist_attach = gr.Button("Vérifier le document source")
-                                        persist_delete_confirm = gr.Checkbox(
-                                            label="Je confirme la suppression de la copie enregistrée",
-                                        )
-                                        persist_delete = gr.Button("Supprimer le brouillon enregistré")
-                                        gr.Markdown(
-                                            "La suppression n'efface pas la session courante et ne garantit "
-                                            "pas l'effacement physique des journaux, sauvegardes ou copies."
-                                        )
-                                        persist_status = gr.Markdown(
-                                            "Aucun enregistrement automatique. Les données restent en session "
-                                            "jusqu'à une action explicite.",
-                                        )
-                        review_state = gr.State({})
-        gr.HTML(
-            f"<footer>Version déployée : <code>{short_revision()}</code> · "
-            f"OCR : {'disponible' if available else 'indisponible'}<br>"
-            "Limite connue : les images floues ou inclinées peuvent donner plus de champs non vérifiés.</footer>"
+                performance = gr.Markdown("### Performances")
+        upload.change(
+            preview_recruiter_ui, inputs=[upload],
+            outputs=[preview, result, status, performance, download],
+            concurrency_limit=1, api_name="preview_ui",
         )
-        if review_enabled:
-            review_outputs = [
-                preview, result, status, technical, advanced, first_pass_raw, validation, download,
-                review_pages_view, review_table_view, review_summary_view, review_json_view,
-                review_state,
-            ]
-            extraction_outputs = [
-                result, status, technical, advanced, first_pass_raw, validation, download,
-                review_pages_view, review_table_view, review_summary_view, review_json_view,
-                review_state,
-            ]
-            if edit_enabled:
-                edit_outputs = [
-                    edit_field, edit_original, edit_proposal, edit_evidence, edit_value,
-                    edit_status, confirmed_json, accept_edit, reject_edit, add_row, confirm_edit,
-                ]
-                review_outputs.extend(edit_outputs)
-                extraction_outputs.extend(edit_outputs)
-            preview_event = upload.change(
-                preview_ui_with_review, inputs=[upload],
-                outputs=review_outputs,
-                api_name="preview_ui", concurrency_limit=1,
-            )
-            extraction_event = extract.click(
-                persistence_ui.extract if persistence is not None else run_extraction_ui_with_review,
-                inputs=[upload, review_state],
-                outputs=extraction_outputs,
-                api_name="run_extraction_ui", concurrency_limit=1,
-            )
-            if edit_enabled:
-                edit_field.change(
-                    _edit_selection, inputs=[review_state, edit_field],
-                    outputs=[
-                        edit_original, edit_proposal, edit_evidence, edit_value,
-                        accept_edit, reject_edit, confirm_edit,
-                    ],
-                    api_name="review_field_details",
-                )
-                for action, button in (
-                    ("accept", accept_edit), ("reject", reject_edit),
-                    ("edit", apply_edit), ("confirm", confirm_edit),
-                ):
-                    edit_event = button.click(
-                        lambda current, key, value, selected_action=action: _edit_action(
-                            current, key, value, selected_action,
-                        ),
-                        inputs=[review_state, edit_field, edit_value],
-                        outputs=[review_state, *edit_outputs],
-                        api_name=f"review_{action}",
-                    )
-                    if persistence is not None:
-                        edit_event.then(
-                            persistence_ui.status, inputs=[review_state], outputs=[persist_status],
-                            api_name=False,
-                        )
-                add_event = add_row.click(
-                    _add_edit_row, inputs=[review_state],
-                    outputs=[review_state, *edit_outputs], api_name="review_add_line",
-                )
-                if persistence is not None:
-                    for event in (preview_event, extraction_event, add_event):
-                        event.then(persistence_ui.status, inputs=[review_state],
-                                   outputs=[persist_status], api_name=False)
-                    demo.load(persistence_ui.refresh, outputs=[persist_choices], api_name=False)
-                    persist_refresh.click(persistence_ui.refresh, outputs=[persist_choices],
-                                          api_name="draft_list")
-                    persist_save.click(
-                        persistence_ui.save, inputs=[review_state, persist_consent],
-                        outputs=[review_state, persist_status, persist_choices], api_name="draft_save",
-                    )
-                    persist_open.click(
-                        persistence_ui.open,
-                        inputs=[review_state, persist_choices, persist_replace],
-                        outputs=[
-                            review_state, result, review_pages_view, review_table_view,
-                            review_summary_view, review_json_view, *edit_outputs, persist_status,
-                            preview, download, status, technical, advanced, first_pass_raw, validation,
-                        ], api_name="draft_open",
-                    )
-                    persist_attach.click(
-                        persistence_ui.attach, inputs=[review_state, persist_document],
-                        outputs=[review_state, review_pages_view, *edit_outputs, persist_status],
-                        api_name="draft_attach",
-                    )
-                    persist_delete.click(
-                        persistence_ui.delete, inputs=[review_state, persist_delete_confirm],
-                        outputs=[review_state, persist_status, persist_choices], api_name="draft_delete",
-                    )
-        else:
-            upload.change(
-                preview_ui, inputs=[upload],
-                outputs=[preview, result, status, technical, advanced, first_pass_raw, validation, download],
-                concurrency_limit=1,
-            )
-            extract.click(
-                run_extraction_ui, inputs=[upload],
-                outputs=[result, status, technical, advanced, first_pass_raw, validation, download],
-                concurrency_limit=1,
-            )
+        extract.click(
+            run_recruiter_extraction_ui, inputs=[upload],
+            outputs=[result, status, performance, download],
+            concurrency_limit=1, api_name="run_extraction_ui",
+        )
     return demo.queue(default_concurrency_limit=1, max_size=8)
 
 

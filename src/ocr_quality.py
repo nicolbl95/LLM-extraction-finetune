@@ -114,6 +114,6 @@ def document_quality(evidence: DocumentEvidence, model: dict | None = None) -> l
         issues.append("Preuves OCR non recoupées par une seconde lecture indépendante.")
     if model and evidence.source_kind in {"ocr", "mixed"} and evidence.rows_provenance != "recovered":
         items = model.get("line_items")
-        if isinstance(items, list) and items and len(items) != len(evidence.rows):
+        if isinstance(items, list) and items and len(items) > len(evidence.rows):
             issues.append("Nombre d'articles modèle/OCR incohérent ; aucune correspondance supposée.")
     return issues

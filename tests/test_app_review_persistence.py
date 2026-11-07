@@ -1,15 +1,11 @@
 from copy import deepcopy
 from pathlib import Path
 import os
-import socket
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -85,7 +81,7 @@ class PersistenceUiTests(unittest.TestCase):
 class LaunchTests(unittest.TestCase):
     def test_ordinary_launcher_refuses_persistence(self):
         with patch.dict(os.environ, FLAGS, clear=True):
-            with self.assertRaisesRegex(store.StoreError, "app.local_review"):
+            with self.assertRaisesRegex(store.StoreError, "unavailable in the simplified interface"):
                 main.build_app()
 
     def test_forbidden_launch_does_not_create_database(self):
@@ -99,39 +95,21 @@ class LaunchTests(unittest.TestCase):
                     self.assertFalse(db.path.exists())
 
     @unittest.skipUnless(os.name == "nt", "Approved launcher is Windows-local only")
-    def test_effective_loopback_config_and_real_file_route_block(self):
+    def test_removed_local_review_ui_refuses_launch_before_database_or_server_creation(self):
         with tempfile.TemporaryDirectory(dir=ROOT / ".pytest_cache") as folder, \
-                patch.dict(os.environ, FLAGS), \
-                patch.object(main, "ocr_availability", return_value=(False, "test")), \
-                patch.object(main, "runtime_versions", return_value={
-                    "Tesseract": "test", "langues": "", "Pillow": "",
-                    "NumPy": "", "OpenCV": "", "PyMuPDF": "",
-                }):
+                patch.dict(os.environ, FLAGS, clear=True), \
+                patch.object(main.gr.Blocks, "launch") as launch:
             db = store.DraftStore(Path(folder) / "storage")
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = sock.getsockname()[1]
-            demo, boundary = launch_local(port=port, store=db)
-            try:
-                boundary.authorize()
-                self.assertEqual(demo.server.config.host, "127.0.0.1")
-                self.assertFalse(demo.share)
-                base = f"http://127.0.0.1:{port}"
-                for url, headers in (
-                    (base + "/gradio_api/file=" + quote(str(db.path), safe=""), {}),
-                    (base + "/config", {"X-Forwarded-For": "127.0.0.1"}),
-                    (base + "/config", {"Origin": "https://example.invalid"}),
-                    (base + "/config", {"Host": "example.invalid"}),
-                ):
-                    with self.assertRaises(HTTPError) as caught:
-                        urlopen(Request(url, headers=headers), timeout=10)
-                    self.assertEqual(caught.exception.code, 403)
-                demo.server_name = "0.0.0.0"
-                with self.assertRaises(store.StoreError):
-                    boundary.authorize()
-            finally:
-                boundary.active = False
-                demo.close()
+            with self.assertRaisesRegex(store.StoreError, "unavailable in the simplified interface"):
+                launch_local(store=db)
+            self.assertFalse(db.path.exists())
+            self.assertFalse(db.directory.exists())
+            launch.assert_not_called()
+
+    def test_explicit_persistence_boundary_is_refused_even_without_the_flag(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                self.assertRaisesRegex(store.StoreError, "unavailable in the simplified interface"):
+            main.build_app(persistence=SimpleNamespace())
 
 
 if __name__ == "__main__":

@@ -12,8 +12,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from invoice_evidence import EvidenceText, from_text, from_tsv, parse_number
 from invoice_grounding import (
-    NULL, RECOVERED, UNVERIFIED, VALID, inference_error, read_model, reconcile, run_grounded_inference,
+    NULL, RECOVERED, UNVERIFIED, VALID, anomaly_digest, inference_error, read_model, reconcile,
+    run_grounded_inference,
 )
+from ocr_consensus import build_consensus
 
 
 def replay_cases():
@@ -29,6 +31,29 @@ def replay_cases():
                 target = target[int(key)] if isinstance(target, list) else target[key]
             target[keys[-1]] = value
         yield case, row, json.dumps(raw, ensure_ascii=False)
+
+
+def test_anomaly_log_digest_excludes_document_values():
+    export = {
+        "flags": [{
+            "code": "identifier_iban",
+            "severity": "erreur",
+            "location": "IBAN",
+            "printed": "FR7612345678901234567890123",
+            "expected": "FR0000000000000000000000000",
+            "difference": "1",
+            "reason": "Sensitive identifier mismatch",
+        }],
+        "passed": ["sensitive invoice amount"],
+        "not_verified": ["sensitive OCR excerpt"],
+    }
+
+    logged = anomaly_digest(export)
+
+    assert logged == [{"code": "identifier_iban", "location": "IBAN"}]
+    assert "FR7612345678901234567890123" not in str(logged)
+    assert "sensitive invoice amount" not in str(logged)
+    assert "Sensitive identifier mismatch" not in str(logged)
 
 
 @pytest.mark.parametrize("raw,locale,expected", [
@@ -59,6 +84,14 @@ def test_document_preserves_raw_thin_space_number_and_supplier_typography_proven
     assert evidence.rows[0].cells["total_ht"][0].value == Decimal("3627.96")
     assert evidence.supplier == "Acme Ltd"
     assert evidence.supplier_raw == "Acme  LTD."
+
+
+def test_ocr_doubled_a_in_french_ttc_label_keeps_the_printed_total():
+    evidence = from_text("Net Aa payer TTC : 6 860,12 \ufffd", locale="fr-FR")
+
+    assert [number.value for number in evidence.totals["total_ttc"]] == [
+        Decimal("6860.12"),
+    ]
 
 
 @pytest.mark.parametrize("raw,locale", [
@@ -157,6 +190,109 @@ def test_unreadable_description_does_not_erase_corroborated_numbers(description)
     assert result.payload["line_items"][0]["total_ht"] == 20
 
 
+def test_french_ligature_is_preserved_in_ocr_only_result():
+    description = "Main-d'\u0153uvre"
+    text = simple_evidence(quantity="2").text.replace("Service |", f"{description} |")
+
+    result = reconcile(from_text(text, locale="en-GB"), [])
+
+    assert result.payload["line_items"][0]["description"] == description
+
+
+def test_replacement_character_description_is_rejected_without_creating_a_row():
+    description = "Main-d'\ufffduvre"
+    text = simple_evidence(quantity="2").text.replace("Service |", f"{description} |")
+
+    result = reconcile(from_text(text, locale="en-GB"), [])
+
+    assert result.payload["line_items"] == []
+    assert any("U+FFFD" in warning for warning in result.warnings)
+
+
+JOANNA_LAYOUT = """FACTURE {invoice_number}
+Supplier: Joanna Binet
+Invoice date: 29/01/2019
+Currency: EUR
+Description | Quantity | Net unit price | Net amount
+Petit marini{accent}re uniforme en bleu | 2 | 15,00 | 30,00
+Subtotal: 30,00
+VAT (0%): 0,00
+Invoice total: 30,00"""
+
+
+def joanna_readings(*, accents=("è", "e"), invoice_number="FR-001", second_description=None):
+    readings = {}
+    for family, accent in zip(("deskew", "clahe"), accents):
+        description = f"Petit marini{accent}re uniforme en bleu"
+        if family == "clahe" and second_description is not None:
+            description = second_description
+        readings[family] = [from_text(
+            JOANNA_LAYOUT.format(accent=accent, invoice_number=invoice_number)
+            .replace(f"Petit marini{accent}re uniforme en bleu", description),
+            locale="fr-FR",
+        )]
+    return readings
+
+
+def joanna_model(description):
+    return read_model(json.dumps({
+        "supplier_name": "Joanna Binet", "invoice_date": "2019-01-29",
+        "total_ht": 30.0, "total_ttc": 30.0,
+        "line_items": [{"description": description, "quantity": 2, "unit_price": 15.0, "total_ht": 30.0}],
+    }, ensure_ascii=False))
+
+
+def test_supported_accented_description_survives_an_unaccented_family_read():
+    for accents in (("è", "e"), ("e", "è")):
+        evidence = build_consensus(joanna_readings(accents=accents), confidence=40)
+        assert evidence.rows[0].description == "Petit marinière uniforme en bleu"
+        assert evidence.rows[0].description_confident
+        assert evidence.invoice_number == "FR-001"
+
+
+def test_unaccented_model_echo_does_not_downgrade_the_accented_ocr_description():
+    evidence = build_consensus(joanna_readings(), confidence=40)
+    result = reconcile(evidence, [joanna_model("Petit mariniere uniforme en bleu")])
+    assert result.payload["line_items"][0]["description"] == "Petit marinière uniforme en bleu"
+    assert result.statuses["line_items.0.description"] == VALID
+
+
+def test_model_accent_without_an_accented_read_is_never_invented():
+    evidence = build_consensus(joanna_readings(accents=("e", "e")), confidence=40)
+    assert evidence.rows[0].description == "Petit mariniere uniforme en bleu"
+    result = reconcile(evidence, [joanna_model("Petit marinière uniforme en bleu")])
+    assert result.payload["line_items"][0]["description"] == "Petit mariniere uniforme en bleu"
+    assert "\u00e8" not in result.payload["line_items"][0]["description"]
+
+
+def test_conflicting_accented_reads_leave_the_description_unverified_and_keep_the_identifier():
+    evidence = build_consensus(
+        joanna_readings(second_description="Petit marinière uniforme en blond"), confidence=40)
+    assert evidence.rows[0].description == ""
+    assert not evidence.rows[0].description_confident
+    assert evidence.invoice_number == "FR-001"
+    result = reconcile(evidence, [joanna_model("Petit marinière uniforme en bleu")])
+    assert result.payload["line_items"][0]["description"] is None
+    assert result.statuses["line_items.0.description"] == UNVERIFIED
+    assert result.payload["line_items"][0]["quantity"] == 2
+    assert result.payload["line_items"][0]["unit_price"] == 15.0
+    assert result.payload["line_items"][0]["total_ht"] == 30.0
+
+
+def test_internally_consistent_but_ocr_unsupported_model_values_are_not_retained():
+    evidence = simple_evidence(quantity="2", price="10", amount="20", total="20")
+    model = simple_model(quantity="1", price="20", total="20")
+
+    result = reconcile(evidence, [model])
+
+    assert result.payload["line_items"][0] == {
+        "description": "Service",
+        "quantity": 2,
+        "unit_price": 10,
+        "total_ht": 20,
+    }
+
+
 def test_single_pass_mode_keeps_grounding_without_requesting_a_correction():
     evidence = simple_evidence()
     backend = MagicMock(return_value={
@@ -194,7 +330,7 @@ def test_unique_row_and_fields_are_not_lost_because_another_row_is_ambiguous():
     result = reconcile(evidence, [model])
     assert result.payload["line_items"][0]["quantity"] == 2
     assert result.payload["line_items"][0]["unit_price"] == 10
-    assert result.payload["line_items"][0]["total_ht"] == 20
+    assert result.payload["line_items"][0]["total_ht"] is None
     assert result.statuses["line_items.0.quantity"] == RECOVERED
     assert result.payload["line_items"][1]["quantity"] is None
     assert result.payload["line_items"][1]["unit_price"] is None
@@ -202,14 +338,14 @@ def test_unique_row_and_fields_are_not_lost_because_another_row_is_ambiguous():
 
 
 def test_quota_failure_uses_ocr_only_and_keeps_error_type_and_trace(caplog):
-    evidence = simple_evidence()
+    evidence = simple_evidence(quantity="1 / 2", price="10 / 20")
     backend = MagicMock(side_effect=[
         {"raw": json.dumps(simple_model(), default=str), "finish_reason": "stop"},
         RuntimeError("ZeroGPU quota exceeded; try again in 00:12:34"),
     ])
     result = run_grounded_inference(evidence, {"id": "test", "input": evidence.text}, [], backend)
     assert backend.call_count == 2
-    assert result["payload"]["line_items"][0]["unit_price"] == 10
+    assert result["payload"]["line_items"][0]["unit_price"] is None
     assert result["payload"]["line_items"][0]["total_ht"] == 20
     assert result["payload"]["line_items"][0]["quantity"] is None
     assert "Quota ZeroGPU épuisé, réessayer dans 00:12:34" in "\n".join(result["warnings"])
@@ -223,7 +359,7 @@ def test_quota_failure_uses_ocr_only_and_keeps_error_type_and_trace(caplog):
     assert "Service" in focused_messages[-1]["content"]
 
 
-def test_targeted_second_pass_can_recover_an_anchored_field_but_not_invent_a_quantity():
+def test_unique_price_is_recovered_without_retrying_an_absent_quantity():
     evidence = simple_evidence()
     initial = simple_model(quantity="142", price="11")
     corrected = {
@@ -236,12 +372,13 @@ def test_targeted_second_pass_can_recover_an_anchored_field_but_not_invent_a_qua
         {"raw": json.dumps(corrected), "finish_reason": "stop"},
     ])
     result = run_grounded_inference(evidence, {"id": "test", "input": evidence.text}, [], backend)
-    assert backend.call_count == 2
+    assert backend.call_count == 1
     assert result["payload"]["line_items"][0]["quantity"] is None
     assert result["payload"]["line_items"][0]["unit_price"] == 10
     assert result["payload"]["line_items"][0]["total_ht"] == 20
     assert result["field_statuses"]["line_items.0.unit_price"] == RECOVERED
-    assert len(result["provenance"]["line_items.0.unit_price"][0]["model_proposals"]) == 2
+    assert len(result["provenance"]["line_items.0.unit_price"][0]["model_proposals"]) == 1
+    assert not result["correction_attempted"]
 
 
 def test_initial_gpu_failure_can_recover_a_complete_invoice_without_model(caplog):
@@ -258,12 +395,12 @@ def test_gradio_quota_exception_is_handled_by_the_application_without_losing_two
     from app import main
     evidence = simple_evidence()
     warnings = []
-    with patch.object(main, "predict_invoice", side_effect=[
-        {"raw": json.dumps(simple_model(quantity="142"), default=str), "finish_reason": "stop"},
-        main.gr.Error("ZeroGPU quota exceeded; try again in 00:01:00"),
-    ]) as backend:
+    with patch.object(
+        main, "predict_invoice",
+        side_effect=main.gr.Error("ZeroGPU quota exceeded; try again in 00:01:00"),
+    ) as backend:
         result = main.extract_invoice(EvidenceText(evidence), warnings=warnings)
-    assert backend.call_count == 2
+    assert backend.call_count == 1
     assert result["line_items"][0]["quantity"] is None
     assert result["line_items"][0]["unit_price"] == 10
     assert result["line_items"][0]["total_ht"] == 20
@@ -299,8 +436,10 @@ def test_image_ocr_is_x2_grayscale_tsv():
     from app import main
     from PIL import Image
     data = {"text": ["FACTURE"], "left": [0], "top": [0], "width": [40], "height": [10], "conf": [99]}
+    languages = frozenset({"fra", "eng"})
     with patch.object(main.pytesseract, "image_to_data", return_value=data) as ocr:
-        text = main.ocr_image(Image.new("RGB", (20, 30)))
+        with patch.object(main, "installed_ocr_languages", return_value=languages):
+            text = main.ocr_image(Image.new("RGB", (20, 30)))
     images = [call.args[0] for call in ocr.call_args_list]
     assert (40, 60) in {image.size for image in images}
     assert (60, 90) in {image.size for image in images}
@@ -336,14 +475,16 @@ def test_gpu_duration_uses_measured_generation_plus_bounded_margin(monkeypatch):
     assert main.gpu_duration({}, large) == OCR_CONFIG.gpu_max_seconds == 22
 
 
-def test_deployed_hash_footer_has_no_model_load():
+def test_deployed_revision_is_not_exposed_in_frontend_without_model_load():
     from app import main
     revision = "a" * 40
     with patch.dict(main.os.environ, {"SPACE_COMMIT_SHA": revision}), patch.object(main, "get_extractor") as backend:
         demo = main.build_app()
     backend.assert_not_called()
-    footers = [component["props"]["value"] for component in demo.config["components"] if component["type"] == "html"]
-    assert any(revision[:7] in footer for footer in footers)
+    configuration = str(demo.config)
+    assert revision[:7] not in configuration
+    assert "Version déployée" not in configuration
+    assert not any(component["type"] == "html" for component in demo.config["components"])
 
 
 def test_real_tesseract_evidence_with_simulated_wrong_model_outputs_on_all_three_images():
@@ -358,14 +499,11 @@ def test_real_tesseract_evidence_with_simulated_wrong_model_outputs_on_all_three
         result = reconcile(text.evidence, [read_model(raw)])
         assert len(text.evidence.rows) == len(row["output"]["line_items"])
         expected = copy.deepcopy(row["output"])
-        if case["id"] == "invoice-0110":
-            expected["line_items"][0]["quantity"] = None
-            expected["line_items"][0]["unit_price"] = None
         assert result.payload == expected
         if case["id"] == "invoice-0110":
-            assert result.failed_rows == [0]
-            assert result.statuses["line_items.0.quantity"] in {NULL, UNVERIFIED}
-            assert result.statuses["line_items.0.unit_price"] in {NULL, UNVERIFIED}
+            assert result.failed_rows == []
+            assert result.statuses["line_items.0.quantity"] in {VALID, RECOVERED}
+            assert result.statuses["line_items.0.unit_price"] in {VALID, RECOVERED}
             assert 78 not in result.payload["line_items"][0].values()
         else:
             assert result.failed_rows == []
@@ -473,10 +611,15 @@ def test_sixty_reference_texts_keep_only_documented_values():
                 assert value == expected[path], (row["id"], path)
                 if isinstance(value, (int, float)):
                     assert Decimal(str(value)) in {n.value for n in evidence.numbers}
-        if evidence.rows:
+        if evidence.rows and all(
+            evidence_row.cells.get("total_ht") for evidence_row in evidence.rows
+        ):
             assert result.payload == row["output"], row["id"]
             assert not result.failed_rows, row["id"]
             assert not result.global_failure, row["id"]
+        for index, evidence_row in enumerate(evidence.rows):
+            if not evidence_row.cells.get("total_ht"):
+                assert result.payload["line_items"][index]["total_ht"] is None, row["id"]
 
 def supplier_evidence(name, *, explicit):
     evidence = from_text(

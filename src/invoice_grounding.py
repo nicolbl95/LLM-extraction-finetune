@@ -20,6 +20,7 @@ from invoice_evidence import (
 from invoice_validation import Validation, anomaly_digest, document_validation, render_report
 from ocr_quality import document_quality
 from ocr_config import OCR_CONFIG
+from ocr_consensus import number_confident
 
 LOGGER = logging.getLogger(__name__)
 CENT = Decimal(".01")
@@ -522,9 +523,26 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
             sources = row.cells.get(key, [])
             selected = invariant_row[key] if row_unique else None
             printed_values = {number.value for number in sources}
-            if len(printed_values) == 1 and all(token.confidence >= 60 for token in row.line.tokens):
+            corroborated_amount_cell = (
+                key == "total_ht" and evidence.source_kind == "consensus"
+                and len(printed_values) == 1
+                and len(row.family_votes.get(key, {}).get(next(iter(printed_values)), ())) >= 2
+                and bool(sources)
+                and all(number_confident(row, number, OCR_CONFIG.fast_token_confidence)
+                        for number in sources)
+            )
+            if len(printed_values) == 1 and (
+                all(token.confidence >= 60 for token in row.line.tokens)
+                or corroborated_amount_cell
+            ):
                 selected = next(iter(printed_values))
-            if selected is not None:
+            if key == "total_ht" and len(printed_values) > 1:
+                value = record(
+                    path, None, NULL,
+                    "montants imprimés contradictoires ; aucun choix par cohérence arithmétique",
+                    sources,
+                )
+            elif selected is not None:
                 status = VALID if initial_value == selected else RECOVERED
                 value = record(path, selected, status, "" if status == VALID else (
                     f"valeur modèle {original.get(key)!r} non ancrée ou incohérente ; "
@@ -732,6 +750,37 @@ def inference_error(error: Exception) -> str:
     return f"{type(error).__name__}: {message}. Repli OCR sans GPU."
 
 
+def inference_failure_category(error: Exception, *, phase: str) -> dict[str, str]:
+    """Content-free internal classification; an aborted worker hides its inner cause."""
+    message = str(error).casefold()
+    category, stage = "unclassified_runtime_error", "unknown"
+    if "gpu task aborted" in message or "zerogpu worker error" in message:
+        category, stage = "zerogpu_worker_aborted", "zerogpu_worker"
+    elif any(term in message for term in ("quota", "remaining gpu", "gpu duration")):
+        category, stage = "zerogpu_quota", "zerogpu_allocation"
+    elif "out of memory" in message:
+        category, stage = "out_of_memory", "unknown"
+    elif isinstance(error, TimeoutError) or "timeout" in message or "timed out" in message:
+        category = "timeout"
+    elif isinstance(error, ImportError):
+        category, stage = "dependency_unavailable", "dependency_import"
+    elif isinstance(error, FileNotFoundError):
+        category, stage = "artifact_missing", "artifact_resolution"
+    elif any(term in message for term in ("401 unauthorized", "403 forbidden", "gated repo")):
+        category, stage = "artifact_access_denied", "artifact_resolution"
+    elif isinstance(error, (json.JSONDecodeError, ValidationError)) or any(
+        term in message for term in (
+            "réponse initiale incomplète", "réponse corrective incomplète",
+            "constante json invalide", "clé json dupliquée", "un objet json est requis",
+        )
+    ):
+        category, stage = "invalid_model_output", "response_validation"
+    return {
+        "phase": phase, "category": category, "stage": stage,
+        "exception_type": type(error).__name__,
+    }
+
+
 def run_grounded_inference(
     evidence: DocumentEvidence, row: dict, messages: list[dict],
     predict: Callable[[dict, list[dict]], dict],
@@ -741,6 +790,7 @@ def run_grounded_inference(
     attempts = []
     passes = []
     errors = []
+    model_failures = []
     quota_failed = False
     initial = None
     passes_requested = 0
@@ -763,14 +813,28 @@ def run_grounded_inference(
             passes.append(read_model(initial["raw"]))
         except recoverable_errors as exc:
             LOGGER.exception("Initial invoice inference failed (%s: %r)", type(exc).__name__, exc)
+            failure = inference_failure_category(exc, phase="initial")
+            model_failures.append(failure)
+            LOGGER.warning("Invoice inference failure category: %s", failure)
             errors.append("La première passe a échoué : " + inference_error(exc))
             quota_failed = "quota" in errors[-1].casefold()
         finally:
             request_elapsed_seconds += time.perf_counter() - started
     grounded = reconcile(evidence, passes or [{}])
     correction_attempted = False
-    retryable_rows = [index for index in grounded.failed_rows if index < len(evidence.rows)]
-    if allow_correction and not document_quality(evidence, passes[0] if passes else {}) and (retryable_rows or grounded.global_failure) and (evidence.rows or evidence.totals) and initial is not None and (
+    retryable_rows = [
+        index for index in grounded.failed_rows if index < len(evidence.rows)
+        and any(
+            grounded.payload["line_items"][index].get(key) is None
+            and evidence.rows[index].cells.get(key)
+            for key in FIELDS
+        )
+    ]
+    retryable_totals = any(
+        grounded.payload.get(key) is None and evidence.totals.get(key)
+        for key in ("total_ht", "total_ttc")
+    )
+    if allow_correction and not document_quality(evidence, passes[0] if passes else {}) and (retryable_rows or retryable_totals) and (evidence.rows or evidence.totals) and initial is not None and (
         initial["finish_reason"] == "stop" and not quota_failed
     ):
         correction_attempted = True
@@ -794,6 +858,9 @@ def run_grounded_inference(
             grounded = reconcile(evidence, passes)
         except recoverable_errors as exc:
             LOGGER.exception("Targeted invoice inference failed (%s: %r)", type(exc).__name__, exc)
+            failure = inference_failure_category(exc, phase="targeted")
+            model_failures.append(failure)
+            LOGGER.warning("Invoice inference failure category: %s", failure)
             errors.append("La seconde passe a échoué : " + inference_error(exc))
         finally:
             request_elapsed_seconds += time.perf_counter() - started
@@ -837,6 +904,7 @@ def run_grounded_inference(
             "quota" if any("quota" in error.casefold() for error in errors)
             else "indisponibilité technique" if errors else None
         ),
+        "failures": model_failures,
         "retry_wait": retry_wait,
         "passes_requested": passes_requested,
         "passes_succeeded": len(passes),
@@ -857,6 +925,17 @@ def run_grounded_inference(
         "raw": initial["raw"] if initial is not None else "",
         "finish_reason": initial["finish_reason"] if initial is not None else "error",
         "payload": grounded.payload, "warnings": warnings, "field_statuses": grounded.statuses,
+        "document_coverage": {
+            "documented_rows": len(evidence.rows) if (
+                evidence.available and evidence.rows
+                and (evidence.source_kind in {"text", "pdf"} or evidence.ocr_cross_checked)
+                and evidence.rows_provenance != "recovered"
+                and all(row.description_confident for row in evidence.rows)
+            ) else None,
+            "output_rows": len(grounded.payload["line_items"]),
+            "model_rows": len(_items(passes[0])) if passes else None,
+            "exhaustive": None,
+        },
         "ocr_configuration": OCR_CONFIG.export(), "ocr_configuration_sha256": OCR_CONFIG.fingerprint(),
         "validation": grounded.validation.export(),
         "report": render_report(

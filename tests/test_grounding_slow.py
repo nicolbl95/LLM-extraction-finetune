@@ -18,6 +18,11 @@ def test_real_local_model_document_to_grounded_json(monkeypatch, example, total_
         pytest.skip("Real inference dependencies unavailable: " + ", ".join(missing))
     from app import main
     from invoice_grounding import read_model
+    if example == "france.png" and "fra" in main.ocr_language_plan()["missing"]:
+        pytest.skip(
+            "Tesseract fra language data is missing; a French invoice cannot be used to "
+            "validate the French OCR configuration under an English-only read."
+        )
     assert Path(adapter).is_dir()
     monkeypatch.setenv("INVOICE_ADAPTER_PATH", adapter)
     monkeypatch.setenv("INVOICE_ADAPTER_REPO", "")

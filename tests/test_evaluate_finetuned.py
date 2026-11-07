@@ -23,7 +23,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_prompt_extends_training_without_gold_or_metadata(self):
         namespace = {}
-        notebook = json.loads((ROOT / "notebooks" / "fine_tune_unsloth.ipynb").read_text())
+        notebook = json.loads((ROOT / "notebooks" / "fine_tune_unsloth.ipynb").read_text(encoding="utf-8"))
         config = next(cell for cell in notebook["cells"] if cell["id"] == "f3275e63")
         with contextlib.redirect_stdout(io.StringIO()):
             exec("".join(config["source"]), namespace)
@@ -376,13 +376,15 @@ class EvaluationTests(unittest.TestCase):
             result = evaluation.predict_with_correction(backend, {
                 "id": "test", "input": self.evidence_text(missing_quantity=True),
             })
-        self.assertEqual(backend.predict.call_count, 2)
+        self.assertEqual(backend.predict.call_count, 1)
         self.assertTrue(result["arithmetic_warnings"])
         self.assertEqual(result["payload"]["total_ht"], self.gold["total_ht"])
         self.assertIsNone(result["payload"]["line_items"][0]["quantity"])
         self.assertTrue(any("line_items.0.quantity" in warning for warning in result["warnings"]))
         self.assertFalse(evaluation.score(result["raw"], invalid)["valid"])
-        self.assertTrue(result["correction_attempted"])
+        self.assertFalse(result["correction_attempted"])
+        self.assertEqual(result["attempt_count"], 1)
+        self.assertEqual(result["attempts"], [self.prediction(raw)])
 
     def test_hallucinated_quantity_retries_with_operands_line_and_invoice_totals(self):
         corrected = {
@@ -441,21 +443,36 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("Incohérence sur la ligne 'Second article'", prompt)
 
     def test_failed_correction_keeps_structural_fallback_with_explicit_error(self):
-        invalid = {**self.gold, "total_ht": self.gold["total_ht"] + 1}
+        invalid = {
+            "supplier_name": "Test supplier", "invoice_date": "2026-10-21",
+            "total_ht": 21, "total_ttc": 20,
+            "line_items": [{"description": "Service", "quantity": 3,
+                            "unit_price": 10, "total_ht": 20}],
+        }
         raw = json.dumps(invalid)
+        evidence = (
+            "Supplier: Test supplier\nInvoice date: 2026-10-21\nCurrency: GBP\n"
+            "Description | Quantity | Unit price | Amount\n"
+            "Service | 1 / 2 | 10 / 20 | 20\n"
+            "Subtotal: 20\nVAT (0%): 0\nInvoice total: 20"
+        )
         for second in (self.prediction("broken"), self.prediction("cut", "length"),
                        RuntimeError("generation failed")):
             backend = MagicMock()
             backend.predict.side_effect = [self.prediction(raw), second]
             with self.subTest(second=second), self.assertLogs(level="WARNING"):
                 result = evaluation.predict_with_correction(backend, {
-                    "id": "test", "input": self.evidence_text(missing_quantity=True),
+                    "id": "test", "input": evidence,
                 })
             self.assertEqual(result["raw"], raw)
             self.assertEqual(result["attempt_count"], 2)
             self.assertTrue(result["validation_errors"] or result["operational_error"])
             self.assertTrue(result["arithmetic_warnings"])
             self.assertEqual(backend.predict.call_count, 2)
+            self.assertIsNone(result["payload"]["line_items"][0]["quantity"])
+            self.assertIsNone(result["payload"]["line_items"][0]["unit_price"])
+            self.assertEqual(result["payload"]["line_items"][0]["total_ht"], 20)
+            self.assertEqual(result["payload"]["total_ht"], 20)
             if isinstance(second, dict) and second["finish_reason"] == "length":
                 scored = {
                     **result, **evaluation.score(result["raw"], self.gold),
@@ -528,13 +545,13 @@ class EvaluationTests(unittest.TestCase):
             backend.assert_called_once_with("cuda", True, 4096, 2048)
             lora.assert_not_called()
             self.assertEqual(backend.return_value.predict.call_count, 60)
-            report = json.loads((output / "metrics.json").read_text())
+            report = json.loads((output / "metrics.json").read_text(encoding="utf-8"))
             self.assertTrue(report["full_test"])
             self.assertEqual(report["num_examples"], 60)
             self.assertFalse(report["adapter_applied"])
             self.assertTrue(report["generation"]["self_correction"])
             self.assertEqual(report["test_sha256"], evaluation.file_hash(ROOT / "data/test.jsonl"))
-            self.assertEqual(len((output / "predictions.jsonl").read_text().splitlines()), 60)
+            self.assertEqual(len((output / "predictions.jsonl").read_text(encoding="utf-8").splitlines()), 60)
 
     def test_cli_persists_grounded_payload_and_raw_failures_without_inflating_metrics(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:

@@ -16,7 +16,10 @@ class UnreadableOCR(ValueError):
 
 def folded(text: str) -> str:
     text = unicodedata.normalize("NFKD", text)
-    return " ".join("".join(c for c in text if not unicodedata.combining(c)).casefold().split())
+    return " ".join(
+        "".join(c for c in text if not unicodedata.combining(c))
+        .casefold().replace("œ", "oe").replace("æ", "ae").split()
+    )
 
 
 LABEL_PREFIX = " \t:;,.‘’'\"`´£€$–—-"
@@ -31,7 +34,7 @@ TOTAL_HT_LABEL = re.compile(
     r"total hors taxes?|total avant taxes?|total\s*\(\s*ht\s*\)|net total|net a payer ht)\s*:?\s*"
 )
 TOTAL_TTC_LABEL = re.compile(
-    r"^(?:net a payer ttc|invoice total|total ttc|grand total|total due|"
+    r"^(?:net a{1,2} payer ttc|invoice total|total ttc|grand total|total general|total due|"
     r"total tva comprises?|total toutes taxes comprises?|amount payable|"
     r"total\s*\(\s*ttc\s*\))\s*:?\s*"
 )
@@ -57,12 +60,12 @@ def total_label_field(text: str) -> str | None:
 
 LINE_TOTAL_HEADER = re.compile(r"\b(?:amount|total|line total|amount due)\b")
 LINE_TOTAL_EXCLUDED = re.compile(
-    r"\b(?:gross|brut|subtotal|tax|vat|tva|discount|remise)\b"
+    r"\b(?:gross|brut|ttc|subtotal|tax|vat|tva|discount|remise)\b"
 )
 
 
 def is_line_total_header(text: str, *, at_start: bool = False) -> bool:
-    normalized = folded(text)
+    normalized = normalized_label(text)
     if LINE_TOTAL_EXCLUDED.search(normalized):
         return False
     matcher = LINE_TOTAL_HEADER.match if at_start else LINE_TOTAL_HEADER.search
@@ -75,15 +78,18 @@ DATE_EXCLUDED_LABEL = re.compile(
 )
 DATE_INVOICE_LABEL = re.compile(
     r"\b(?:invoice\s+date|issue\s+date|date\s+of\s+invoice|date\s+of\s+issue|"
-    r"date\s+de\s+facture|facture\s+date|date)\b"
+    r"date\s+de\s+facture|facture\s+date|issued|date)\b"
+)
+DATE_LABEL = re.compile(
+    r"\b(?:(?P<due>due(?:\s+date)?|delivery\s+date|payment\s+date|paid\s+date|"
+    r"date\s+d['’]?\s*echeance|date\s+de\s+(?:livraison|paiement)|echeance)"
+    r"|(?P<invoice>invoice\s+date|issue\s+date|date\s+of\s+invoice|date\s+of\s+issue|"
+    r"date\s+de\s+facture|facture\s+date|issued|date))\b"
 )
 
 
 def is_invoice_date_line(text: str) -> bool:
-    normalized = folded(text)
-    if DATE_EXCLUDED_LABEL.search(normalized):
-        return False
-    return bool(DATE_INVOICE_LABEL.search(normalized))
+    return any(match.lastgroup == "invoice" for match in DATE_LABEL.finditer(folded(text)))
 
 
 REPLACEMENT_CHARACTER = "\ufffd"
@@ -249,6 +255,8 @@ class DocumentEvidence:
     # "recovered" marks rows injected by the experimental table recovery: they are evidence for
     # their own cells, never a completed production reconstruction of the table.
     rows_provenance: str | None = None
+    date_locale: str | None = None
+    supplier_source: TextLine | None = None
 
 
 def reading_issue_category(evidence: DocumentEvidence) -> str | None:
@@ -302,7 +310,7 @@ NUMERIC = re.compile(
 HEADERS = {
     "description": (
         r"\b(?:description|product|produit|designation|article|prestation"
-        r"|item(?:\s+description)?(?: / service)?|libelle)\b"
+        r"|item(?:\s+description)?(?: / service)?|libelle|titre\s+du\s+livre)\b"
     ),
     "quantity": r"\b(?:quantite|qte|quantity|units|qty)\b",
     "unit_price": (
@@ -310,15 +318,16 @@ HEADERS = {
         r"|\bpu\b(?:\s+(?:net|ht))*(?=\s|$)"
         r"|\bp\.u\.(?:\s+(?:net|ht))*(?=\s|$)"
         r"|\bprix\s+unit(?:aire)?\.?(?:\s+(?:net|ht))*(?=\s|$)"
-        r"|\bnet\s+unit(?:\s+price)?\b|\bunit\s+price\b)"
+        r"|\bnet\s+unit(?:\s+price)?\b|\bunit\s+price\b|\bhourly\s+rate\b)"
     ),
     "total_ht": r"\b(?:montant(?:\s+ht)?|net amount|line total|total\s+ht)\b",
 }
 OPTIONAL_HEADERS = {
     "list_price": r"\b(?:pu catalogue|list (?:unit )?price)\b",
     "discount": r"\b(?:discount|remise)\b",
-    "tax_rate": r"\b(?:vat|tva|tax)\s*%",
-    "tax_amount": r"^(?:vat|tva|sales tax)$",
+    "tax_rate": r"(?:\b(?:vat|tva|tax)\s*(?:%|rate)|%\s*(?:tva|vat|tax)\b)",
+    "tax_amount": r"^(?:total\s+(?:vat|tva|tax)\b|(?:vat|tva|tax|sales tax)$)",
+    "gross_amount": r"\b(?:total\s+ttc|montant\s+ttc|gross\s+(?:amount|total))\b",
 }
 MONTHS = {
     word: index for index, words in enumerate((
@@ -328,6 +337,90 @@ MONTHS = {
         ("october", "octobre"), ("november", "novembre"), ("december", "decembre"),
     ), 1) for word in words
 }
+
+
+def parse_document_date(text: str, locale: str | None) -> tuple[date | None, str | None]:
+    iso = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", text)
+    local = re.search(r"\b(\d{1,2})([./])(\d{1,2})\2(\d{4})\b", text)
+    normalized = folded(text)
+    day_first = re.search(r"\b(\d{1,2}) ([a-z]+) (\d{4})\b", normalized)
+    month_first = re.search(r"\b([a-z]+) (\d{1,2}),? (\d{4})\b", normalized)
+    compact = re.fullmatch(r"\s*[:;]?\s*(\d{7,8})\s*", text)
+    parts = None
+    style = None
+    if iso:
+        parts, style = tuple(map(int, iso.groups())), "AAAA-MM-JJ"
+    elif local:
+        first, separator, second, year = local.groups()
+        first, second = int(first), int(second)
+        style = f"numérique ({separator})"
+        if first > 12:
+            day, month = first, second
+        elif second > 12:
+            day, month = second, first
+        elif locale is None and first != second:
+            return None, style
+        else:
+            day, month = (second, first) if locale == "en-US" else (first, second)
+        parts = int(year), month, day
+    elif day_first and day_first[2] in MONTHS:
+        parts, style = (int(day_first[3]), MONTHS[day_first[2]], int(day_first[1])), "mois en lettres"
+    elif month_first and month_first[1] in MONTHS:
+        parts, style = (int(month_first[3]), MONTHS[month_first[1]], int(month_first[2])), "mois en lettres"
+    elif compact:
+        raw = compact[1]
+        candidates = set()
+        for split in (1, 2):
+            first, second = raw[:split], raw[split:-4]
+            if not 1 <= len(second) <= 2:
+                continue
+            for day, month in ((first, second), (second, first)):
+                try:
+                    candidates.add(date(int(raw[-4:]), int(month), int(day)))
+                except ValueError:
+                    continue
+        return (next(iter(candidates)) if len(candidates) == 1 else None), "chiffres sans séparateurs"
+    if parts is None:
+        return None, None
+    try:
+        return date(*parts), style
+    except ValueError:
+        return None, style
+
+
+def document_date_readings(lines: list[TextLine]) -> list[tuple[str, str, TextLine]]:
+    readings = []
+    for index, line in enumerate(lines):
+        labels = list(DATE_LABEL.finditer(folded(line.text)))
+        for offset, label in enumerate(labels):
+            end = labels[offset + 1].start() if offset + 1 < len(labels) else len(folded(line.text))
+            text = folded(line.text)[label.end():end]
+            source = line
+            if not re.search(r"\d", text) and index + 1 < len(lines):
+                following = lines[index + 1]
+                height = line.box[3] - line.box[1]
+                if (
+                    following.page == line.page
+                    and 0 <= following.box[1] - line.box[3] <= 3 * height
+                    and abs(following.box[0] - line.box[0]) <= 2 * height
+                    and not DATE_LABEL.search(folded(following.text))
+                ):
+                    text, source = following.text, following
+            readings.append((label.lastgroup or "invoice", text, source))
+    return readings
+
+
+def document_date_locale(readings: list[tuple[str, str, TextLine]], locale: str | None) -> str | None:
+    orders = set()
+    for _, text, _ in readings:
+        for match in re.finditer(r"\b(\d{1,2})([./])(\d{1,2})\2(\d{4})\b", text):
+            first, _, second, year = match.groups()
+            first, second = int(first), int(second)
+            if first > 12 and second <= 12 and parse_document_date(match.group(), "fr-FR")[0]:
+                orders.add("fr-FR")
+            elif second > 12 and first <= 12 and parse_document_date(match.group(), "en-US")[0]:
+                orders.add("en-US")
+    return next(iter(orders)) if len(orders) == 1 else None if orders else locale
 
 
 def invoice_number_from_text(text: str) -> str | None:
@@ -364,7 +457,7 @@ def invoice_number_from_text(text: str) -> str | None:
 
 
 def _header_matches(key: str, text: str, *, at_start: bool = False) -> bool:
-    normalized = folded(text)
+    normalized = _header_text(text)
     if key == "total_ht":
         if re.search(r"\b(?:gross|brut)\s+(?:amount|montant)\b", normalized):
             return False
@@ -377,7 +470,146 @@ def _header_matches(key: str, text: str, *, at_start: bool = False) -> bool:
             return False
     pattern = HEADERS.get(key)
     matcher = re.match if at_start else re.search
-    return bool(pattern and matcher(pattern, normalized))
+    if pattern and matcher(pattern, normalized):
+        return True
+    return key == "unit_price" and not at_start and _contextual_rate_price_header(text)
+
+
+def _header_text(text: str) -> str:
+    vocabulary = {"description", "designation", "product", "quantity", "quantite", "hourly",
+                  "unitaire", "amount", "montant"}
+
+    def correct(match):
+        word = match.group()
+        candidates = [
+            target for target in vocabulary if len(word) == len(target)
+            and sum(left != right for left, right in zip(word, target)) == 1
+        ]
+        return candidates[0] if word not in vocabulary and len(candidates) == 1 else word
+
+    normalized = re.sub(r"\b[a-z]{5,}\b", correct, normalized_label(text))
+    # Header-only OCR repair: a known two-word label, never a body value or supplier name.
+    return re.sub(r"\bhourly\s+[a-z]{4}\b", lambda match: (
+        "hourly rate" if sum(a != b for a, b in zip(match.group(), "hourly rate")) <= 1
+        else match.group()
+    ), normalized)
+
+
+def _contextual_rate_price_header(text: str) -> bool:
+    normalized = _header_text(text)
+    if not (
+        re.search(HEADERS["description"], normalized)
+        and re.search(HEADERS["quantity"], normalized)
+        and (
+            re.search(HEADERS["total_ht"], normalized)
+            or is_line_total_header(text)
+            or re.search(r"\b(?:subtotal|sub[\s-]+total)\b", normalized)
+        )
+    ):
+        return False
+    aliases = list(re.finditer(r"\b(rate|price)\b", normalized))
+    if len(aliases) == 1:
+        return True
+    return (
+        len(aliases) == 2
+        and aliases[0].group(1) == "rate"
+        and aliases[1].group(1) == "price"
+        and bool(re.fullmatch(
+            r"\s*/\s*", normalized[aliases[0].end():aliases[1].start()],
+        ))
+    )
+
+
+def _header_token_index(line: TextLine, key: str) -> int | None:
+    for index in range(len(line.tokens)):
+        suffix = " ".join(token.text for token in line.tokens[index:])
+        if _header_matches(key, suffix, at_start=True) or (
+            key == "total_ht" and is_line_total_header(suffix, at_start=True)
+        ):
+            return index
+    return None
+
+
+def _rate_price_token_index(line: TextLine) -> int | None:
+    labels = [normalized_label(token.text).strip() for token in line.tokens]
+    compact = [
+        index for index, label in enumerate(labels)
+        if re.fullmatch(r"rate\s*/\s*price", label)
+    ]
+    if len(compact) == 1:
+        return compact[0]
+    if compact:
+        return None
+    rates = [index for index, label in enumerate(labels) if label == "rate"]
+    prices = [index for index, label in enumerate(labels) if label == "price"]
+    if len(rates) == 1 and len(prices) == 1 and rates[0] < prices[0]:
+        if any(label == "/" for label in labels[rates[0] + 1:prices[0]]):
+            return rates[0]
+        return None
+    if len(rates) + len(prices) == 1:
+        return (rates or prices)[0]
+    return None
+
+
+def _contextual_table_header_starts(line: TextLine) -> dict[str, float]:
+    description = _header_token_index(line, "description")
+    quantity = _header_token_index(line, "quantity")
+    unit_price = _header_token_index(line, "unit_price")
+    if unit_price is None and _contextual_rate_price_header(line.text):
+        unit_price = _rate_price_token_index(line)
+    total_ht = _header_token_index(line, "total_ht")
+    subtotal = [
+        index for index, token in enumerate(line.tokens)
+        if normalized_label(token.text).strip() in {"subtotal", "sub total", "sub-total"}
+    ]
+    subtotal_column = total_ht is None and len(subtotal) == 1
+    if subtotal_column:
+        total_ht = subtotal[0]
+    if (
+        description is None or quantity is None or unit_price is None or total_ht is None
+        or not (
+            line.tokens[description].box[0] < line.tokens[quantity].box[0]
+            < line.tokens[unit_price].box[0] < line.tokens[total_ht].box[0]
+        )
+    ):
+        return {}
+    starts = {}
+    if _header_token_index(line, "unit_price") is None:
+        starts["unit_price"] = line.tokens[unit_price].box[0]
+    if subtotal_column:
+        starts["total_ht"] = line.tokens[total_ht].box[0]
+    return starts
+
+
+def _contextual_literal_header_columns(line: TextLine) -> dict[str, int]:
+    if "|" not in line.text:
+        return {}
+    cells = [folded(cell).strip() for cell in line.text.split("|")]
+    description = [
+        index for index, cell in enumerate(cells)
+        if _header_matches("description", cell)
+    ]
+    quantity = [
+        index for index, cell in enumerate(cells)
+        if _header_matches("quantity", cell)
+    ]
+    unit_price = [
+        index for index, cell in enumerate(cells)
+        if _header_matches("unit_price", cell)
+        or re.fullmatch(r"(?:rate|price|rate\s*/\s*price)", cell)
+    ]
+    total_ht = [
+        index for index, cell in enumerate(cells)
+        if _header_matches("total_ht", cell)
+        or is_line_total_header(cell)
+        or cell in {"subtotal", "sub total", "sub-total"}
+    ]
+    if (
+        len(description) == len(quantity) == len(unit_price) == len(total_ht) == 1
+        and description[0] < quantity[0] < unit_price[0] < total_ht[0]
+    ):
+        return {"unit_price": unit_price[0], "total_ht": total_ht[0]}
+    return {}
 
 
 SUPPLIER_LEGAL_SUFFIX = re.compile(
@@ -385,7 +617,7 @@ SUPPLIER_LEGAL_SUFFIX = re.compile(
     re.I,
 )
 SUPPLIER_CLIENT_MARKER = re.compile(
-    r"\b(?:bill\s+to|ship\s+to|sold\s+to|deliver\s+to|invoice\s+to|"
+    r"\b(?:bill(?:ed)?\s+to|ship\s+to|sold\s+to|deliver\s+to|invoice\s+to|"
     r"facture\s+a|facture\s+au)\b|^\s*(?:customer|client)\s*:"
 )
 SUPPLIER_CONTACT_MARKER = re.compile(
@@ -437,11 +669,103 @@ class SupplierCandidate:
 
 
 def _looks_table_header(line: TextLine) -> bool:
-    return all(
+    core = all(
         _header_matches(key, line.text)
-        or key == "total_ht" and is_line_total_header(line.text)
-        for key in HEADERS
+        for key in ("description", "quantity", "unit_price")
     )
+    return core and (
+        _header_matches("total_ht", line.text) or is_line_total_header(line.text)
+        or bool(re.search(OPTIONAL_HEADERS["gross_amount"], folded(line.text)))
+    )
+
+
+def _issuer_names(lines: list[TextLine]) -> list[str]:
+    names = []
+    for index, line in enumerate(lines[:-1]):
+        label = re.search(r"\b(?:billed\s+from|please\s+make\s+payment\s+to)\b", folded(line.text))
+        if label is None:
+            continue
+        source = lines[index + 1]
+        height = line.box[3] - line.box[1]
+        if source.page != line.page or not 0 <= source.box[1] - line.box[3] <= 3 * height:
+            continue
+        # A neighbouring Billed-to column bounds the issuer region.
+        markers = [
+            token.box[0] for token in line.tokens
+            if re.match(r"^bill(?:ed)?\b", folded(token.text))
+        ]
+        right = sorted(markers)[1] if len(markers) > 1 else float("inf")
+        tokens = [token for token in source.tokens if line.box[0] - height <= token.box[0] < right]
+        if tokens and all(token.confidence >= OCR_CONFIG.confidence for token in tokens):
+            name = _clean_supplier_name(" ".join(token.text for token in tokens))
+            if name and _supplier_context_ok(name) and not SUPPLIER_EXCLUDED_LINE.search(folded(name)):
+                names.append(name)
+    return names
+
+
+def _registered_office_supplier(lines: list[TextLine]) -> SupplierCandidate | None:
+    client = next((
+        index for index, line in enumerate(lines)
+        if re.search(r"^\s*client\b|(?:bill(?:ed)?|invoice|ship)\s+to\b", folded(line.text))
+    ), None)
+    if client is None:
+        return None
+    candidates = []
+    for index, label in enumerate(lines[:-2]):
+        words = [normalized_label(token.text) for token in label.tokens]
+        for start in range(len(words) - 1):
+            if words[start:start + 2] != ["siege", "social"]:
+                continue
+            label_tokens = label.tokens[start:start + 2]
+            if any(token.confidence < OCR_CONFIG.confidence for token in label_tokens):
+                continue
+            left = label_tokens[0].box[0]
+            height = max(token.box[3] - token.box[1] for token in label_tokens)
+            right = next((
+                token.box[0] for token in label.tokens[start + 2:]
+                if token.box[0] - label_tokens[-1].box[2] > 2 * height
+            ), float("inf"))
+
+            def column(line):
+                return [
+                    token for token in line.tokens
+                    if left - height <= token.box[0] < right
+                ]
+
+            name_line, address_line = lines[index + 1:index + 3]
+            if (
+                name_line.page != label.page or address_line.page != label.page
+                or not 0 < name_line.box[1] - label.box[1] <= 3 * height
+                or not 0 < address_line.box[1] - name_line.box[1] <= 3 * height
+            ):
+                continue
+            name_tokens, address_tokens = column(name_line), column(address_line)
+            name = _clean_supplier_name(" ".join(token.text for token in name_tokens))
+            if (
+                not name or not _supplier_context_ok(name)
+                or SUPPLIER_EXCLUDED_LINE.search(folded(name))
+                or not _address_shaped(" ".join(token.text for token in address_tokens))
+                or any(token.confidence < OCR_CONFIG.fast_token_confidence for token in name_tokens)
+            ):
+                continue
+            header = [column(line) for line in lines[:client] if line.page == label.page]
+            header_name = any(
+                folded(" ".join(token.text for token in tokens[offset:offset + len(name_tokens)])) == folded(name)
+                and all(token.confidence >= OCR_CONFIG.fast_token_confidence
+                        for token in tokens[offset:offset + len(name_tokens)])
+                for tokens in header for offset in range(len(tokens) - len(name_tokens) + 1)
+            )
+            registration = any(
+                re.search(r"\b(?:siren|siret)\b", folded(" ".join(token.text for token in tokens)))
+                and any(re.search(r"\d", token.text) for token in tokens)
+                and all(token.confidence >= OCR_CONFIG.confidence for token in tokens)
+                for tokens in header
+            )
+            if header_name and registration:
+                source = TextLine(name, name_tokens, name_line.page, union_box(name_tokens))
+                candidates.append(SupplierCandidate(name, source, 3))
+    names = {folded(candidate.name) for candidate in candidates}
+    return candidates[0] if len(names) == 1 else None
 
 
 def _client_line_indices(lines: list[TextLine]) -> set[int]:
@@ -625,12 +949,12 @@ def positioned_lines(tokens: list[Token]) -> list[TextLine]:
 def from_tsv(data: dict, *, page: int = 0, locale: str | None = None) -> DocumentEvidence:
     tokens = []
     for index, text in enumerate(data["text"]):
-        if not text.strip() or float(data["conf"][index]) < 0:
+        if not text.strip() or text.strip() in {"|", "||", "[", "]"} or float(data["conf"][index]) < 0:
             continue
         left, top = float(data["left"][index]), float(data["top"][index])
         right, bottom = left + float(data["width"][index]), top + float(data["height"][index])
         tokens.append(Token(text, page, (left, top, right, bottom), float(data["conf"][index])))
-    evidence = from_tokens(tokens, locale=locale)
+    evidence = from_tokens(tokens, locale=locale, literal_columns=False)
     evidence.source_kind = "ocr"
     return evidence
 
@@ -713,15 +1037,46 @@ def combine_pages(pages: list[DocumentEvidence], *, contains_ocr: bool = False) 
     result.invoice_number = next(iter(invoice_numbers)) if len(invoice_numbers) == 1 else None
     result.invoice_date = next(iter(dates)) if len(dates) == 1 else None
     result.locale = next(iter(locales)) if len(locales) == 1 else None
+    result.date_locale = document_date_locale(document_date_readings(result.lines), result.locale)
     return result
 
 
 def from_tokens(tokens: list[Token], *, locale: str | None = None,
-                raw_lines: dict[tuple[int, float], str] | None = None) -> DocumentEvidence:
+                raw_lines: dict[tuple[int, float], str] | None = None,
+                literal_columns: bool = True) -> DocumentEvidence:
     lines = positioned_lines(tokens)
     if raw_lines:
         for line in lines:
             line.text = raw_lines.get((line.page, line.box[1]), line.text)
+    if raw_lines is None:
+        joined = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if (
+                index + 1 < len(lines)
+                and all(_header_matches(key, line.text) for key in ("description", "quantity", "total_ht"))
+                and not _header_matches("unit_price", line.text)
+            ):
+                following = lines[index + 1]
+                price = next((token for token in line.tokens if folded(token.text) == "prix"), None)
+                if (
+                    price is not None and following.page == line.page
+                    and 0 <= following.box[1] - line.box[3] <= 2 * (price.box[3] - price.box[1])
+                    and folded(following.text) == "unitaire"
+                    and abs(following.box[0] - price.box[0]) <= 2 * (price.box[3] - price.box[1])
+                ):
+                    price_index = line.tokens.index(price)
+                    combined = [
+                        *line.tokens[:price_index + 1], *following.tokens,
+                        *line.tokens[price_index + 1:],
+                    ]
+                    line = TextLine(" ".join(token.text for token in combined), combined,
+                                    line.page, union_box(combined))
+                    index += 1
+            joined.append(line)
+            index += 1
+        lines = joined
     text = "\n".join(line.text for line in lines)
     if locale is None:
         locale = "fr-FR" if re.search(r"\bEUR\b|€|\bFACTURE\b", text, re.I) else (
@@ -729,9 +1084,12 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             "en-US" if re.search(r"\bUSD\b|\$", text) else None
         )
     evidence = DocumentEvidence(text, locale, tokens, lines)
+    date_readings = document_date_readings(lines)
+    evidence.date_locale = document_date_locale(date_readings, locale)
     evidence.invoice_number = invoice_number_from_text(text)
     columns: dict[str, int] = {}
     starts: dict[str, float] = {}
+    contextual_ocr_header = False
     header_page = -1
     suppliers: dict[str, str] = {}
     dates: set[str] = set()
@@ -745,25 +1103,16 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 key = re.sub(r"\b(?:ltd|limited)\.?$", "ltd", folded(name))
                 key = re.sub(r"\bs[. ]*a[. ]*s\.?$", "sas", key)
                 suppliers[key] = name
-        if is_invoice_date_line(line.text):
-            date_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", line.text)
-            local_date = re.search(r"\b(\d{2})[./](\d{2})[./](\d{4})\b", line.text)
-            if date_match:
-                dates.add(date_match.group())
-            elif local_date:
-                day, month, year = local_date.groups()
-                if locale == "en-US":
-                    day, month = month, day
-                dates.add(f"{year}-{month}-{day}")
-            else:
-                day_first = re.search(r"\b(\d{1,2}) ([a-z]+) (\d{4})\b", normalized)
-                month_first = re.search(r"\b([a-z]+) (\d{1,2}),? (\d{4})\b", normalized)
-                if day_first and day_first[2] in MONTHS:
-                    dates.add(f"{day_first[3]}-{MONTHS[day_first[2]]:02d}-{int(day_first[1]):02d}")
-                elif month_first and month_first[1] in MONTHS:
-                    dates.add(f"{month_first[3]}-{MONTHS[month_first[1]]:02d}-{int(month_first[2]):02d}")
         amounts = number_tokens(line.text, line, locale)
         label = normalized_label(line.text)
+        if (
+            re.match(r"^(?:frais\s+de\s+livraison|shipping(?:\s+(?:charges?|cost))?)\b", label)
+            and len(amounts) <= 1
+        ):
+            # A summary charge supplies no quantity or item-column evidence.
+            columns, starts = {}, {}
+            contextual_ocr_header = False
+            continue
         if re.match(r"^(?:remise|discount|rabais)\b.*:", normalized) and not re.search(
             r"inclu|appliqu|already applied", normalized,
         ):
@@ -771,7 +1120,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             if len(money) == 1:
                 evidence.discounts.append(money[0])
                 continue
-        tax_label = re.match(r"^(?:tva|vat|sales tax)\s*(?:\(|:|\d)", label)
+        tax_label = re.match(r"^(?:tva|vat|tax|sales tax)\s*(?:\(|:|\d|[$€£])", label)
         total_field = None
         if TOTAL_HT_LABEL.match(label):
             total_field = "total_ht"
@@ -782,6 +1131,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
         )
         if tax_label or total_field or unqualified_total:
             columns, starts = {}, {}
+            contextual_ocr_header = False
             if tax_label and amounts:
                 rate = next((n for n in amounts if "%" in n.raw), None)
                 money = [n for n in amounts if "%" not in n.raw]
@@ -796,7 +1146,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 if len(money) == 1:
                     evidence.totals.setdefault("total_candidate", []).append(money[0])
             continue
-        if "|" in line.text:
+        if literal_columns and "|" in line.text:
             inline = line.text.split("|")
             inline_values = {}
             for cell in inline[1:]:
@@ -809,11 +1159,25 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             if len(inline_values) >= 2:
                 evidence.rows.append(TableRow(inline[0].strip(), inline_values, line))
                 continue
+        contextual_starts = _contextual_table_header_starts(line)
+        contextual_columns = (
+            _contextual_literal_header_columns(line)
+            if literal_columns and "|" in line.text else {}
+        )
         matches = {key: _header_matches(key, line.text) for key in HEADERS}
         if not matches["total_ht"]:
             matches["total_ht"] = is_line_total_header(line.text)
-        if all(matches.values()):
-            if "|" in line.text:
+        for key in contextual_starts:
+            matches[key] = True
+        for key in contextual_columns:
+            matches[key] = True
+        partial_header = (
+            all(matches[key] for key in ("description", "quantity", "unit_price"))
+            and re.search(OPTIONAL_HEADERS["gross_amount"], normalized)
+        )
+        if all(matches.values()) or partial_header:
+            required = {"description", "quantity", "unit_price"} if partial_header else set(HEADERS)
+            if literal_columns and "|" in line.text:
                 cells = line.text.split("|")
                 columns = {}
                 for key in HEADERS:
@@ -822,6 +1186,8 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                         if _header_matches(key, cell)
                         or key == "total_ht" and is_line_total_header(cell)
                     ]
+                    if key in contextual_columns:
+                        indexes = [contextual_columns[key]]
                     if len(indexes) == 1:
                         columns[key] = indexes[0]
                 for key, pattern in OPTIONAL_HEADERS.items():
@@ -832,13 +1198,16 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                     if len(indexes) == 1:
                         columns[key] = indexes[0]
                 starts = {}
-                valid_header = set(HEADERS).issubset(columns) and len(
+                valid_header = required.issubset(columns) and len(
                     set(columns.values())
                 ) == len(columns)
             else:
                 columns = {}
                 starts = {}
                 for key, pattern in HEADERS.items():
+                    if key in contextual_starts:
+                        starts[key] = contextual_starts[key]
+                        continue
                     for index in range(len(line.tokens)):
                         suffix = " ".join(token.text for token in line.tokens[index:])
                         if _header_matches(key, suffix, at_start=True) or (
@@ -857,19 +1226,23 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                             starts[key] = line.tokens[index].box[0]
                             break
                 valid_header = (
-                    set(HEADERS).issubset(starts)
+                    required.issubset(starts)
                     and len(set(starts.values())) == len(starts)
                 )
             if not valid_header:
                 columns, starts = {}, {}
+                contextual_ocr_header = False
                 continue
             header_page = line.page
+            contextual_ocr_header = (
+                not literal_columns and bool(contextual_starts or contextual_columns)
+            )
             continue
         if line.page != header_page or not (columns or starts):
             continue
         cell_texts: dict[str, str] = {}
         cell_lines: dict[str, TextLine] = {}
-        if columns and "|" in line.text:
+        if columns and literal_columns and "|" in line.text:
             cells = line.text.split("|")
             if len(cells) > max(columns.values()):
                 cell_texts = {key: cells[index].strip() for key, index in columns.items()}
@@ -878,7 +1251,20 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             for index, key in enumerate(ordered):
                 left = starts[key] - 4
                 right = starts[ordered[index + 1]] - 4 if index + 1 < len(ordered) else float("inf")
-                cell_tokens = [token for token in line.tokens if left <= token.box[0] < right]
+                if key == "description" and index > 0 and ordered[index - 1] == "quantity":
+                    quantity_tokens = [
+                        token for token in line.tokens
+                        if starts["quantity"] - 4 <= token.box[0] < left
+                        and number_tokens(token.text, TextLine(token.text, [token], token.page, token.box), locale)
+                    ]
+                    if len(quantity_tokens) == 1:
+                        # A centred description header can begin after the actual text.
+                        # A unique printed quantity bounds the description on its left.
+                        left = quantity_tokens[0].box[2] + 1
+                cell_tokens = [
+                    token for token in line.tokens
+                    if left <= (token.box[0] + token.box[2]) / 2 < right
+                ]
                 if cell_tokens:
                     cell_texts[key] = " ".join(t.text for t in cell_tokens)
                     cell_lines[key] = TextLine(cell_texts[key], cell_tokens, line.page, union_box(cell_tokens))
@@ -906,11 +1292,37 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 f"alignement en-tête/ligne non recoupé pour {line.text!r}."
             )
             continue
+        description_line = cell_lines.get("description", line)
+        if contextual_ocr_header:
+            required_cells = ("quantity", "unit_price", "total_ht")
+            complete_cells = all(
+                values[key]
+                and cell_lines.get(key)
+                and all(
+                    token.confidence >= OCR_CONFIG.fast_token_confidence
+                    for token in cell_lines[key].tokens
+                )
+                for key in required_cells
+            )
+            confident_description = (
+                bool(description_cell.strip())
+                and description_is_usable(description_cell)
+                and bool(description_line.tokens)
+                and all(
+                    token.confidence >= OCR_CONFIG.fast_token_confidence
+                    for token in description_line.tokens
+                )
+            )
+            if not complete_cells or not confident_description:
+                evidence.issues.append(
+                    "Ligne de tableau contextuel ignorée : description ou cellules "
+                    "quantité/prix/sous-total incomplètes ou peu fiables."
+                )
+                continue
         if sum(bool(values[key]) for key in ("quantity", "unit_price", "total_ht")) >= 2:
             low_confidence = any(t.confidence < 60 for t in line.tokens)
             if low_confidence:
                 evidence.issues.append(f"Ligne OCR à faible confiance : {line.text}")
-            description_line = cell_lines.get("description", line)
             evidence.rows.append(TableRow(
                 cell_texts.get("description", ""), values, line,
                 all(token.confidence >= 60 for token in description_line.tokens),
@@ -923,7 +1335,9 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 line.page == last.line.page
                 and description_start is not None
                 and line.tokens
-                and 0 <= line.box[1] - last.line.box[3] < 20
+                and 0 <= line.box[1] - last.line.box[3] <= 3 * max(
+                    line.box[3] - line.box[1], last.line.box[3] - last.line.box[1],
+                )
                 and abs(min(token.box[0] for token in line.tokens) - description_start) <= 8
                 and all(token.confidence >= 60 for token in line.tokens)
                 and description_is_usable(description_text)
@@ -933,6 +1347,16 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
                 last.secondary_description = " ".join(
                     filter(None, (last.secondary_description, description_text))
                 )
+    for name in _issuer_names(lines):
+        suppliers.setdefault(folded(name), name)
+    for kind, raw, _ in date_readings:
+        if kind != "invoice":
+            continue
+        parsed, style = parse_document_date(raw, evidence.date_locale)
+        if parsed is not None:
+            dates.add(parsed.isoformat())
+        elif style:
+            evidence.issues.append("invoice_date : date documentaire ambiguë ou invalide.")
     if len(suppliers) == 1:
         supplier = next(iter(suppliers.values()))
         evidence.supplier_raw = supplier
@@ -944,10 +1368,16 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
     elif suppliers:
         evidence.issues.append("supplier_name : plusieurs fournisseurs incompatibles dans le document.")
     else:
-        implicit = _implicit_supplier_name(lines)
-        if implicit:
-            evidence.supplier_raw = implicit
-            evidence.supplier = implicit
+        office = _registered_office_supplier(lines)
+        if office is not None:
+            evidence.supplier_raw = office.name
+            evidence.supplier = office.name
+            evidence.supplier_source = office.line
+        else:
+            implicit = _implicit_supplier_name(lines)
+            if implicit:
+                evidence.supplier_raw = implicit
+                evidence.supplier = implicit
     if len(dates) == 1:
         candidate = next(iter(dates))
         try:

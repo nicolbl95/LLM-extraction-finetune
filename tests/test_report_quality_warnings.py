@@ -132,7 +132,7 @@ def require_real_tesseract():
         pytest.skip("Tesseract fra/eng languages are missing")
 
 
-def test_example_company_real_report_is_not_marked_coherent():
+def test_example_company_reconstructed_table_has_no_obsolete_layout_warning():
     require_real_tesseract()
     path = ROOT / "diagnostics" / "uk-example-company.png"
     if not path.is_file():
@@ -143,8 +143,10 @@ def test_example_company_real_report_is_not_marked_coherent():
     report = render_report(
         evidence, result.validation, result.statuses, [], source_size=image.size,
     )
-    assert "Tableau attendu mais illisible" in report
-    assert "✅ Facture cohérente" not in report
+    assert "Tableau attendu mais illisible" not in report
+    assert len(result.payload["line_items"]) == 3
+    assert all(value is not None for row in result.payload["line_items"] for value in row.values())
+    assert "Lecture cohérente" in report
 
 
 def test_ellington_real_report_has_no_resolution_warning():

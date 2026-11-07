@@ -47,9 +47,13 @@ class InvoiceTests(unittest.TestCase):
                 self.assertEqual(
                     set(r["format"] for r in subset if r["template_id"] == template), set(FORMATS),
                 )
-        for record in self.records:
+        for record, document in self.generated:
             validate_record(record)
-            self.assertTrue((ROOT / record["template_reference"]).is_file())
+            self.assertEqual(record["template_reference"],
+                             f"data/templates/{document.template + 1}.png")
+            self.assertEqual(record["template_id"], document.template + 1)
+            self.assertEqual(record["visual"]["font"], document.font)
+            self.assertEqual(len(document.rows), len(record["output"]["line_items"]))
             self.assertEqual(set(record["output"]), {"supplier_name", "invoice_date", "total_ht", "total_ttc", "line_items"})
 
     def test_reproducible(self):

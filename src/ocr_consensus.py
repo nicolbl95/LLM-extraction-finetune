@@ -8,8 +8,8 @@ from difflib import SequenceMatcher
 from itertools import product
 
 from invoice_evidence import (
-    DocumentEvidence, description_is_usable, folded, has_replacement_character,
-    is_invoice_date_line,
+    DocumentEvidence, OPTIONAL_HEADERS, description_is_usable, document_date_readings,
+    folded, has_replacement_character,
 )
 from invoice_validation import parse_date
 from ocr_config import OCR_CONFIG
@@ -114,6 +114,35 @@ def _siret_values(evidence: DocumentEvidence) -> list[str]:
     return values
 
 
+def _confident_invoice_number(evidence: DocumentEvidence, candidate: str, confidence: int) -> bool:
+    identifier = re.compile(rf"(?<!\w){re.escape(candidate)}(?!\w)", re.I)
+    return any(
+        token.confidence >= confidence and identifier.search(token.text)
+        for line in evidence.lines
+        if identifier.search(line.text)
+        for token in line.tokens
+    )
+
+
+def _agreed_invoice_number(
+    readings: dict[str, list[DocumentEvidence]], confidence: int,
+) -> str | None:
+    candidates = set()
+    families_by_candidate = defaultdict(set)
+    for family, entries in readings.items():
+        for evidence in entries:
+            candidate = evidence.invoice_number
+            if candidate is None:
+                continue
+            candidates.add(candidate)
+            if _confident_invoice_number(evidence, candidate, confidence):
+                families_by_candidate[candidate].add(family)
+    if len(candidates) != 1:
+        return None
+    candidate = next(iter(candidates))
+    return candidate if len(families_by_candidate[candidate]) >= 2 else None
+
+
 def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=OCR_CONFIG.confidence) -> DocumentEvidence:
     all_reads = [evidence for group in readings.values() for evidence in group]
     anchor = max(all_reads, key=lambda evidence: (
@@ -129,41 +158,46 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
         ("siret", value)
         for value in _agreed(readings, _siret_values, lambda candidate: candidate, unanimous=True)
     ]
-    for key in ("supplier", "invoice_number", "invoice_date"):
+    result.invoice_number = _agreed_invoice_number(readings, confidence)
+    for key in ("supplier", "invoice_date"):
         def metadata(evidence):
             candidate = getattr(evidence, key)
             if candidate is None:
                 return []
-            if key == "invoice_number":
-                return [candidate]
             if key == "supplier":
                 expected_name = folded(evidence.supplier_raw or candidate)
-                if evidence.supplier_is_explicit:
+                if evidence.supplier_source is not None:
+                    relevant = [evidence.supplier_source]
+                elif evidence.supplier_is_explicit:
                     relevant = [
                         line for line in evidence.lines
                         if "supplier" in folded(line.text) or "fournisseur" in folded(line.text)
                     ]
+                    if not relevant:
+                        relevant = [line for line in evidence.lines if expected_name in folded(line.text)]
                 else:
                     relevant = [
                         line for line in evidence.lines
                         if expected_name in folded(line.text)
                     ]
             else:
-                relevant = [
-                    line for line in evidence.lines
-                    if is_invoice_date_line(line.text)
-                ]
-                if not relevant:
-                    return []
-                for line in relevant:
+                for kind, raw, line in document_date_readings(evidence.lines):
+                    date_value, _ = parse_date(raw, evidence.date_locale)
+                    if kind != "invoice" or date_value is None:
+                        continue
                     for token in line.tokens:
-                        parsed, _ = parse_date(token.text, evidence.locale)
+                        parsed, _ = parse_date(token.text, evidence.date_locale)
                         if (
                             parsed is not None
                             and parsed.isoformat() == candidate
                             and token.confidence >= confidence
                         ):
                             return [candidate]
+                    if (
+                        date_value.isoformat() == candidate and line.tokens
+                        and all(token.confidence >= confidence for token in line.tokens)
+                    ):
+                        return [candidate]
                 return []
             if not relevant or any(token.confidence < confidence for line in relevant for token in line.tokens):
                 return []
@@ -213,21 +247,50 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
         )
         row.description = descriptions[0] if len(descriptions) == 1 else ""
         row.description_confident = bool(row.description)
+        continuation_matches = {}
+        for family, entries in matches.items():
+            available = [entry for entry in entries if entry.secondary_description]
+            if not available:
+                continue
+            longest = max(available, key=lambda entry: len(folded(entry.secondary_description)))
+            if all(
+                folded(longest.secondary_description) == folded(entry.secondary_description)
+                or folded(longest.secondary_description).startswith(
+                    folded(entry.secondary_description) + " "
+                ) for entry in available
+            ):
+                continuation_matches[family] = [longest]
         secondary = _agreed(
-            matches,
+            continuation_matches,
             lambda candidate: [candidate.secondary_description] if (
                 candidate.secondary_description
                 and description_is_usable(candidate.secondary_description)
                 and not has_replacement_character(candidate.secondary_description)
             ) else [],
-            folded, unanimous=True, prefer=_accent_count,
+            folded, prefer=_accent_count,
         )
+        if secondary:
+            observed = [
+                candidate.secondary_description for entries in matches.values() for candidate in entries
+                if candidate.secondary_description
+            ]
+            # Missing trailing OCR words do not contradict an independently corroborated
+            # longer reading; differing words still reject the continuation.
+            compatible = [
+                candidate for candidate in secondary if all(
+                    folded(candidate) == folded(value)
+                    or folded(candidate).startswith(folded(value) + " ")
+                    or folded(value).startswith(folded(candidate) + " ")
+                    for value in observed
+                )
+            ]
+            secondary = [max(compatible, key=len)] if compatible else []
         if row.description_confident and len(secondary) == 1:
             row.secondary_description = secondary[0]
             row.description = f"{row.description} {secondary[0]}"
         else:
             row.secondary_description = ""
-        for key in ("quantity", "unit_price", "total_ht"):
+        for key in ("quantity", "unit_price", "total_ht", *OPTIONAL_HEADERS):
             candidates_for_family = lambda candidate: [
                     number for number in candidate.cells.get(key, [])
                     if number_confident(candidate, number, confidence)
@@ -239,6 +302,15 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
                 if len(families) >= 2
             }
             row.cells[key] = _agreed(matches, candidates_for_family, lambda number: number.value)
+        if (
+            {number.value for number in row.cells.get("unit_price", [])} == {Decimal(0)}
+            and any(value > 0 for value in row.family_votes.get("gross_amount", {}))
+        ):
+            row.cells["unit_price"] = []
+            result.issues.append(
+                f"Ligne « {row.description} » : prix nul incompatible avec le montant TTC "
+                "recoupé ; lecture du prix non confirmée."
+            )
         candidates = [
             {number.value for number in row.cells[key]} for key in ("quantity", "unit_price", "total_ht")
         ]

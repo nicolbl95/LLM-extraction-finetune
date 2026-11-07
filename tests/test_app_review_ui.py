@@ -82,11 +82,20 @@ class ReviewUiTests(unittest.TestCase):
                  for name in ("preview_ui", "run_extraction_ui")}
         return dependencies, calls
 
+    def review_handlers(self):
+        return {
+            "preview_ui": main.preview_ui_with_review,
+            "run_extraction_ui": main.run_extraction_ui_with_review,
+        }
+
     def extract(self, handler, filename, state=None):
         text = EvidenceText(from_text(INVOICE_TEXT, locale="fr-FR"))
-        with patch.object(main, "document_text", return_value=text), \
+        cache_dir = self.folder / "gradio-cache"
+        cache_dir.mkdir(exist_ok=True)
+        with patch.dict(os.environ, {"GRADIO_TEMP_DIR": str(cache_dir)}), \
+                patch.object(main, "document_text", return_value=text), \
                 patch.object(main, "predict_invoice", return_value=PREDICTION) as predict:
-            if handler.__name__ == "run_extraction_ui":
+            if handler.__name__ in {"run_extraction_ui", "run_recruiter_extraction_ui"}:
                 frames = list(handler(filename))
             else:
                 frames = list(handler(filename, state))
@@ -104,28 +113,68 @@ class ReviewUiTests(unittest.TestCase):
         with self.environment(False):
             app = main.build_app()
             events, calls = self.handlers(app)
-            self.assertEqual(len(events["preview_ui"]["outputs"]), 8)
-            self.assertEqual(len(events["run_extraction_ui"]["outputs"]), 7)
+            self.assertEqual(len(events["preview_ui"]["outputs"]), 5)
+            self.assertEqual(len(events["run_extraction_ui"]["outputs"]), 4)
             self.assertEqual(len(events["run_extraction_ui"]["inputs"]), 1)
             configuration = json.dumps(app.config, ensure_ascii=False, default=str)
             self.assertNotIn("Révision — lecture seule", configuration)
             frames, predict = self.extract(calls["run_extraction_ui"], self.example)
-            self.assertTrue(all(len(frame) == 7 for frame in frames))
+            self.assertTrue(all(len(frame) == 4 for frame in frames))
             self.assertIsInstance(frames[-1][0], dict)
             self.assertEqual(predict.call_count, 1)
 
-    def test_flag_on_adds_review_outputs_without_changing_any_strict_frame(self):
+    def test_legacy_flags_do_not_restore_review_ui_or_change_strict_output(self):
+        baseline, _ = self.extract(main.run_recruiter_extraction_ui, self.example)
+        for review, edit in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(review=review, edit=edit), \
+                    self.environment(review, edit_enabled=edit), \
+                    patch.object(main, "get_extractor") as backend, \
+                    patch.object(main, "build_review") as review_builder:
+                app = main.build_app()
+                events, calls = self.handlers(app)
+                self.assertEqual(len(events["run_extraction_ui"]["outputs"]), 4)
+                self.assertEqual(len(events["preview_ui"]["outputs"]), 5)
+                self.assertEqual(len(events["run_extraction_ui"]["inputs"]), 1)
+                configuration = json.dumps(app.config, ensure_ascii=False, default=str)
+                for removed in (
+                    "Révision — lecture seule", "Document source",
+                    "Champs évalués par le contrôle P1", "Contrat de révision",
+                    "Révision humaine", "Accepter la proposition", "Rejeter la proposition",
+                    "Appliquer la correction", "Confirmer ce champ", "Brouillons locaux",
+                    "Réponse brute du modèle — première passe",
+                    "Détails des contrôles — hors du résultat JSON",
+                    "Version déployée", "Empreinte de configuration OCR",
+                ):
+                    self.assertNotIn(removed, configuration)
+                types = {c["type"] for c in app.config["components"]}
+                self.assertTrue(types.isdisjoint({"gallery", "dataframe", "dropdown", "state"}))
+                self.assertFalse(any(
+                    str(d.get("api_name", "")).startswith(("review_", "draft_"))
+                    for d in app.config["dependencies"]
+                ))
+                frames, predict = self.extract(calls["run_extraction_ui"], self.example)
+                self.assertTrue(all(len(frame) == 4 for frame in frames))
+                self.assertEqual(
+                    [frame[:3] for frame in frames], [frame[:3] for frame in baseline],
+                )
+                self.assertIsNone(frames[-1][0]["line_items"][0]["quantity"])
+                self.assertIsNone(frames[-1][0]["line_items"][0]["unit_price"])
+                self.assertEqual(
+                    Path(frames[-1][-1]).read_bytes(), Path(baseline[-1][-1]).read_bytes(),
+                )
+                self.assertEqual(predict.call_count, 1)
+                backend.assert_not_called()
+                review_builder.assert_not_called()
+
+    def test_retained_review_helpers_do_not_change_any_strict_frame(self):
         with self.environment(False):
             off_app = main.build_app()
-            _, off_calls = self.handlers(off_app)
-            off_frames, off_predict = self.extract(off_calls["run_extraction_ui"], self.example)
+            self.handlers(off_app)
+            off_frames, off_predict = self.extract(main.run_extraction_ui, self.example)
         with self.environment(True):
-            on_app = main.build_app()
-            events, on_calls = self.handlers(on_app)
-            self.assertEqual(len(events["run_extraction_ui"]["outputs"]), 12)
-            self.assertEqual(len(events["preview_ui"]["outputs"]), 13)
-            self.assertEqual(len(events["run_extraction_ui"]["inputs"]), 2)
+            on_calls = self.review_handlers()
             on_frames, on_predict = self.extract(on_calls["run_extraction_ui"], self.example)
+            self.assertTrue(all(len(frame) == 12 for frame in on_frames))
         self.assertEqual(
             [frame[:6] for frame in off_frames], [frame[:6] for frame in on_frames],
             "result, report, details, raw answer and validation stay identical",
@@ -148,8 +197,7 @@ class ReviewUiTests(unittest.TestCase):
 
     def test_proposals_stay_out_of_the_primary_fields_of_both_payloads(self):
         with self.environment(True):
-            app = main.build_app()
-            _, calls = self.handlers(app)
+            calls = self.review_handlers()
             frames, _ = self.extract(calls["run_extraction_ui"], self.example)
         payload, table, review_json = frames[-1][0], frames[-1][8], frames[-1][10]
         proposed = {path: item for path, item in review_json["field_assessments"].items()
@@ -169,8 +217,7 @@ class ReviewUiTests(unittest.TestCase):
 
     def test_status_labels_keep_verified_and_recovered_distinct(self):
         with self.environment(True):
-            app = main.build_app()
-            _, calls = self.handlers(app)
+            calls = self.review_handlers()
             frames, _ = self.extract(calls["run_extraction_ui"], self.example)
         rows = frames[-1][8]["data"]
         labels = {row[3] for row in rows}
@@ -186,8 +233,7 @@ class ReviewUiTests(unittest.TestCase):
             "", None, [], [], available=False, issues=["Preuves OCR indisponibles"],
         ))
         with self.environment(True):
-            app = main.build_app()
-            _, calls = self.handlers(app)
+            calls = self.review_handlers()
             with patch.object(main, "document_text", return_value=unreadable), \
                     patch.object(main, "predict_invoice",
                                  side_effect=AssertionError("inference was called")):
@@ -216,8 +262,7 @@ class ReviewUiTests(unittest.TestCase):
     def test_multi_page_documents_render_every_source_page(self):
         path = self.make_pdf(3)
         with self.environment(True):
-            app = main.build_app()
-            _, calls = self.handlers(app)
+            calls = self.review_handlers()
             preview = calls["preview_ui"](path)
             self.assertEqual(len(preview), 13)
             self.assertEqual(len(preview[8]), 3)
@@ -232,8 +277,7 @@ class ReviewUiTests(unittest.TestCase):
 
     def test_pending_preview_never_invents_review_status(self):
         with self.environment(True):
-            app = main.build_app()
-            _, calls = self.handlers(app)
+            calls = self.review_handlers()
             preview = calls["preview_ui"](self.example)
         table, summary, review_json = preview[9], preview[10], preview[11]
         self.assertEqual(table["data"], [])
@@ -272,7 +316,7 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(set(built), {"summary", "table", "json"})
         self.assertEqual(built["json"]["total_ttc"], 108.0)
 
-    def test_edit_flag_wires_session_local_callbacks_without_extra_inference(self):
+    def test_retained_edit_helpers_do_not_require_extra_inference(self):
         with self.environment(False):
             baseline_app = main.build_app()
             _, baseline_calls = self.handlers(baseline_app)
@@ -280,25 +324,15 @@ class ReviewUiTests(unittest.TestCase):
                 baseline_calls["run_extraction_ui"], self.example,
             )
         with self.environment(True, edit_enabled=True):
-            app = main.build_app()
-            dependencies = {
-                dependency.get("api_name"): dependency
-                for dependency in app.config["dependencies"]
-            }
-            self.assertIn("review_accept", dependencies)
-            self.assertIn("review_reject", dependencies)
-            self.assertIn("review_edit", dependencies)
-            self.assertIn("review_confirm", dependencies)
-            self.assertIn("review_add_line", dependencies)
-            self.assertEqual(len(dependencies["run_extraction_ui"]["outputs"]), 23)
-            self.assertEqual(len(dependencies["preview_ui"]["outputs"]), 24)
             pending_preview = main.preview_ui_with_review(self.example)
+            self.assertEqual(len(pending_preview), 24)
             self.assertFalse(pending_preview[-1]["interactive"])
-            handler = app.fns[dependencies["run_extraction_ui"]["id"]].fn
+            handler = main.run_extraction_ui_with_review
             text = EvidenceText(from_text(INVOICE_TEXT, locale="fr-FR"))
             with patch.object(main, "document_text", return_value=text) as ocr, \
                     patch.object(main, "predict_invoice", return_value=PREDICTION) as predict:
                 frames = list(handler(self.example, {}))
+            self.assertTrue(all(len(frame) == 23 for frame in frames))
             strict_payload = frames[-1][0]
             session = frames[-1][11]
             self.assertEqual(strict_payload, baseline_frames[-1][0])
@@ -338,10 +372,9 @@ class ReviewUiTests(unittest.TestCase):
             with self.assertRaises(invoice_review_edit.EditStateError):
                 invoice_review_edit.confirmed_view(forged["human_edit"])
 
-    def test_ui_blocks_invalid_arithmetic_and_invalidates_changed_confirmation(self):
+    def test_retained_helpers_block_invalid_arithmetic_and_invalidate_confirmation(self):
         with self.environment(True, edit_enabled=True):
-            app = main.build_app()
-            _, calls = self.handlers(app)
+            calls = self.review_handlers()
             text = EvidenceText(from_text(INVOICE_TEXT, locale="fr-FR"))
             with patch.object(main, "document_text", return_value=text) as ocr, \
                     patch.object(main, "predict_invoice", return_value=PREDICTION) as predict:
@@ -380,10 +413,29 @@ class ReviewUiTests(unittest.TestCase):
             self.assertNotIn("Révision humaine — brouillon de session", configuration)
             self.assertNotIn("review_confirm", configuration)
 
+    def test_public_space_shows_upload_privacy_warning(self):
+        with self.environment(False), patch.dict(os.environ, {"SPACE_ID": "public-test-space"}):
+            public_app = main.build_app()
+        public_configuration = json.dumps(public_app.config, ensure_ascii=False, default=str)
+        self.assertIn("Confidentialité — Espace Hugging Face", public_configuration)
+        self.assertIn("N'importez pas de facture confidentielle", public_configuration)
+        for removed in (
+            "Les fichiers temporaires peuvent rester disponibles",
+            "une URL Gradio jusqu'au nettoyage périodique",
+            "suppression immédiate n'est pas garantie",
+            "Les brouillons humains ne sont pas sauvegardés",
+        ):
+            self.assertNotIn(removed, public_configuration)
+        self.assertEqual(public_app.delete_cache, (600, 600))
+
+        with self.environment(False), patch.dict(os.environ, {"SPACE_ID": ""}):
+            local_app = main.build_app()
+        local_configuration = json.dumps(local_app.config, ensure_ascii=False, default=str)
+        self.assertNotIn("Confidentialité — Espace Hugging Face", local_configuration)
+
     def test_new_extraction_replaces_session_edit_state(self):
         with self.environment(True, edit_enabled=True):
-            app = main.build_app()
-            _, calls = self.handlers(app)
+            calls = self.review_handlers()
             text = EvidenceText(from_text(INVOICE_TEXT, locale="fr-FR"))
             with patch.object(main, "document_text", return_value=text), \
                     patch.object(main, "predict_invoice", return_value=PREDICTION):

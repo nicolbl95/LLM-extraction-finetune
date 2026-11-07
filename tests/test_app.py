@@ -51,6 +51,38 @@ class AppTests(unittest.TestCase):
             + f"\nSubtotal: {payload['total_ht']}\nInvoice total: {payload['total_ttc']}"
         )
 
+    def reference_row(self, invoice_id):
+        return next(
+            row for row in map(
+                json.loads,
+                (main.ROOT / "data/test.jsonl").read_text(encoding="utf-8").splitlines(),
+            )
+            if row["id"] == invoice_id
+        )
+
+    def run_recruiter_ui(
+        self, text, locale, response, *, filename=None, ocr_calls=0,
+        ocr_elapsed_seconds=0,
+    ):
+        evidence = from_text(text, locale=locale)
+        evidence.ocr_calls = ocr_calls
+        evidence.ocr_elapsed_seconds = ocr_elapsed_seconds
+        cache_dir = self.folder / "gradio-cache"
+        cache_dir.mkdir(exist_ok=True)
+        predictor = (
+            patch.object(main, "predict_invoice", side_effect=response)
+            if isinstance(response, (list, Exception))
+            else patch.object(main, "predict_invoice", return_value=response)
+        )
+        with patch.dict(os.environ, {"GRADIO_TEMP_DIR": str(cache_dir)}), \
+                patch.object(main, "document_text", return_value=EvidenceText(evidence)), \
+                patch.object(main, "ocr_availability", return_value=(True, "")), \
+                predictor as predict:
+            frames = list(main.run_recruiter_extraction_ui(
+                str(filename or main.EXAMPLES[1][1]),
+            ))
+        return frames[-1], predict
+
     def test_three_distributable_examples_match_existing_regional_invoices(self):
         rows = {
             row["id"]: row
@@ -62,7 +94,7 @@ class AppTests(unittest.TestCase):
             ("invoice-0435", "en-US"),
         ]
         self.assertEqual(len(main.REGIONAL_EXAMPLES), 3)
-        self.assertEqual(main.EXAMPLES, [*main.REGIONAL_EXAMPLES, *main.ADDITIONAL_EXAMPLES])
+        self.assertEqual(main.EXAMPLES, main.REGIONAL_EXAMPLES)
         for (_, path), (identifier, locale) in zip(main.REGIONAL_EXAMPLES, sources):
             row = rows[identifier]
             self.assertEqual(row["locale"], locale)
@@ -111,12 +143,90 @@ class AppTests(unittest.TestCase):
             main.document_text(str(too_long))
         corrupt = self.folder / "corrupt.png"
         corrupt.write_bytes(b"not an image")
-        with self.assertLogs(main.LOGGER, level="ERROR"):
+        with self.assertLogs(main.LOGGER, level="ERROR") as logs:
             image, result, status = main.preview_document(str(corrupt))
         self.assertIsNone(image)
         self.assertIsNone(result)
         self.assertIn("Impossible", status)
+        self.assertIn("Fichier illisible ou inaccessible", status)
+        self.assertNotIn(str(corrupt), status.replace("\\\\", "\\"))
+        self.assertNotIn(str(corrupt), "\n".join(logs.output).replace("\\\\", "\\"))
+        self.assertIn("cannot identify image file", "\n".join(logs.output))
         self.assertEqual(main.preview_document(None), (None, None, ""))
+
+    def test_json_download_write_failure_keeps_result_and_hides_internal_path(self):
+        private_path = "C:/private/gradio/invoice.json"
+        with patch.object(
+            main, "_download_json",
+            side_effect=OSError(f"permission denied: {private_path}"),
+        ) as download, self.assertLogs(main.LOGGER, level="ERROR") as logs:
+            (payload, status, _, output_file), _ = self.run_recruiter_ui(
+                self.evidence_text(), "en-GB",
+                {"raw": json.dumps(self.gold), "finish_reason": "stop"},
+            )
+        self.assertIsNotNone(payload)
+        self.assertIsNone(output_file)
+        self.assertIn("téléchargement du JSON est indisponible", status)
+        self.assertNotIn(private_path, status)
+        self.assertNotIn(private_path, "\n".join(logs.output))
+        self.assertIn("OSError", "\n".join(logs.output))
+        self.assertIn("permission denied", "\n".join(logs.output))
+        download.assert_called_once()
+
+    def test_successful_download_is_preserved_and_failed_next_request_has_no_stale_result(self):
+        first_expected = self.gold
+        first_frame, _ = self.run_recruiter_ui(
+            self.evidence_text(first_expected), "en-GB",
+            {"raw": json.dumps(first_expected), "finish_reason": "stop"},
+        )
+        first_payload, first_status, _, first_download = first_frame
+        first_path = Path(first_download)
+        self.assertTrue(first_path.is_file())
+        self.assertEqual(json.loads(first_path.read_text(encoding="utf-8")), first_payload)
+        self.assertNotIn("téléchargement du JSON est indisponible", first_status)
+
+        second_expected = {**self.gold, "supplier_name": "Other supplier"}
+        private_path = "C:/private/gradio/second-invoice.json"
+        with patch.object(
+            main, "_download_json",
+            side_effect=OSError(f"permission denied: {private_path}"),
+        ), self.assertLogs(main.LOGGER, level="ERROR"):
+            second_frame, _ = self.run_recruiter_ui(
+                self.evidence_text(second_expected), "en-GB",
+                {"raw": json.dumps(second_expected), "finish_reason": "stop"},
+            )
+        second_payload, second_status, _, second_download = second_frame
+        self.assertEqual(second_payload["supplier_name"], "Other supplier")
+        self.assertIsNone(second_download)
+        self.assertIn("téléchargement du JSON est indisponible", second_status)
+        self.assertNotIn(private_path, second_status)
+        self.assertEqual(json.loads(first_path.read_text(encoding="utf-8")), first_payload)
+
+    def test_interleaved_ui_sessions_keep_results_and_download_status_separate(self):
+        payloads = {
+            "session-a": {**self.gold, "supplier_name": "Session A"},
+            "session-b": {**self.gold, "supplier_name": "Session B"},
+        }
+
+        def session_frames(filename, diagnostics):
+            diagnostics.update({"field_statuses": {}, "model_info": {"used": False}})
+            download = None if filename == "session-a" else "session-b-download.json"
+            yield payloads[filename], "completed", "", "", "", {
+                "flags": [], "passed": [], "not_verified": [],
+            }, download
+
+        with patch.object(main, "run_extraction_ui", side_effect=session_frames):
+            session_a = main.run_recruiter_extraction_ui("session-a")
+            session_b = main.run_recruiter_extraction_ui("session-b")
+            result_a = next(session_a)
+            result_b = next(session_b)
+
+        self.assertEqual(result_a[0], payloads["session-a"])
+        self.assertIsNone(result_a[3])
+        self.assertIn("téléchargement du JSON est indisponible", result_a[1])
+        self.assertEqual(result_b[0], payloads["session-b"])
+        self.assertEqual(result_b[3], "session-b-download.json")
+        self.assertNotIn("téléchargement du JSON est indisponible", result_b[1])
 
     def test_encrypted_pdf_is_rejected(self):
         path = self.folder / "protected.pdf"
@@ -278,16 +388,218 @@ class AppTests(unittest.TestCase):
                     payload = frames[-1][0]
                     expected = json.loads(json.dumps(rows[reference_id]["output"]))
                     if reference_id == "invoice-0110":
-                        expected["line_items"][0]["quantity"] = None
-                        expected["line_items"][0]["unit_price"] = None
-                        self.assertIsNone(payload["line_items"][0]["quantity"])
-                        self.assertIsNone(payload["line_items"][0]["unit_price"])
+                        self.assertEqual(payload["line_items"][0]["quantity"], 7.8)
+                        self.assertEqual(payload["line_items"][0]["unit_price"], 757.97)
                         self.assertNotIn(78, payload["line_items"][0].values())
                     self.assertEqual(payload, expected)
                     self.assertNotIn("Traceback", str(frames[-1]))
 
-    def test_additional_example_buttons_are_usable_from_the_gradio_interface(self):
-        """Joanna Binet, printed-error US and the blank template work from the buttons."""
+    def test_removed_examples_are_absent_from_the_entire_interface(self):
+        app = main.build_app()
+        configuration = json.dumps(app.config, ensure_ascii=False, default=str)
+        dataset = next(c for c in app.config["components"] if c["type"] == "dataset")
+        self.assertEqual(len(dataset["props"]["samples"]), 3)
+        self.assertEqual(
+            dataset["props"]["sample_labels"],
+            ["France · EUR", "Royaume-Uni · GBP", "États-Unis · USD"],
+        )
+        for label, path in main.ADDITIONAL_EXAMPLES:
+            with self.subTest(example=label):
+                self.assertTrue(path.is_file())
+                self.assertNotIn(label, configuration)
+                self.assertNotIn(path.name, configuration)
+        for removed in ("Joanna Binet", "erreur d'impression", "Modèle vierge", "modèle vierge"):
+            self.assertNotIn(removed, configuration)
+
+    def test_recruiter_frontend_contains_only_compact_results_and_core_controls(self):
+        app = main.build_app()
+        configuration = json.dumps(app.config, ensure_ascii=False, default=str)
+        dependencies = {
+            dependency["api_name"]: dependency
+            for dependency in app.config["dependencies"]
+        }
+        self.assertIn("Importer une facture — PDF ou image", configuration)
+        self.assertIn("Extraire les données", configuration)
+        self.assertIn("Résultat de l'extraction — JSON structuré", configuration)
+        self.assertIn("Télécharger le JSON", configuration)
+        self.assertIn("Performances", configuration)
+        self.assertEqual(len(dependencies["preview_ui"]["outputs"]), 5)
+        self.assertEqual(len(dependencies["run_extraction_ui"]["outputs"]), 4)
+        components = {component["type"] for component in app.config["components"]}
+        self.assertTrue(components.isdisjoint({"dataframe", "gallery", "state", "dropdown"}))
+        for removed in (
+            "Révision — lecture seule",
+            "Révision humaine — brouillon de session",
+            "Détails techniques → Champs",
+            "Comparatif — modèle / résultat retenu",
+            "Réponse brute du modèle — première passe",
+            "Détails des contrôles — hors du résultat JSON",
+            "Contrôles réussis",
+            "Analyse de la facture",
+            "Avancé",
+            "Version déployée",
+            "Prétraitements utilisés",
+            "Empreinte de configuration OCR",
+            "SQLite",
+            "Confirmer ce champ",
+        ):
+            self.assertNotIn(removed, configuration)
+
+    def test_recruiter_ui_shows_verified_uk_result_and_matching_download(self):
+        row = self.reference_row("invoice-0110")
+        prediction = {
+            "raw": json.dumps(row["output"], ensure_ascii=False),
+            "finish_reason": "stop",
+            "generation_seconds": 11.75,
+        }
+        outputs, predict = self.run_recruiter_ui(
+            row["input"], row["locale"], prediction, filename=main.EXAMPLES[1][1],
+        )
+        payload, status, performance, download = outputs
+        self.assertEqual(payload, row["output"])
+        self.assertEqual(status, "✅ **Extraction cohérente — 16/16 champs recoupés**")
+        self.assertIn("Qwen+LoRA", performance)
+        self.assertIn("1/1 réussies", performance)
+        self.assertIn("11.75 s", performance)
+        self.assertIn("OCR : non nécessaire", performance)
+        self.assertEqual(
+            json.loads(Path(download).read_text(encoding="utf-8")),
+            payload,
+        )
+        for duplicated in (
+            "Analyse de la facture", "Anomalies dans la facture", "Contrôles réussis",
+            "16 champs vérifiés ; 0 champ incertain", "Comparatif", "Réponse brute",
+        ):
+            self.assertNotIn(duplicated, status + performance)
+        predict.assert_called_once()
+
+    def test_recruiter_ui_summarizes_us_arithmetic_error_without_correcting_printed_json(self):
+        row = self.reference_row("invoice-0435")
+        text = row["input"].replace("USD 396.07", "USD 369.07")
+        self.assertNotEqual(text, row["input"])
+        prediction = {
+            "raw": json.dumps(row["output"], ensure_ascii=False),
+            "finish_reason": "stop",
+            "generation_seconds": 2.5,
+        }
+        outputs, _ = self.run_recruiter_ui(
+            text, row["locale"], prediction, filename=main.EXAMPLES[2][1],
+        )
+        payload, status, _, download = outputs
+        line = payload["line_items"][2]
+        self.assertTrue(status.startswith("⚠️ **Anomalies à vérifier"))
+        self.assertIn("Ligne 3", status)
+        self.assertIn("369.07", status)
+        self.assertIn("396.07", status)
+        self.assertIn("quantité × prix", status)
+        self.assertIn("valeur confirmée conservée dans le JSON strict", status)
+        self.assertEqual(status.count("Ligne 3"), 1)
+        self.assertEqual(line["quantity"], 5.1)
+        self.assertEqual(line["unit_price"], 77.66)
+        self.assertEqual(line["total_ht"], 369.07)
+        self.assertEqual(payload["total_ht"], 8972.8)
+        self.assertEqual(
+            json.loads(Path(download).read_text(encoding="utf-8")),
+            payload,
+        )
+
+    def test_recruiter_ui_keeps_unverified_model_quantity_out_of_strict_json(self):
+        row = self.reference_row("invoice-0110")
+        text = row["input"].replace(
+            "Logo design | GBP 757.97 | 7.8 | GBP 5,912.17",
+            "Logo design | GBP 757.97 |  | GBP 5,912.17",
+        )
+        self.assertNotEqual(text, row["input"])
+        initial = {
+            "raw": json.dumps(row["output"], ensure_ascii=False),
+            "finish_reason": "stop",
+            "generation_seconds": 1.0,
+        }
+        correction = {
+            "raw": json.dumps({
+                "line_items": [{
+                    "index": 0,
+                    "description": "Logo design",
+                    "quantity": 7.8,
+                    "unit_price": 757.97,
+                    "total_ht": 5912.17,
+                }],
+            }, ensure_ascii=False),
+            "finish_reason": "stop",
+            "generation_seconds": 1.0,
+        }
+        outputs, predict = self.run_recruiter_ui(
+            text, row["locale"], [initial, correction], filename=main.EXAMPLES[1][1],
+        )
+        payload, status, _, download = outputs
+        self.assertIn("Vérification incomplète — 15/16 champs recoupés", status)
+        self.assertIn("Ligne 1 — Quantité", status)
+        self.assertIn("Qwen propose `7.8`", status)
+        self.assertIn("exclue du JSON strict", status)
+        self.assertIsNone(payload["line_items"][0]["quantity"])
+        self.assertNotIn(7.8, payload["line_items"][0].values())
+        self.assertEqual(
+            json.loads(Path(download).read_text(encoding="utf-8")),
+            payload,
+        )
+        self.assertEqual(predict.call_count, 1)
+
+    def test_recruiter_ui_labels_mocked_model_failure_as_ocr_only_fallback(self):
+        row = self.reference_row("invoice-0110")
+        outputs, predict = self.run_recruiter_ui(
+            row["input"], row["locale"],
+            main.gr.Error("mocked ZeroGPU quota unavailable"),
+            filename=main.EXAMPLES[1][1],
+        )
+        performance = outputs[2]
+        self.assertIn("Modèle : OCR seul — Qwen+LoRA non utilisé", performance)
+        self.assertIn("0/1 réussies", performance)
+        self.assertIn("Génération Qwen+LoRA : non effectuée", performance)
+        self.assertNotIn("- Modèle : Qwen+LoRA\n", performance)
+        self.assertIn("Qwen indisponible (quota ZeroGPU)", outputs[1])
+        self.assertIn("résultat fondé uniquement sur l'OCR", outputs[1])
+        self.assertEqual(predict.call_count, 1)
+
+    def test_performance_summary_uses_recorded_times_and_labels_missing_times(self):
+        recorded = main._performance_summary({
+            "model_info": {
+                "used": True, "passes_requested": 1, "passes_succeeded": 1,
+                "generation_seconds": 11.75,
+            },
+            "source_kind": "ocr", "ocr_calls": 3, "ocr_elapsed_seconds": 7.93,
+        })
+        self.assertIn("OCR : 7.93 s", recorded)
+        self.assertIn("Génération Qwen+LoRA : 11.75 s", recorded)
+
+        missing = main._performance_summary({
+            "model_info": {
+                "used": True, "passes_requested": 1, "passes_succeeded": 1,
+            },
+            "source_kind": "ocr", "ocr_calls": 1, "ocr_elapsed_seconds": None,
+        })
+        self.assertIn("OCR : durée indisponible", missing)
+        self.assertIn("Génération Qwen+LoRA : durée indisponible", missing)
+        self.assertNotIn("0.00 s", missing)
+
+    def test_compact_summary_explains_quota_fallback_and_unrecognized_lines(self):
+        summary = main._compact_validation_summary(
+            {"line_items": []},
+            {
+                "field_statuses": {},
+                "validation": {},
+                "model_info": {"used": False, "reason": "quota"},
+            },
+            "",
+        )
+
+        self.assertIn("Vérification incomplète", summary)
+        self.assertIn("Qwen indisponible", summary)
+        self.assertIn("quota ZeroGPU", summary)
+        self.assertIn("résultat fondé uniquement sur l'OCR", summary)
+        self.assertIn("aucune ligne de produit", summary)
+        self.assertNotIn("champs vérifiés", summary)
+
+    def test_additional_fixtures_remain_supported_as_uploads(self):
         if not shutil.which("tesseract"):
             self.skipTest("Tesseract is not installed")
         if not {"fra", "eng"} <= set(pytesseract.get_languages()):
@@ -296,10 +608,8 @@ class AppTests(unittest.TestCase):
         dependencies = {
             dependency["api_name"]: dependency for dependency in app.config["dependencies"]
         }
-        load_event = dependencies["load_example"]
         preview_event = dependencies["preview_ui"]
         extract_event = dependencies["run_extraction_ui"]
-        load_handler = app.fns[load_event["id"]].fn
         preview_handler = app.fns[preview_event["id"]].fn
         extract_handler = app.fns[extract_event["id"]].fn
         joanna = json.loads((main.ROOT / "tests/fixtures/layout-joanna-binet.json").read_text(encoding="utf-8"))
@@ -312,35 +622,35 @@ class AppTests(unittest.TestCase):
                 "Modèle vierge à compléter",
             ],
         )
-        for offset, (label, path) in enumerate(main.ADDITIONAL_EXAMPLES):
-            index = len(main.REGIONAL_EXAMPLES) + offset
+        for label, path in main.ADDITIONAL_EXAMPLES:
             self.assertTrue(path.is_file(), label)
             with self.subTest(example=label):
-                loaded = load_handler((index, [str(path)]))
-                self.assertEqual(len([loaded]), len(load_event["outputs"]))
-                selected = loaded["value"]["path"]
+                selected = str(path)
                 self.assertTrue(Path(selected).is_file())
                 self.assertEqual(len(preview_handler(selected)), len(preview_event["outputs"]))
 
                 with patch.object(
                     main, "predict_invoice",
                     side_effect=main.gr.Error("ZeroGPU quota exceeded; try again in 36 min"),
-                ):
+                ), patch.object(
+                    main, "_compact_validation_summary", wraps=main._compact_validation_summary,
+                ) as compact_summary:
                     frames = list(extract_handler(str(path)))
                 self.assertTrue(frames)
                 self.assertTrue(all(
                     len(frame) == len(extract_event["outputs"]) for frame in frames
                 ))
-                payload, report, technical, advanced, first_pass_raw, validation, download = frames[-1]
-                self.assertNotIn("Traceback", report + technical)
+                payload, report, performance, download = frames[-1]
+                validation = compact_summary.call_args.args[1]["validation"]
+                self.assertNotIn("Traceback", report + performance)
                 self.assertTrue(download)
 
                 if label == "France · Joanna Binet (mise en page inhabituelle)":
-                    self.assertEqual(payload, joanna["reference"])
+                    self.assertEqual(payload, joanna["reference"], report + "\n" + performance)
                     self.assertEqual(validation["flags"], [])
-                    self.assertTrue(report.startswith(
-                        "**✅ Lecture cohérente : 0 champs vérifiés, 16 récupérés sur 16**"
-                    ))
+                    self.assertIn("16/16 champs recoupés", report)
+                    self.assertIn("Échéance", report)
+                    self.assertIn("Vérification incomplète", report)
                 elif label == "États-Unis · erreur d'impression":
                     warning = next(
                         flag for flag in validation["flags"]
@@ -365,7 +675,8 @@ class AppTests(unittest.TestCase):
                         [None] * (4 * len(payload["line_items"])),
                     )
                     self.assertEqual(validation["flags"], [])
-                    self.assertIn("0 champs vérifiés", report)
+                    self.assertIn("Vérification incomplète", report)
+                    self.assertNotIn("Facture cohérente", report)
 
     def test_missing_uploaded_temp_file_returns_reimport_message_without_trace(self):
         with tempfile.TemporaryDirectory(
@@ -423,19 +734,17 @@ class AppTests(unittest.TestCase):
             if row["id"] == "invoice-0110"
         )
         expected = json.loads(json.dumps(reference))
-        expected["line_items"][0]["quantity"] = None
-        expected["line_items"][0]["unit_price"] = None
         self.assertEqual(payload, expected)
-        self.assertIsNone(payload["line_items"][0]["quantity"])
-        self.assertIsNone(payload["line_items"][0]["unit_price"])
+        self.assertEqual(payload["line_items"][0]["quantity"], 7.8)
+        self.assertEqual(payload["line_items"][0]["unit_price"], 757.97)
         self.assertNotIn(78, payload["line_items"][0].values())
         self.assertIn(
             diagnostics["field_statuses"]["line_items.0.quantity"],
-            {"neutralisé (non fiable)", "non vérifié"},
+            {"récupéré (corroboré par OCR)"},
         )
         self.assertIn(
             diagnostics["field_statuses"]["line_items.0.unit_price"],
-            {"neutralisé (non fiable)", "non vérifié"},
+            {"récupéré (corroboré par OCR)"},
         )
         self.assertEqual(payload["line_items"][0]["description"], "Logo design")
         self.assertEqual(
@@ -453,11 +762,8 @@ class AppTests(unittest.TestCase):
         self.assertIn("Devise lue : GBP", report)
         self.assertEqual(report.count("Devise"), 1)
         self.assertIn("Nouvel essai possible dans 36 min.", report)
-        self.assertTrue(report.startswith("**⚠️ Lecture incomplète"))
-        self.assertIn(
-            "Ligne 1 : calcul non vérifiable",
-            "\n".join(diagnostics["validation"]["not_verified"]),
-        )
+        self.assertTrue(report.startswith("**✅ Lecture cohérente"))
+        self.assertFalse(diagnostics["validation"]["not_verified"])
         for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
             self.assertNotIn(forbidden, report)
         self.assertTrue(payload["line_items"])
@@ -902,6 +1208,8 @@ class AppTests(unittest.TestCase):
         examples = [
             component for component in demo.config["components"] if component["type"] == "dataset"
         ]
+        self.assertEqual(len(examples), 1)
+        self.assertEqual(len(examples[0]["props"]["samples"]), 3)
         self.assertEqual(examples[0]["props"]["label"], "")
         self.assertEqual(
             examples[0]["props"]["headers"],
@@ -930,8 +1238,7 @@ class AppTests(unittest.TestCase):
             markdown[1:3],
             [
                 "PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais",
-                "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis "
-                "/ Joanna Binet / erreur d'impression / modèle vierge 🔽",
+                "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽",
             ],
         )
         help_components = [
@@ -943,9 +1250,16 @@ class AppTests(unittest.TestCase):
             {key: value for key, value in help_components[1].items() if key != "value"},
         )
         self.assertNotIn("Importez une facture ou choisissez un exemple.", markdown)
-        self.assertEqual(markdown[-1], "")
+        self.assertEqual(markdown[-1], "### Performances")
         self.assertFalse(any("À vérifier avant utilisation" in text for text in markdown))
         self.assertFalse(any("Confidentialité" in text for text in markdown))
+        buttons = [c["props"]["value"] for c in demo.config["components"] if c["type"] == "button"]
+        self.assertEqual(buttons, ["Extraire les données"])
+        self.assertIn("downloadbutton", types)
+        self.assertEqual(
+            [c["props"]["label"] for c in demo.config["components"] if c["type"] == "accordion"],
+            [],
+        )
 
     def test_zerogpu_registers_inference_at_import(self):
         import runpy

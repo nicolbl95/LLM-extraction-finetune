@@ -1,0 +1,62 @@
+{
+  "id": "pr75-synthetic-fr-canary",
+  "synthetic": true,
+  "locale": "fr-FR",
+  "document_file": "pr75-synthetic-invoice.png",
+  "document_text": "DOCUMENT SYNTHETIQUE\nTEST UNIQUEMENT - SANS VALEUR COMMERCIALE\nFOURNISSEUR : Atelier Lumen SARL\nCLIENT : Client Demo SAS\nNO FACTURE : TEST-PR75-001\nDATE DE FACTURE : 6 NOVEMBRE 2026\nDEVISE : EUR\nARTICLE\tQTE\tPRIX UNITAIRE HT\tMONTANT HT\nCahier A4\t2\t12,50 EUR\t25,00 EUR\nStylo bleu\t3\t4,00 EUR\t12,00 EUR\nSOUS-TOTAL HT\t37,00 EUR\nTVA (20%)\t7,40 EUR\nTOTAL TTC\t44,40 EUR\nSYNTHETIC TEST FIXTURE - NOT A REAL INVOICE",
+  "printed_fields": {
+    "supplier_name": "Atelier Lumen SARL",
+    "customer_name": "Client Demo SAS",
+    "invoice_number": "TEST-PR75-001",
+    "invoice_date_text": "6 NOVEMBRE 2026",
+    "currency": "EUR",
+    "line_items": [
+      {
+        "description": "Cahier A4",
+        "quantity_printed": "2",
+        "unit_price_ht_printed": "12,50 EUR",
+        "line_total_ht_printed": "25,00 EUR"
+      },
+      {
+        "description": "Stylo bleu",
+        "quantity_printed": "3",
+        "unit_price_ht_printed": "4,00 EUR",
+        "line_total_ht_printed": "12,00 EUR"
+      }
+    ],
+    "subtotal_ht_printed": "37,00 EUR",
+    "vat_rate_printed": "20%",
+    "vat_amount_printed": "7,40 EUR",
+    "grand_total_ttc_printed": "44,40 EUR"
+  },
+  "expected_json": {
+    "supplier_name": "Atelier Lumen SARL",
+    "invoice_date": "2026-11-06",
+    "total_ht": 37.0,
+    "total_ttc": 44.4,
+    "line_items": [
+      {
+        "description": "Cahier A4",
+        "quantity": 2.0,
+        "unit_price": 12.5,
+        "total_ht": 25.0
+      },
+      {
+        "description": "Stylo bleu",
+        "quantity": 3.0,
+        "unit_price": 4.0,
+        "total_ht": 12.0
+      }
+    ]
+  },
+  "arithmetic": {
+    "line_totals_ht": "2 x 12.50 = 25.00; 3 x 4.00 = 12.00",
+    "subtotal_ht": "25.00 + 12.00 = 37.00",
+    "vat": "37.00 x 20% = 7.40",
+    "grand_total_ttc": "37.00 + 7.40 = 44.40"
+  },
+  "schema_notes": [
+    "The production Invoice schema currently exposes supplier_name, invoice_date, total_ht, total_ttc, and line_items only.",
+    "Customer, invoice number, currency, VAT rate, and VAT amount are visibly printed but are not expected JSON fields in the current production schema."
+  ]
+}

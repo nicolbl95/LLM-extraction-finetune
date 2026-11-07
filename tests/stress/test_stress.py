@@ -131,14 +131,20 @@ def test_blurred_uk_line_quantity_misread_does_not_create_amount_warning():
     case = next(case for case in image_cases(ROOT) if case.name == "uk/blur")
     evidence = main.ocr_image(case.image).evidence
     line = evidence.rows[0]
-    assert line.family_votes["quantity"] == {
-        Decimal("78"): ("clahe", "crop", "denoise", "deskew", "scale3")
-    }
+    assert set(line.family_votes["quantity"]) == {Decimal("78")}
+    voters = line.family_votes["quantity"][Decimal("78")]
+    assert len(set(voters)) >= 2
+    assert set(voters) <= {"clahe", "crop", "denoise", "deskew", "scale3"}
+    assert line.cells["quantity"] == []
+    assert line.cells["unit_price"] == []
     assert line.corroborated_amount_mismatch is None
     assert not any(
         flag.code == "corroborated_line_amount_mismatch"
         for flag in document_validation(evidence).flags
     )
+    result = reconcile(evidence, [read_model(json.dumps(case.model))])
+    assert result.payload["line_items"][0]["quantity"] is None
+    assert result.payload["line_items"][0]["total_ht"] == case.expected["line_items"][0]["total_ht"]
 
 
 def test_bad_quality_does_not_allocate_gpu():

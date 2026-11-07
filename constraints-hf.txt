@@ -1,0 +1,8 @@
+# Versions observed on the validated Python 3.12 Linux staging runtime.
+gradio==6.30.0
+Pillow==12.3.0
+PyMuPDF==2.1; platform_system == "Linux"
+pytesseract==0.3.13
+# cv2 reports the library version, not the wheel build suffix.
+opencv-python-headless==4.14.0.*; platform_system == "Linux"
+numpy==2.5.3; platform_system == "Linux"

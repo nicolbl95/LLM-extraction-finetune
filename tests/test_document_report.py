@@ -256,6 +256,13 @@ def test_real_ocr_equivalent_invoice_with_unusual_french_layout_is_grounded():
 
     if not shutil.which("tesseract"):
         pytest.fail("Synthetic-layout acceptance requires actual Tesseract OCR")
+    language_plan = main.ocr_language_plan()
+    if "fra" in language_plan["missing"]:
+        pytest.skip(
+            "French OCR language data is missing; this test can only validate a French "
+            f"layout with a fra read, not with "
+            f"{'+'.join(language_plan['effective']) or 'no usable language'}."
+        )
     fixture = ROOT / "tests/fixtures/layout-joanna-binet.png"
     evidence = main.document_text(str(fixture)).evidence
     assert evidence.source_kind == "consensus"
@@ -353,7 +360,11 @@ def test_gross_amount_header_is_not_misinterpreted_as_line_total_ht():
         "Total excl. tax: GBP 4,445.17\nVAT (20%): GBP 889.03\nInvoice total: GBP 5,334.20"
     )
     evidence = from_text(text, locale="en-GB")
-    assert evidence.rows == []
+    assert len(evidence.rows) == 1
+    assert evidence.rows[0].cells["total_ht"] == []
+    assert evidence.rows[0].cells["gross_amount"][0].value == Decimal("217.94")
+    strict = reconcile(evidence, [read_model('{"line_items": []}')])
+    assert strict.payload["line_items"][0]["total_ht"] is None
     assert evidence.totals.get("total_ht")
     assert not evidence.totals.get("total_candidate")
 
@@ -529,6 +540,41 @@ def test_invoice_number_parser_supports_general_sequences_with_invoice_context()
     assert invoice_number_from_text("FACTURE FR-2025-0406") == "FR-2025-0406"
     assert invoice_number_from_text("FACTURE FR-2025-000406") == "FR-2025-000406"
     assert invoice_number_from_text("Reference FR-001") is None
+
+
+def test_invoice_number_consensus_uses_two_confident_families_despite_unparsed_reads():
+    readings = {
+        family: [
+            from_text("FACTURE FR-001\nDate: 29/01/2019"),
+            from_text("FACTURE FR-0O1\nDate: 29/01/2019"),
+        ]
+        for family in ("deskew", "crop")
+    }
+
+    evidence = build_consensus(readings)
+
+    assert evidence.invoice_number == "FR-001"
+
+
+def test_conflicting_valid_invoice_numbers_remain_unverified():
+    evidence = build_consensus({
+        "deskew": [from_text("FACTURE FR-001")],
+        "crop": [from_text("FACTURE FR-001")],
+        "scale3": [from_text("FACTURE FR-002")],
+    })
+
+    assert evidence.invoice_number is None
+
+
+def test_letter_bearing_invoice_identifier_is_not_normalized_to_digits():
+    assert invoice_number_from_text("FACTURE FR-A01") is None
+    evidence = build_consensus({
+        "deskew": [from_text("FACTURE FR-001")],
+        "crop": [from_text("FACTURE FR-A01")],
+        "scale3": [from_text("FACTURE FR-A01")],
+    })
+
+    assert evidence.invoice_number is None
 
 
 def test_consensus_requires_two_independent_reads_for_invoice_number_and_siret():
@@ -780,24 +826,36 @@ def test_ocr_unavailable_never_presents_model_values_as_verified():
     assert not result.validation.flags
 
 
-def test_ui_has_report_first_and_closed_technical_accordion():
+def test_ui_has_compact_results_without_developer_sections():
     from app import main
     demo = main.build_app()
     components = demo.config["components"]
-    accordion = next(component for component in components if component["type"] == "accordion")
-    assert accordion["props"]["label"] == "Détails techniques"
-    assert not accordion["props"]["open"]
-    footer = next(component for component in components if component["type"] == "html")
-    assert "OCR :" in footer["props"]["value"]
+    configuration = str(demo.config)
+    assert not any(
+        component["type"] in {"accordion", "code", "html"}
+        for component in components
+    )
+    assert any(
+        component["type"] == "json"
+        and component["props"]["label"] == "Résultat de l'extraction — JSON structuré"
+        for component in components
+    )
+    assert "### Performances" in configuration
+    for removed in (
+        "Détails techniques",
+        "Comparatif — modèle / résultat retenu",
+        "Réponse brute du modèle — première passe",
+        "Détails des contrôles — hors du résultat JSON",
+        "Avancé",
+        "Version déployée",
+        "Prétraitements utilisés",
+        "Empreinte de configuration OCR",
+    ):
+        assert removed not in configuration
     assert main.preview_ui(None) == (
         None, None, "", "", "", "", {"flags": [], "passed": [], "not_verified": []}, None,
     )
     assert any(component["type"] == "downloadbutton" for component in components)
-    assert any(
-        component["type"] == "code"
-        and component["props"]["label"] == "Réponse brute"
-        for component in components
-    )
     assert any(
         "copy" in component["props"].get("buttons", [])
         for component in components if component["type"] == "markdown"
@@ -905,7 +963,7 @@ def test_repeated_grounded_outputs_are_identical_and_model_errors_remain_technic
 
 
 def test_second_pass_exception_has_french_cause_and_only_technical_trace(caplog):
-    evidence = from_text(document().text.replace("Service | 2 |", "Service |  |"))
+    evidence = document(qty="1 / 2", price="10 / 20")
     backend = MagicMock(side_effect=[
         {"raw": json.dumps(model(), default=str), "finish_reason": "stop"},
         ValueError("ValueError"),
@@ -917,7 +975,7 @@ def test_second_pass_exception_has_french_cause_and_only_technical_trace(caplog)
     assert "Pydantic" not in result["report"]
     assert "Traceback" in caplog.text
     assert result["payload"]["line_items"][0]["quantity"] is None
-    assert result["payload"]["line_items"][0]["unit_price"] == 10
+    assert result["payload"]["line_items"][0]["unit_price"] is None
     assert not result["validation"]["flags"]
 
 
@@ -932,8 +990,9 @@ def test_deployment_ocr_packages_and_startup_status_are_explicit(caplog):
     assert "Startup OCR: available=False" in caplog.text
     for package in ("Tesseract=", "langues=", "Pillow=", "NumPy=", "OpenCV=", "PyMuPDF="):
         assert package in caplog.text
-    footer = next(component for component in demo.config["components"] if component["type"] == "html")
-    assert "OCR : indisponible" in footer["props"]["value"]
+    configuration = str(demo.config)
+    assert "OCR : indisponible" not in configuration
+    assert not any(component["type"] == "html" for component in demo.config["components"])
 
 
 def test_anomaly_digest_keeps_codes_and_locations_only():
