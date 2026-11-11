@@ -186,3 +186,35 @@ results/product-review103/
 # PR104 : inventaire, verite terrain, sortie OCR et analyses par etape citant le texte imprime des
 # factures de developpement et du jeu prive.
 results/product-review104/
+# PR121 : livrables racine citant les fournisseurs reels des cinq factures reelles.
+# Critere : real-scans-provenance.json enregistre « no commit ever contained these names ».
+# 28 fichiers nommes explicitement ; aucun joker, pour laisser PR83/84/89 committables.
+/PRODUCT_REVIEW_82_RESULTS.json
+/PRODUCT_REVIEW_91_RESULTS.json
+/PRODUCT_REVIEW_92_RESULTS.json
+/PRODUCT_REVIEW_93_RESULTS.json
+/PRODUCT_REVIEW_94_RESULTS.json
+/PRODUCT_REVIEW_95_RESULTS.json
+/PRODUCT_REVIEW_96_RESULTS.json
+/PRODUCT_REVIEW_97_RESULTS.json
+/PRODUCT_REVIEW_98_RESULTS.json
+/PRODUCT_REVIEW_99_RESULTS.json
+/PRODUCT_REVIEW_100_RESULTS.json
+/PRODUCT_REVIEW_101_RESULTS.json
+/PRODUCT_REVIEW_102_RESULTS.json
+/PRODUCT_REVIEW_103_RESULTS.json
+/PRODUCT_REVIEW_104_RESULTS.json
+/PRODUCT_REVIEW_105_RESULTS.json
+/PRODUCT_REVIEW_105B_RESULTS.json
+/PRODUCT_REVIEW_105C_RESULTS.json
+/PRODUCT_REVIEW_106_RESULTS.json
+/PRODUCT_REVIEW_107_RESULTS.json
+/PRODUCT_REVIEW_108_RESULTS.json
+/PRODUCT_REVIEW_109_RESULTS.json
+/PRODUCT_REVIEW_110_RESULTS.json
+/PRODUCT_REVIEW_112_RESULTS.json
+/PRODUCT_REVIEW_113_RESULTS.json
+/PRODUCT_REVIEW_114_RESULTS.json
+/PRODUCT_REVIEW_115_RESULTS.json
+# 1 livrable cite un fragment de ligne bancaire imprime (le plus sensible des 28).
+/PRODUCT_REVIEW_116_RESULTS.json
