@@ -1,0 +1,4 @@
+# Line-ending normalization is governed by the repository, not by each clone's core.autocrlf.
+# Every tracked text object is already stored LF, so no committed content changes; checkouts are LF everywhere.
+* text=auto eol=lf
+*.png binary
