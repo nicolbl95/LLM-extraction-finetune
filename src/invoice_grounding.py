@@ -516,6 +516,34 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
                     pair_supported = close(partial_sum, ht) and not tax_conflict
                 except ValueError:
                     pair_supported = False
+        # A printed amount that is exactly the gross-up of the corroborated product is VAT-inclusive,
+        # so neither PR87 exemption (document HT sum, printed-anomaly mismatch) may preserve it as HT.
+        tax_inclusive_amount = False
+        printed_amount = (
+            next(iter({number.value for number in row.cells.get("total_ht", [])}), None)
+            if len({number.value for number in row.cells.get("total_ht", [])}) == 1 else None
+        )
+        if printed_amount is not None:
+            row_rate = next(iter(tax_rates)) if tax_available and len(tax_rates) == 1 else None
+            if row_rate is None:
+                line_rates = set(row.family_votes.get("tax_rate", {}))
+                row_rate = next(iter(line_rates)) if len(line_rates) == 1 else None
+            if row_rate is not None:
+                row_rate = row_rate / 100 if row_rate > 1 else row_rate
+                products = {
+                    rounded_product(quantity, price)
+                    for quantity in row.family_votes.get("quantity", {})
+                    for price in row.family_votes.get("unit_price", {})
+                }
+                tax_inclusive_amount = (
+                    any(close(rounded_product(product, Decimal(1) + row_rate), printed_amount)
+                        for product in products)
+                    and not any(close(product, printed_amount) for product in products)
+                )
+        exempt_amount = (
+            (sum_supported or row.corroborated_amount_mismatch is not None)
+            and not tax_inclusive_amount
+        )
         for key in FIELDS:
             path = f"{prefix}.{key}"
             previous = numeric(effective.get(key), evidence.locale)
@@ -536,7 +564,14 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
                 or corroborated_amount_cell
             ):
                 selected = next(iter(printed_values))
-            if key == "total_ht" and len(printed_values) > 1:
+            if key == "total_ht" and row.amount_operand_veto and not exempt_amount:
+                value = record(
+                    path, None, NULL,
+                    "montant non retenu : quantité et prix recoupés puis rejetés par le contrôle du "
+                    "produit ; interprétation HT/TTC du montant imprimé non établie",
+                    sources,
+                )
+            elif key == "total_ht" and len(printed_values) > 1:
                 value = record(
                     path, None, NULL,
                     "montants imprimés contradictoires ; aucun choix par cohérence arithmétique",
