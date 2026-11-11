@@ -55,6 +55,63 @@ real-scans-review-notes*.json
 real-scans-provenance*.json
 results/real-scans*.json
 
+# PR85 : capture OCR verbatim des cinq factures réelles et mesure mixte qui en dérive (privé).
+# Le livrable racine PRODUCT_REVIEW_85_RESULTS.json est expurgé et reste committable.
+results/product-review85/pr85-extra-capture.json
+results/product-review85/pr85-integration-check*.json
+
+# PR86 : mesures mixtes contenant des montants imprimes des factures reelles (prive).
+# Le runner redige desormais ces montants ; les artefacts v1-v3 antérieurs restent locaux.
+results/product-review86/pr86-rate-and-vat-study*.json
+
+# PR100 : cache OCR verbatim de RapidOCR sur les neuf factures (deux factures reelles incluses, prive).
+# Le script scripts/pr100_dual_engine_eval.py le regenere localement.
+results/product-review100/rapidocr-nine.json
+
+# PR101 : payloads stricts des neuf factures (deux factures reelles incluses) + mesures, prive.
+# Regenere par scripts/pr101_dual_ocr_e2e.py et scripts/pr101_runtime.py.
+results/product-review101/
+
+# PR102 : diagnostics verbatim (texte OCR des factures reelles) — prive. Les artefacts de reconciliation
+# et d'evaluation unifiee a la racine de product-review102 ne contiennent que des comptes et des index.
+results/product-review102/verbatim/
+
+# PR105 : ecrans d'attribution par etape contenant le texte verbatim des factures reelles — prive.
+# Regeneres par scripts/pr105_stage_attribution.py et scripts/pr105_attribution_screen.py.
+results/product-review105/
+
+# PR105B : cache OCR gele contenant la sortie Tesseract brute des factures reelles — prive.
+# Genere par scripts/pr105b_capture.py ; les artefacts de comparaison n'en contiennent que des comptes.
+results/product-review105b/
+
+# PR105C : recensement des glyphes de bordure au stage 5, texte verbatim des factures reelles — prive.
+# Genere par scripts/pr105c_harness.py ; les artefacts de decision n'en contiennent que des comptes.
+results/product-review105c/
+
+# PR106 : traces de stage 5, texte OCR verbatim et octets Tesseract des factures de developpement — prive.
+# Genere par scripts/pr106_harness.py, pr106_traces.py et pr106_candidates.py.
+results/product-review106/
+
+# PR107 : traces de reconstruction de description multi-lignes, texte OCR verbatim des factures de
+# developpement — prive. Genere par scripts/pr107_trace.py et scripts/pr107_measure.py.
+results/product-review107/
+
+# PR108 : octets Tesseract, texte OCR verbatim et captures de regions des factures de developpement — prive.
+# Genere par scripts/pr108_harness.py, pr108_phase2..phase9.py.
+results/product-review108/
+
+# PR109 : manifest de base, inventory d'entree et chemins de fichiers des factures — prive.
+# Genere par scripts/pr109_baseline.py, pr109_intake.py et pr109_dev_cohort.py.
+results/product-review109/
+
+# PR110 : factures independantes fournies par le proprietaire et leurs references annotees a l'aveugle —
+# texte imprime reel, jamais versionne. Scripts : pr110_status.py, pr110_annotate.py, pr110_eligibility.py.
+benchmark_prep/invoices/
+benchmark_prep/references/
+
+# PR110 : freeze du cohort, signatures perceptuelles et rapports d'evaluation — prive.
+results/product-review110/
+
 # Local single-user human-review drafts (sensitive, not encrypted)
 .local-review/
 
@@ -63,3 +120,21 @@ results/real-scans*.json
 /INVOICE_BENCHMARK_MANIFEST.json
 /PRODUCT_REVIEW_63_DIAGNOSTIC_CAPTURES.json
 /PRODUCT_REVIEW_62_REGRESSION_MATRIX.json
+
+# PR112 : captures de votes OCR, matrices d’échecs et payloads intermédiaires citent l’OCR verbatim des factures réelles.
+results/product-review112/
+
+# PR113 : captures OCR verbatim, matrices de lignes et instantanés de sources des deux baselines.
+results/product-review113/
+
+# PR114 : artefacts de verification contenant les payloads d'extraction complets des cas de stress et les
+# captures OCR du developpement. Regenere par scripts/pr114_*.py.
+results/product-review114/
+
+# PR115 : tables de champs et captures OCR citant verbatim les factures reelles du lot d'acquisition.
+# Regenere par scripts/pr115_*.py.
+results/product-review115/
+
+# PR116 : registres de fausses positives, etapes de reconstruction et tables de lignes citant verbatim les
+# factures reelles. Regenere par scripts/pr116_*.py.
+results/product-review116/
