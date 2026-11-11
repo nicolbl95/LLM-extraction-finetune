@@ -138,3 +138,51 @@ results/product-review115/
 # PR116 : registres de fausses positives, etapes de reconstruction et tables de lignes citant verbatim les
 # factures reelles. Regenere par scripts/pr116_*.py.
 results/product-review116/
+
+# PR119 : rattrapage des captures de recherche PR83-PR104 restees sans regle de repertoire. Les 67
+# fichiers ainsi proteges sont tous non versionnes et les 15 repertoires cites ne suivent aucun fichier.
+# Regles etroites : un repertoire par revue, aucun motif global, aucune negation.
+
+# PR83 : captures de lignes du consensus OCR des six layouts de developpement (324 Ko, 42 lignes citant
+# le libelle "total HT") et chemins absolus du poste. Regenere par
+# scripts/capture_layout_row_baseline.py (suivi).
+results/product-review83/
+results/product-review83-smoke/
+results/product-review83-smoke2/
+
+# PR84 : capture de construction de lignes (2,1 Mo d'OCR verbatim, 36 lignes "total HT"), traces et
+# ecrans de candidats citant les montants imprimes. Regenere par
+# scripts/capture_row_building_baseline.py (suivi).
+results/product-review84/
+
+# PR85 : mesure hors-ligne des six layouts contenant des chemins locaux du poste de developpement.
+results/product-review85/
+
+# PR86 : ecrans "Taux horaire" et sonde de collision "taux" citant les montants imprimes des factures.
+results/product-review86/
+
+# PR87-PR89 : controles d'integration, audits TTC/alignement et etude d'exemption qui reference le jeu
+# prive real-scans/ (jusqu'a 85 lignes par artefact).
+results/product-review87/
+results/product-review88/
+results/product-review89/
+
+# PR91 : reference des neuf factures nommant les fournisseurs reels et le texte imprime associe.
+results/product-review91/
+
+# PR97 : sortie locale de la suite de tests complete (artefact de recherche de 992 octets).
+results/product-review97/
+
+# PR100 : evaluation double moteur et matrices de champs citant les fournisseurs reels des neuf factures.
+results/product-review100/
+
+# PR102 : reconciliation, evaluation unifiee et statut de holdout references sur real-scans/ et les
+# fournisseurs reels ; le sous-repertoire verbatim/ etait deja exclu separement.
+results/product-review102/
+
+# PR103 : manifest du jeu de validation (602 lignes referenceant data/invoices/) et instantanes de gel.
+results/product-review103/
+
+# PR104 : inventaire, verite terrain, sortie OCR et analyses par etape citant le texte imprime des
+# factures de developpement et du jeu prive.
+results/product-review104/
