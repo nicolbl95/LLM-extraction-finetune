@@ -218,3 +218,50 @@ results/product-review104/
 /PRODUCT_REVIEW_115_RESULTS.json
 # 1 livrable cite un fragment de ligne bancaire imprime (le plus sensible des 28).
 /PRODUCT_REVIEW_116_RESULTS.json
+# PR122 Phase 1 : 43 livrables de recherche citant du contenu imprime reel.
+# Critere : marqueurs de contenu confrontes a la reference locale des cinq factures reelles ;
+# aucun vocabulaire synthetique ne sert de marqueur.
+# 43 fichiers nommes explicitement ; aucun joker.
+/PRODUCT_REVIEW_100_DUAL_ENGINE_OCR_EVALUATION.md
+/PRODUCT_REVIEW_101_EXPERIMENTAL_DUAL_OCR.md
+/PRODUCT_REVIEW_102_VALIDATION_AND_RECONCILIATION.md
+/PRODUCT_REVIEW_104_OCR_EXTRACTION_FAILURE_AUDIT.md
+/PRODUCT_REVIEW_109_INDEPENDENT_VALIDATION.md
+/PRODUCT_REVIEW_112_EXTRACTION_RECOVERY.md
+/PRODUCT_REVIEW_113_GRID_EDGE_DESCRIPTION.md
+/PRODUCT_REVIEW_115_OCR_ACQUISITION_RECOVERY.md
+/PRODUCT_REVIEW_116_EVIDENCE_GROUNDED_ROWS.md
+/PRODUCT_REVIEW_50_REPORT.md
+/PRODUCT_REVIEW_62_COMPREHENSIVE_DIAGNOSIS.md
+/PRODUCT_REVIEW_63_TARGETED_REPRODUCTION.md
+/PRODUCT_REVIEW_64_OCR_BASELINE.md
+/PRODUCT_REVIEW_65_PARSER_PATCH.md
+/PRODUCT_REVIEW_66_ROW_RECONSTRUCTION_AUDIT.md
+/PRODUCT_REVIEW_67_GEOMETRY_EXPERIMENT.md
+/PRODUCT_REVIEW_68_AMBIGUOUS_CELLS.md
+/PRODUCT_REVIEW_77_REAL_INVOICE_EVALUATION.md
+/PRODUCT_REVIEW_91_COMPREHENSIVE_OCR_IMPROVEMENT.md
+/PRODUCT_REVIEW_92_MICROSPECTIVE_EVIDENCE_RECOVERY.md
+/PRODUCT_REVIEW_93_TARGETED_MONETARY_OCR.md
+/PRODUCT_REVIEW_94_TARGETED_OCR_INTEGRATION.md
+/PRODUCT_REVIEW_96_SAFE_ROW_AND_DURATION_RECOVERY.md
+/PRODUCT_REVIEW_97_DURATION_AND_ARBITRATION_VALIDATION.md
+/PRODUCT_REVIEW_98_MIRADA_COLUMN_RECOVERY.md
+/PRODUCT_REVIEW_99_SOURCE_EVIDENCE_AUDIT.md
+/QODER_HANDOVER.md
+/docs/PRODUCT_REVIEW_34.md
+/scripts/build_pr101_results.py
+/scripts/build_pr91_results.py
+/scripts/pr104_pipeline_trace.py
+/scripts/pr109_dev_cohort.py
+/scripts/pr113_generalization.py
+/scripts/pr113_microspective.py
+/scripts/pr113_mirada.py
+/scripts/pr113_patches.py
+/scripts/pr115_acquisition.py
+/scripts/pr115_attribution.py
+/scripts/pr115_candidates.py
+/scripts/pr115_deliverables.py
+/scripts/pr116_deliverables.py
+/scripts/pr116_harness.py
+/scripts/pr116_phase7.py
