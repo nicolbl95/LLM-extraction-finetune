@@ -134,7 +134,10 @@ def main():
     args = parser.parse_args()
     report = run()
     if args.compare:
-        baseline = json.loads(args.compare.read_text())
+        # utf-8 named explicitly: the report this reads was written as utf-8 two lines below, and a bare
+        # read_text() decodes it with the Windows default (cp1252), which aborts on the first diacritic
+        # after the whole suite has already run.
+        baseline = json.loads(args.compare.read_text(encoding="utf-8"))
         report["latency_acceptance"] = compare_latency_candidate(report, baseline, str(args.compare))
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"]))
