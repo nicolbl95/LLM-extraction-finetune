@@ -35,7 +35,7 @@ def _accent_count(text: str) -> int:
     return sum(char.isalpha() and ord(char) > 127 for char in text)
 
 
-def _family_votes(groups, key, value, prefer=None):
+def _family_votes(groups, key, value, prefer=None, skip_empty=False):
     votes = defaultdict(set)
     originals = {}
     for family, entries in groups.items():
@@ -49,6 +49,8 @@ def _family_votes(groups, key, value, prefer=None):
                     prefer is not None and prefer(candidate) > prefer(originals[token])
                 ):
                     originals[token] = candidate
+            if skip_empty and not family_values:
+                continue
             observations.append(family_values)
         # Disagreement between segmentations of one family is not an extra vote.
         if observations and all(values == observations[0] for values in observations):
@@ -57,8 +59,12 @@ def _family_votes(groups, key, value, prefer=None):
     return votes, originals
 
 
-def _agreed(groups, key, value, *, unanimous=False, prefer=None):
-    votes, originals = _family_votes(groups, key, value, prefer)
+def _agreed(groups, key, value, *, unanimous=False, silence_votes=False, prefer=None):
+    # A segmentation that read nothing at all about a field is silence, not a contradiction, so it may not
+    # veto the sibling that did read it - but only when the vote token *is* the exported value. Free text
+    # is folded for voting, so an accent- or border-contaminated spelling and a clean one share one token
+    # while their surface forms differ; there a blank sibling keeps vetoing, as before.
+    votes, originals = _family_votes(groups, key, value, prefer, skip_empty=silence_votes)
     candidates = [token for token, voters in votes.items() if len(voters) >= 2]
     if unanimous and len(votes) > 1:
         return []
@@ -202,7 +208,8 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
             if not relevant or any(token.confidence < confidence for line in relevant for token in line.tokens):
                 return []
             return [candidate]
-        candidates = _agreed(readings, metadata, folded, unanimous=True)
+        candidates = _agreed(readings, metadata, folded, unanimous=True,
+                             silence_votes=key == "invoice_date")
         setattr(result, key, candidates[0] if len(candidates) == 1 else None)
     if result.supplier:
         explicit_votes = _agreed(
@@ -353,6 +360,7 @@ def build_consensus(readings: dict[str, list[DocumentEvidence]], *, confidence=O
                         )
                     row.cells["quantity"] = []
                     row.cells["unit_price"] = []
+                    row.amount_operand_veto = True
                     result.issues.append(
                         f"Ligne « {row.description} » : lectures contradictoires avec le produit ; "
                         "quantité/prix non recoupés, pas d'anomalie de facture affirmée."

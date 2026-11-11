@@ -86,6 +86,7 @@ DATE_LABEL = re.compile(
     r"|(?P<invoice>invoice\s+date|issue\s+date|date\s+of\s+invoice|date\s+of\s+issue|"
     r"date\s+de\s+facture|facture\s+date|issued|date))\b"
 )
+UNLABELLED_DATE = re.compile(r"\d{1,2}([./])\d{1,2}\1\d{4}|\d{4}-\d{2}-\d{2}")
 
 
 def is_invoice_date_line(text: str) -> bool:
@@ -215,6 +216,9 @@ class TableRow:
     family_votes: dict[str, dict[Decimal, tuple[str, ...]]] = field(default_factory=dict)
     corroborated_amount_mismatch: tuple[Decimal, Decimal] | None = None
     secondary_description: str = ""
+    # Set only where the consensus product guard rejects corroborated quantity AND price, so the
+    # export can abstain on the amount without inferring a veto from empty cells.
+    amount_operand_veto: bool = False
 
 
 @dataclass(frozen=True)
@@ -252,6 +256,9 @@ class DocumentEvidence:
     preprocessing_used: list[str] = field(default_factory=list)
     fast_path: dict | None = None
     table_shadow: dict | None = None
+    # Populated only by the experimental dual-engine path (EXPERIMENTAL_DUAL_OCR); it records which
+    # engine each row and cell came from. Production evidence never carries it.
+    dual_ocr: dict | None = None
     # "recovered" marks rows injected by the experimental table recovery: they are evidence for
     # their own cells, never a completed production reconstruction of the table.
     rows_provenance: str | None = None
@@ -312,13 +319,14 @@ HEADERS = {
         r"\b(?:description|product|produit|designation|article|prestation"
         r"|item(?:\s+description)?(?: / service)?|libelle|titre\s+du\s+livre)\b"
     ),
-    "quantity": r"\b(?:quantite|qte|quantity|units|qty)\b",
+    "quantity": r"\b(?:quantite|qte|quantity|units|qty)\b|\bheures?\b|\bhrs?\b",
     "unit_price": (
         r"(?:\bp\s*\.?\s*u\s*\.?(?=\s|$)"
         r"|\bpu\b(?:\s+(?:net|ht))*(?=\s|$)"
         r"|\bp\.u\.(?:\s+(?:net|ht))*(?=\s|$)"
         r"|\bprix\s+unit(?:aire)?\.?(?:\s+(?:net|ht))*(?=\s|$)"
         r"|\bnet\s+unit(?:\s+price)?\b|\bunit\s+price\b|\bhourly\s+rate\b)"
+        r"|(?:(?:[€$£]\s*)?/\s*(?:heure|heuree|hour|hr)\b|\bper\s+(?:heure|hour)\b)"
     ),
     "total_ht": r"\b(?:montant(?:\s+ht)?|net amount|line total|total\s+ht)\b",
 }
@@ -390,10 +398,15 @@ def parse_document_date(text: str, locale: str | None) -> tuple[date | None, str
 
 def document_date_readings(lines: list[TextLine]) -> list[tuple[str, str, TextLine]]:
     readings = []
+    labels = []
+    deadline = False
+    continued = set()
     for index, line in enumerate(lines):
-        labels = list(DATE_LABEL.finditer(folded(line.text)))
-        for offset, label in enumerate(labels):
-            end = labels[offset + 1].start() if offset + 1 < len(labels) else len(folded(line.text))
+        matches = list(DATE_LABEL.finditer(folded(line.text)))
+        labels.append(matches)
+        deadline = deadline or any(match.lastgroup == "due" for match in matches)
+        for offset, label in enumerate(matches):
+            end = matches[offset + 1].start() if offset + 1 < len(matches) else len(folded(line.text))
             text = folded(line.text)[label.end():end]
             source = line
             if not re.search(r"\d", text) and index + 1 < len(lines):
@@ -406,7 +419,20 @@ def document_date_readings(lines: list[TextLine]) -> list[tuple[str, str, TextLi
                     and not DATE_LABEL.search(folded(following.text))
                 ):
                     text, source = following.text, following
+                    continued.add(index + 1)
             readings.append((label.lastgroup or "invoice", text, source))
+    # An unreadable date label is a recognition failure, not an absence of evidence: a numeric date
+    # printed alone on its own line still dates the document. It is read as the issue date only while
+    # nothing in the document labels a deadline, so an échéance can never be relabelled, and a date
+    # inside a sentence stays prose.
+    if deadline or any(kind == "invoice" for kind, _, _ in readings):
+        return readings
+    for index, line in enumerate(lines):
+        if labels[index] or index in continued:
+            continue
+        standalone = folded(line.text)
+        if UNLABELLED_DATE.fullmatch(standalone):
+            readings.append(("invoice", standalone, line))
     return readings
 
 
