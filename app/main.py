@@ -48,6 +48,7 @@ from invoice_validation import document_currency
 import invoice_review
 import invoice_review_edit
 from invoice_review_store import StoreError, persistence_requested
+import dual_ocr_experiment
 from ocr_recovery import recover_image
 from ocr_budget import ProcessingBudget
 from ocr_config import OCR_CONFIG
@@ -58,6 +59,7 @@ MAX_PAGES = 10
 MAX_PIXELS = 25_000_000
 OCR_REQUESTED_LANGUAGES = ("fra", "eng")
 _OCR_LANGUAGES_CACHE: dict[tuple[str, str | None], frozenset[str]] = {}
+_OCR_LISTING_FAILURES: dict[tuple[str, str | None], str] = {}
 PROCESSING_STATUS = "Analyse des données, détection des erreurs"
 REGIONAL_EXAMPLES = [
     ("France · EUR", (ROOT / "app/examples/france.png").resolve()),
@@ -225,16 +227,27 @@ def preview_document(filename: str | None):
         return None, None, f"Impossible de lire la facture : {reason}"
 
 
+def _installation_key() -> tuple[str, str | None]:
+    return (str(pytesseract.pytesseract.tesseract_cmd or ""), os.environ.get("TESSDATA_PREFIX"))
+
+
 def installed_ocr_languages(*, refresh: bool = False) -> frozenset[str]:
-    """Languages Tesseract can actually load, cached per installation, never per image."""
-    key = (str(pytesseract.pytesseract.tesseract_cmd or ""), os.environ.get("TESSDATA_PREFIX"))
+    """Languages Tesseract can actually load, cached per installation, never per image.
+
+    Only a successful listing is cached. A listing that fails once — a transient Windows
+    error on the first upload of a session — must not become the permanent verdict for the
+    whole process, because nothing in the application ever passes `refresh=True`.
+    """
+    key = _installation_key()
     if refresh or key not in _OCR_LANGUAGES_CACHE:
         try:
             _OCR_LANGUAGES_CACHE[key] = frozenset(pytesseract.get_languages(config=""))
         except (OSError, RuntimeError, ValueError, pytesseract.TesseractError) as exc:
             LOGGER.warning("Tesseract language listing failed (%s: %s)", type(exc).__name__, exc)
-            _OCR_LANGUAGES_CACHE[key] = frozenset()
-    return _OCR_LANGUAGES_CACHE[key]
+            _OCR_LISTING_FAILURES[key] = f"{type(exc).__name__}: {exc}"
+        else:
+            _OCR_LISTING_FAILURES.pop(key, None)
+    return _OCR_LANGUAGES_CACHE.get(key, frozenset())
 
 
 def ocr_language_plan(*, requested=OCR_REQUESTED_LANGUAGES, refresh: bool = False) -> dict:
@@ -266,6 +279,13 @@ def require_ocr_languages(
             f" ; tessdata : {plan['tessdata_prefix'] or 'défaut système'}).",
         )
     if not plan["effective"]:
+        failure = _OCR_LISTING_FAILURES.get(_installation_key())
+        if failure:
+            raise RuntimeError(
+                "OCR indisponible : la liste des langues Tesseract n'a pas pu être lue"
+                f" ({failure}) ; réessayez, vérifiez l'installation de Tesseract"
+                " et des langues fra/eng (voir packages.txt)."
+            )
         raise RuntimeError(
             "OCR indisponible : installez Tesseract et les langues fra/eng (voir packages.txt)."
         )
@@ -317,6 +337,13 @@ def ocr_image(image: Image.Image, *, budget: ProcessingBudget | None = None) -> 
     evidence.ocr_calls = calls
     evidence.ocr_elapsed_seconds = time.perf_counter() - started
     evidence.source_size = image.size
+    if dual_ocr_experiment.enabled():
+        evidence, experiment_record = dual_ocr_experiment.experiment(image, evidence)
+        LOGGER.info(
+            "Experimental dual OCR %s: rows %s; provenance %s; %.2fs",
+            experiment_record.get("strategy"), experiment_record.get("rows_built"),
+            experiment_record.get("cell_provenance"), experiment_record.get("seconds", 0.0),
+        )
     return EvidenceText(evidence)
 
 
@@ -492,6 +519,7 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics
             ocr_issues=evidence.issues,
             fast_path=evidence.fast_path,
             table_shadow=getattr(evidence, "table_shadow", None),
+            dual_ocr=getattr(evidence, "dual_ocr", None),
             first_pass_raw=result["raw"],
             ocr_issue_category=reading_issue_category(evidence),
         )
@@ -848,6 +876,24 @@ def _reading_limitations(diagnostics: dict) -> list[str]:
     return list(dict.fromkeys(limitations))
 
 
+def _information_notes(validation: dict) -> list[str]:
+    """Information-severity findings the full report states; the summary must not drop them.
+
+    These never join `flags`: they add no anomaly claim and must not change the ✅/⚠️ verdict.
+    """
+    notes, seen = [], set()
+    for flag in validation.get("flags", []):
+        if flag.get("severity") != "information" or flag.get("code") == "identifier_siret":
+            continue
+        location = str(flag.get("location") or "")
+        reason = str(flag.get("reason") or "")
+        if not reason or (location, reason) in seen:
+            continue
+        seen.add((location, reason))
+        notes.append(f"- **{html.escape(location or 'Champ')}** : {html.escape(reason)}")
+    return notes
+
+
 def _compact_validation_summary(payload: dict | None, diagnostics: dict, fallback: str) -> str:
     if payload is None:
         return fallback or "Lecture non résolue."
@@ -863,8 +909,6 @@ def _compact_validation_summary(payload: dict | None, diagnostics: dict, fallbac
     limitations = _reading_limitations(diagnostics)
     confirmed = sum(status in {VALID, RECOVERED} for status in statuses.values())
     coverage = diagnostics.get("document_coverage") or {}
-    model_info = diagnostics.get("model_info") or {}
-    quota_unavailable = model_info.get("reason") == "quota"
     line_items = payload.get("line_items") or []
     no_product_lines = not any(
         isinstance(item, dict)
@@ -892,10 +936,9 @@ def _compact_validation_summary(payload: dict | None, diagnostics: dict, fallbac
         summary = f"✅ **Extraction cohérente — {confirmed}/{total} champs recoupés**"
         if documented_rows is not None and diagnostics.get("source_kind") in {"ocr", "consensus", "mixed"}:
             summary += f"\n\n{documented_rows} lignes documentées ; exhaustivité de la lecture OCR non établie."
-        if quota_unavailable:
-            summary += (
-                "\n\nQwen indisponible (quota ZeroGPU) ; résultat fondé uniquement sur l'OCR."
-            )
+        notes = _information_notes(validation)
+        if notes:
+            summary += "\n\n" + "\n".join(notes)
         return summary
 
     if flags:
@@ -905,10 +948,6 @@ def _compact_validation_summary(payload: dict | None, diagnostics: dict, fallbac
     else:
         heading = "Vérification incomplète — aucun champ recoupé"
     lines = [f"⚠️ **{heading}**"]
-    if quota_unavailable:
-        lines.append(
-            "- **Qwen indisponible** : quota ZeroGPU ; résultat fondé uniquement sur l'OCR."
-        )
     if no_product_lines:
         lines.append(
             "- **Articles non reconnus** : aucune ligne de produit n'a pu être reconnue de façon fiable."
@@ -983,6 +1022,8 @@ def _compact_validation_summary(payload: dict | None, diagnostics: dict, fallbac
         if path:
             flagged_paths.add(path)
 
+    lines.extend(_information_notes(validation))
+
     proposals = diagnostics.get("unverified_model_readings") or {}
     for path in uncertain:
         if path == "total_ht" and unclassified_net_total:
@@ -1019,84 +1060,46 @@ def _compact_validation_summary(payload: dict | None, diagnostics: dict, fallbac
     return "\n".join(lines)
 
 
-def _performance_summary(diagnostics: dict) -> str:
+def _performance_summary(processing_seconds: float | None) -> str:
+    """The recruiter block states one operational fact: how long this request took.
+
+    Model availability, OCR call counts and per-stage durations stay in `diagnostics` and in the
+    internal diagnostic frame — an unavailable optional model is not something the recruiter can act on.
+    """
     lines = ["### Performances"]
-    if not diagnostics:
-        return "\n".join(lines)
-
-    model_info = diagnostics.get("model_info") or {}
-    used = bool(model_info.get("used") and model_info.get("passes_succeeded", 0) > 0)
-    reason = {
-        "quota": "quota ZeroGPU",
-        "preuves OCR insuffisantes": "preuves documentaires insuffisantes",
-        "indisponibilité technique": "indisponibilité technique",
-        "aucune passe n’a été demandée": "aucune passe demandée",
-    }.get(model_info.get("reason"))
-    lines.append(
-        "- Modèle : Qwen+LoRA"
-        if used else
-        "- Modèle : OCR seul — Qwen+LoRA non utilisé"
-        + (f" ({reason})" if reason else "")
-    )
-
-    requested = model_info.get("passes_requested", 0)
-    succeeded = model_info.get("passes_succeeded", 0)
     if (
-        isinstance(requested, int) and not isinstance(requested, bool)
-        and isinstance(succeeded, int) and not isinstance(succeeded, bool)
-        and requested > 0
+        isinstance(processing_seconds, (int, float))
+        and not isinstance(processing_seconds, bool)
+        and math.isfinite(processing_seconds) and processing_seconds >= 0
     ):
-        lines.append(f"- Passes Qwen+LoRA : {succeeded}/{requested} réussies")
+        duration = f"{processing_seconds:.2f}".replace(".", ",")
+        lines.append(f"- **Temps de traitement : {duration} s**")
     else:
-        lines.append("- Passes Qwen+LoRA : non lancées")
-
-    ocr_calls = diagnostics.get("ocr_calls", 0)
-    ocr_seconds = diagnostics.get("ocr_elapsed_seconds")
-    if isinstance(ocr_calls, int) and not isinstance(ocr_calls, bool) and ocr_calls > 0:
-        if (
-            isinstance(ocr_seconds, (int, float)) and not isinstance(ocr_seconds, bool)
-            and math.isfinite(ocr_seconds) and ocr_seconds >= 0
-        ):
-            lines.append(f"- OCR : {ocr_seconds:.2f} s")
-        else:
-            lines.append("- OCR : durée indisponible")
-    elif diagnostics.get("evidence_available") is False:
-        lines.append("- OCR : indisponible")
-    elif diagnostics.get("source_kind") in {"pdf", "text"}:
-        lines.append("- OCR : non nécessaire (texte disponible sans OCR)")
-    else:
-        lines.append("- OCR : durée indisponible")
-
-    generation = model_info.get("generation_seconds")
-    if used:
-        if (
-            isinstance(generation, (int, float)) and not isinstance(generation, bool)
-            and math.isfinite(generation) and generation > 0
-        ):
-            lines.append(f"- Génération Qwen+LoRA : {generation:.2f} s")
-        else:
-            lines.append("- Génération Qwen+LoRA : durée indisponible")
-    else:
-        lines.append("- Génération Qwen+LoRA : non effectuée")
+        lines.append("- **Temps de traitement : durée indisponible**")
     return "\n".join(lines)
 
 
 def run_recruiter_extraction_ui(filename: str | None):
     diagnostics: dict = {}
+    started = time.perf_counter()
     for frame in run_extraction_ui(filename, diagnostics):
         payload, report, _, _, _, _, download = frame
+        processing_seconds = time.perf_counter() - started
+        diagnostics["processing_seconds"] = processing_seconds
+        LOGGER.info("Recruiter extraction finished in %.2f s", processing_seconds)
         summary = _compact_validation_summary(payload, diagnostics, report)
         if payload is not None and download is None:
             summary += (
                 "\n\nLe résultat est affiché, mais le téléchargement du JSON est "
                 "indisponible. Réessayez plus tard."
             )
-        yield (
-            payload,
-            summary,
-            _performance_summary(diagnostics),
-            download,
+        # The stream emits progress frames before the document is read; a duration is only a
+        # measurement once the request has an outcome, so progress frames show the heading alone.
+        performance = (
+            "### Performances" if report == PROCESSING_STATUS
+            else _performance_summary(processing_seconds)
         )
+        yield (payload, summary, performance, download)
 
 
 def _download_json(payload: dict) -> str:

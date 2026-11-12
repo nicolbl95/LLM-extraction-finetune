@@ -154,9 +154,23 @@ class ReviewUiTests(unittest.TestCase):
                 ))
                 frames, predict = self.extract(calls["run_extraction_ui"], self.example)
                 self.assertTrue(all(len(frame) == 4 for frame in frames))
+                # The recruiter performance block now carries the measured duration of the finished
+                # request, so it is not comparable for equality across runs; the strict output stays
+                # byte-for-byte parallel on payload, verification summary and downloaded JSON, and the
+                # block is checked against its own duration-only contract on every frame instead.
                 self.assertEqual(
-                    [frame[:3] for frame in frames], [frame[:3] for frame in baseline],
+                    [frame[:2] for frame in frames], [frame[:2] for frame in baseline],
                 )
+                for side in (frames, baseline):
+                    for frame in side[:-1]:
+                        self.assertEqual(frame[2], "### Performances")
+                    self.assertRegex(
+                        side[-1][2],
+                        r"^### Performances\n- \*\*Temps de traitement : \d+,\d{2} s\*\*$",
+                    )
+                for frame in frames + baseline:
+                    for failure_word in ("Qwen", "LoRA", "GPU", "Modèle", "Passes", "Génération"):
+                        self.assertNotIn(failure_word, frame[2])
                 self.assertIsNone(frames[-1][0]["line_items"][0]["quantity"])
                 self.assertIsNone(frames[-1][0]["line_items"][0]["unit_price"])
                 self.assertEqual(

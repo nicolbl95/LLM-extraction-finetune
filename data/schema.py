@@ -153,13 +153,13 @@ def safe_invoice_payload(source: dict, warnings: list[str]) -> dict:
         for error in exc.errors(include_url=False, include_context=False):
             location = error["loc"]
             path = ".".join(map(str, location))
-            warnings.append(
-                f"{path} : {error['msg']} Valeur {error.get('input')!r} remplacée par null."
-            )
             target = cleaned
             for part in location[:-1]:
                 target = target[part]
+            replaced = None if isinstance(target, dict) and location[-1] not in target else target[location[-1]]
             target[location[-1]] = None
+            if replaced is not None:
+                warnings.append(f"{path} : {error['msg']} Valeur {replaced!r} remplacée par null.")
     result = InvoiceResult.model_validate(cleaned)
     if result.supplier_name is not None and result.supplier_name != source.get("supplier_name"):
         warnings.append(

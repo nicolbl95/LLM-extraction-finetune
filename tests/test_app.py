@@ -1,8 +1,11 @@
 import json
 import os
+import re
 import shutil
 import tempfile
+import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -458,10 +461,10 @@ class AppTests(unittest.TestCase):
         payload, status, performance, download = outputs
         self.assertEqual(payload, row["output"])
         self.assertEqual(status, "✅ **Extraction cohérente — 16/16 champs recoupés**")
-        self.assertIn("Qwen+LoRA", performance)
-        self.assertIn("1/1 réussies", performance)
-        self.assertIn("11.75 s", performance)
-        self.assertIn("OCR : non nécessaire", performance)
+        self.assertEqual(len(performance.splitlines()), 2)
+        self.assertRegex(
+            performance.splitlines()[1], r"^- \*\*Temps de traitement : \d+,\d\d s\*\*$",
+        )
         self.assertEqual(
             json.loads(Path(download).read_text(encoding="utf-8")),
             payload,
@@ -469,6 +472,7 @@ class AppTests(unittest.TestCase):
         for duplicated in (
             "Analyse de la facture", "Anomalies dans la facture", "Contrôles réussis",
             "16 champs vérifiés ; 0 champ incertain", "Comparatif", "Réponse brute",
+            "Qwen", "LoRA", "GPU", "Modèle", "Passes", "OCR :",
         ):
             self.assertNotIn(duplicated, status + performance)
         predict.assert_called_once()
@@ -544,44 +548,93 @@ class AppTests(unittest.TestCase):
         )
         self.assertEqual(predict.call_count, 1)
 
-    def test_recruiter_ui_labels_mocked_model_failure_as_ocr_only_fallback(self):
+    def test_recruiter_ui_keeps_a_mocked_model_failure_out_of_the_displayed_fields(self):
         row = self.reference_row("invoice-0110")
         outputs, predict = self.run_recruiter_ui(
             row["input"], row["locale"],
             main.gr.Error("mocked ZeroGPU quota unavailable"),
             filename=main.EXAMPLES[1][1],
         )
-        performance = outputs[2]
-        self.assertIn("Modèle : OCR seul — Qwen+LoRA non utilisé", performance)
-        self.assertIn("0/1 réussies", performance)
-        self.assertIn("Génération Qwen+LoRA : non effectuée", performance)
-        self.assertNotIn("- Modèle : Qwen+LoRA\n", performance)
-        self.assertIn("Qwen indisponible (quota ZeroGPU)", outputs[1])
-        self.assertIn("résultat fondé uniquement sur l'OCR", outputs[1])
+        status, performance = outputs[1], outputs[2]
+        self.assertEqual(status, "✅ **Extraction cohérente — 16/16 champs recoupés**")
+        self.assertEqual(len(performance.splitlines()), 2)
+        self.assertRegex(
+            performance.splitlines()[1], r"^- \*\*Temps de traitement : \d+,\d\d s\*\*$",
+        )
+        for failure_word in ("Qwen", "LoRA", "GPU", "quota", "Modèle", "Passes", "indisponible"):
+            self.assertNotIn(failure_word, status + performance)
         self.assertEqual(predict.call_count, 1)
 
-    def test_performance_summary_uses_recorded_times_and_labels_missing_times(self):
-        recorded = main._performance_summary({
-            "model_info": {
-                "used": True, "passes_requested": 1, "passes_succeeded": 1,
-                "generation_seconds": 11.75,
-            },
-            "source_kind": "ocr", "ocr_calls": 3, "ocr_elapsed_seconds": 7.93,
-        })
-        self.assertIn("OCR : 7.93 s", recorded)
-        self.assertIn("Génération Qwen+LoRA : 11.75 s", recorded)
+    def test_performance_summary_reports_only_the_measured_duration(self):
+        self.assertEqual(
+            main._performance_summary(7.934),
+            "### Performances\n- **Temps de traitement : 7,93 s**",
+        )
+        self.assertEqual(
+            main._performance_summary(0),
+            "### Performances\n- **Temps de traitement : 0,00 s**",
+        )
+        unavailable = "### Performances\n- **Temps de traitement : durée indisponible**"
+        self.assertEqual(main._performance_summary(None), unavailable)
+        self.assertEqual(main._performance_summary("11.75"), unavailable)
+        self.assertEqual(main._performance_summary(True), unavailable)
+        for unusable in (float("nan"), float("inf"), -0.5):
+            self.assertEqual(main._performance_summary(unusable), unavailable)
 
-        missing = main._performance_summary({
-            "model_info": {
-                "used": True, "passes_requested": 1, "passes_succeeded": 1,
-            },
-            "source_kind": "ocr", "ocr_calls": 1, "ocr_elapsed_seconds": None,
-        })
-        self.assertIn("OCR : durée indisponible", missing)
-        self.assertIn("Génération Qwen+LoRA : durée indisponible", missing)
-        self.assertNotIn("0.00 s", missing)
+    def test_recruiter_ui_shows_nothing_longer_than_the_request_itself_took(self):
+        row = self.reference_row("invoice-0110")
+        prediction = {
+            "raw": json.dumps(row["output"], ensure_ascii=False),
+            "finish_reason": "stop",
+            "generation_seconds": 11.75,
+        }
+        started = time.perf_counter()
+        outputs, _ = self.run_recruiter_ui(
+            row["input"], row["locale"], prediction, filename=main.EXAMPLES[1][1],
+        )
+        outer = time.perf_counter() - started
+        shown = float(re.search(r": ([\d,]+) s", outputs[2]).group(1).replace(",", "."))
+        self.assertLessEqual(shown, outer + 0.01)
 
-    def test_compact_summary_explains_quota_fallback_and_unrecognized_lines(self):
+    def streamed_frames(self, *, fail_after_read=False):
+        row = self.reference_row("invoice-0110")
+        prediction = {
+            "raw": json.dumps(row["output"], ensure_ascii=False),
+            "finish_reason": "stop",
+            "generation_seconds": 11.75,
+        }
+        evidence = from_text(row["input"], locale=row["locale"])
+        cache_dir = self.folder / "gradio-cache"
+        cache_dir.mkdir(exist_ok=True)
+        checked_path = (
+            patch.object(main, "checked_path", side_effect=ValueError("document refusé"))
+            if fail_after_read else nullcontext()
+        )
+        with patch.dict(os.environ, {"GRADIO_TEMP_DIR": str(cache_dir)}), checked_path, \
+                patch.object(main, "document_text", return_value=EvidenceText(evidence)), \
+                patch.object(main, "ocr_availability", return_value=(True, "")), \
+                patch.object(main, "predict_invoice", return_value=prediction):
+            return list(main.run_recruiter_extraction_ui(main.EXAMPLES[1][1]))
+
+    def test_recruiter_ui_states_a_duration_only_once_the_request_has_an_outcome(self):
+        performance = re.compile(
+            r"^### Performances\n- \*\*Temps de traitement : \d+,\d{2} s\*\*$")
+        frames = self.streamed_frames()
+        self.assertGreater(len(frames), 1)
+        for progress in frames[:-1]:
+            self.assertIsNone(progress[0])
+            self.assertEqual(progress[2], "### Performances")
+        self.assertRegex(frames[-1][2], performance)
+
+    def test_recruiter_ui_keeps_the_duration_on_a_terminal_failure_frame(self):
+        performance = re.compile(
+            r"^### Performances\n- \*\*Temps de traitement : \d+,\d{2} s\*\*$")
+        frames = self.streamed_frames(fail_after_read=True)
+        self.assertIsNone(frames[-1][0])
+        self.assertIn("Échec de la lecture", frames[-1][1])
+        self.assertRegex(frames[-1][2], performance)
+
+    def test_compact_summary_keeps_quota_fallback_out_of_the_recruiter_report(self):
         summary = main._compact_validation_summary(
             {"line_items": []},
             {
@@ -593,11 +646,10 @@ class AppTests(unittest.TestCase):
         )
 
         self.assertIn("Vérification incomplète", summary)
-        self.assertIn("Qwen indisponible", summary)
-        self.assertIn("quota ZeroGPU", summary)
-        self.assertIn("résultat fondé uniquement sur l'OCR", summary)
         self.assertIn("aucune ligne de produit", summary)
         self.assertNotIn("champs vérifiés", summary)
+        for failure_word in ("Qwen", "LoRA", "GPU", "quota", "ZeroGPU", "modèle"):
+            self.assertNotIn(failure_word, summary)
 
     def test_additional_fixtures_remain_supported_as_uploads(self):
         if not shutil.which("tesseract"):

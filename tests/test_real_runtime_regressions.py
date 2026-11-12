@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from decimal import Decimal
@@ -91,9 +92,11 @@ def test_observed_zerogpu_worker_abort_preserves_twenty_ocr_fields_without_claim
             )) as predict, patch.object(main, "extract_invoice", side_effect=extraction):
         result = list(main.run_recruiter_extraction_ui(str(main.EXAMPLES[0][1])))[-1]
     assert result[0] == row["output"]
-    assert "OCR seul" in result[2]
-    assert "0/1 réussies" in result[2]
-    assert "Génération Qwen+LoRA : non effectuée" in result[2]
+    assert len(result[2].splitlines()) == 2
+    assert result[2].splitlines()[0] == "### Performances"
+    assert re.fullmatch(r"- \*\*Temps de traitement : \d+,\d\d s\*\*", result[2].splitlines()[1])
+    for failure_word in ("Qwen", "LoRA", "GPU", "Modèle", "Passes"):
+        assert failure_word not in result[1] + result[2]
     assert "GPU task aborted" not in result[1] + result[2]
     assert captured["model_info"]["failures"] == [{
         "phase": "initial", "category": "zerogpu_worker_aborted",
