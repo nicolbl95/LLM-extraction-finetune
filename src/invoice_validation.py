@@ -85,6 +85,69 @@ def document_currency(evidence: DocumentEvidence) -> str | None:
     return None
 
 
+TAX_VOCABULARY = re.compile(r"\b(?:tva|taxe|tax|vat)\b")
+PRINTED_RATE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+RATE_WHERE = {
+    "corroborated_cell": "est lu dans le détail des lignes par plusieurs prétraitements",
+    "cell": "est lu dans une cellule de taux d’une ligne, sans confirmation par un second prétraitement",
+    "row_text": "apparaît dans le texte d’une ligne de détail",
+    "tax_line": "apparaît sur une ligne mentionnant la taxe",
+}
+
+
+def _detached_rates(evidence: DocumentEvidence) -> list[tuple[str, str]]:
+    """Percentages these lines show but that never reached a ``Tax``.
+
+    ``invoice_evidence`` reads a rate only from a ``%``-bearing amount printed on the labelled tax line
+    (`invoice_evidence.py:1162`), so a rate that sits inside an item row, or beside a tax word the label
+    grammar does not recognise, stays out of ``evidence.taxes``. This helper reads the very same evidence
+    object the checks below already use: it only reports *where* a percentage was seen, and never claims
+    the value is verified or attaches it to a field.
+    """
+    clues: dict[str, str] = {}
+    for row in evidence.rows:
+        voted: dict[Decimal, tuple[str, ...]] = {}
+        for key, families in row.family_votes.get("tax_rate", {}).items():
+            try:
+                voted[Decimal(str(key))] = families
+            except ArithmeticError:
+                continue
+        for number in row.cells.get("tax_rate", []):
+            key = f"{number.value} %"
+            clues.setdefault(key, "corroborated_cell" if len(voted.get(number.value, ())) >= 2 else "cell")
+        for match in PRINTED_RATE.finditer(row.line.text):
+            clues.setdefault(f"{Decimal(match[1].replace(',', '.'))} %", "row_text")
+    for line in evidence.lines:
+        normalized = folded(line.text)
+        if TAX_VOCABULARY.search(normalized):
+            for match in PRINTED_RATE.finditer(line.text):
+                clues.setdefault(f"{Decimal(match[1].replace(',', '.'))} %", "tax_line")
+    return [(rate, RATE_WHERE[where]) for rate, where in sorted(clues.items())]
+
+
+def _rate_clues_clause(evidence: DocumentEvidence) -> str | None:
+    clues = _detached_rates(evidence)
+    if not clues:
+        return None
+    return " ; " + ", ".join(f"« {rate} » {where}" for rate, where in clues)
+
+
+def _currency_line(evidence: DocumentEvidence) -> str:
+    """Say which currency indications were read when none of them identifies a single currency."""
+    base = "Devise : non vérifiable, aucune devise unique n’a été lue"
+    indications = sorted(
+        {symbol for symbol in ("€", "£", "$") if symbol in evidence.text}
+        | set(re.findall(r"\b(?:EUR|GBP|USD|CAD)\b", evidence.text))
+    )
+    if len(indications) > 1 or indications == ["$"]:
+        printed = " et ".join(f"« {indication} »" for indication in indications)
+        subject = "l’indication imprimée" if len(indications) == 1 else "les indications imprimées"
+        verb = "ne désigne pas une devise à elle seule" if len(indications) == 1 \
+            else "ne désignent pas une devise à elles seules"
+        return f"{base} ; {subject} {printed} {verb}."
+    return base + "."
+
+
 def luhn(number: str) -> bool:
     if not number.isdigit():
         return False
@@ -344,20 +407,32 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
     else:
         result.not_verified.append("Sous-total : non vérifiable, montant HT global absent ou ambigu.")
     if not taxes:
-        result.not_verified.append("TVA par taux : non vérifiable, aucune ventilation n’a été lue.")
+        result.not_verified.append(
+            "TVA par taux : non vérifiable, aucune ventilation n’a été lue"
+            + (_rate_clues_clause(evidence) or "") + "."
+        )
     if ht is not None and ttc is not None and evidence.taxes and unambiguous_taxes:
         if abs(ht + total_tax - ttc) > TOLERANCE:
             issue("tax_total", "erreur", "Total TTC", ttc, ht + total_tax, abs(ht + total_tax - ttc),
                   f"HT imprimé {ht} + TVA imprimée {total_tax} ne correspond pas au TTC imprimé.")
         else:
-            result.passed.append(f"HT + taxes lues ({total_tax}) = TTC ; taux : {', '.join(str(rate) + ' %' for rate in taxes)}.")
+            printed_rates = [f"{rate} %" for rate in taxes if rate is not None]
+            result.passed.append(
+                f"HT + taxes lues ({total_tax}) = TTC"
+                + (f" ; taux : {', '.join(printed_rates)}." if printed_rates
+                   else " ; les montants de taxe lus ne portent aucun taux.")
+            )
     else:
         result.not_verified.append(
             "HT + TVA = TTC : non vérifiable, total HT, total TTC ou ventilation de TVA absent ou ambigu."
         )
     for rate, tax in taxes.items():
         if rate is None:
-            result.not_verified.append("TVA : taux non lu ou ambigu.")
+            clues = _rate_clues_clause(evidence)
+            result.not_verified.append(
+                "TVA : taux non lu ou ambigu." if clues is None
+                else "TVA : taux absent de la ligne de ventilation" + clues + "."
+            )
             continue
         if rate == 0:
             if abs(tax) > TOLERANCE:
@@ -450,7 +525,7 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
     ):
         result.passed.append(f"Devise lue : {currency}.")
     elif currency is None:
-        result.not_verified.append("Devise : non vérifiable, aucune devise unique n’a été lue.")
+        result.not_verified.append(_currency_line(evidence))
     if evidence.source_kind == "consensus":
         corroborated_sirets = {
             value for kind, value in evidence.corroborated_identifiers if kind == "siret"
@@ -473,10 +548,12 @@ def document_validation(evidence: DocumentEvidence, *, today: date | None = None
             if flag.code == "identifier_siret" and flag.printed in corroborated_sirets:
                 retained_flags.append(flag)
                 continue
-            result.not_verified.append(
+            generic = (
                 f"{flag.location} : non vérifiable, les lectures OCR ne permettent pas "
                 "de confirmer ce contrôle."
             )
+            if not any(entry.startswith(f"{flag.location} :") for entry in result.not_verified):
+                result.not_verified.append(generic)
         result.flags = retained_flags
     result.flags.sort(key=lambda flag: {"erreur": 0, "avertissement": 1, "information": 2}[flag.severity])
     return result
@@ -546,9 +623,27 @@ def _dates(evidence, result, issue, today):
         else:
             result.passed.append("Échéance postérieure ou égale à la date de facture.")
     if "facture" not in dates:
-        result.not_verified.append("Date de facture : non vérifiable, date non lue.")
+        labelled_kinds = {kind for kind, _, _ in readings}
+        if evidence.invoice_date:
+            result.not_verified.append(
+                "Date de facture : non vérifiable, le JSON exporte une date que ce contrôle ne retrouve pas "
+                "dans les lignes qu’il examine ; rapprochement non effectué."
+            )
+        elif "invoice" in labelled_kinds:
+            result.not_verified.append(
+                "Date de facture : non vérifiable, le libellé de date de facture est lu mais le texte qui le "
+                "suit ne forme pas une date lisible ; aucune interprétation supposée."
+            )
+        else:
+            result.not_verified.append("Date de facture : non vérifiable, date non lue.")
     if "échéance" not in dates:
-        result.not_verified.append("Échéance : non vérifiable, date d’échéance non lue.")
+        if "due" in {kind for kind, _, _ in readings}:
+            result.not_verified.append(
+                "Échéance : non vérifiable, le libellé d’échéance est lu mais le texte qui le suit ne forme "
+                "pas une date lisible ; aucune interprétation supposée."
+            )
+        else:
+            result.not_verified.append("Échéance : non vérifiable, date d’échéance non lue.")
 
 
 def _country(evidence, result, issue):
@@ -619,6 +714,23 @@ def _human_field_name(path: str) -> str:
     except ValueError:
         return path.replace("_", " ")
     return f"Ligne {line_number} — {labels.get(parts[2], parts[2].replace('_', ' '))}"
+
+
+def _unspoken_withheld_fields(statuses: dict[str, str], already_said: str) -> list[str]:
+    """Les champs d'en-tête laissés vides qu'aucune phrase du rapport ne nomme déjà.
+
+    Les cellules de ligne sont volontairement exclues : chacune est déjà portée par sa propre anomalie ou
+    sa propre phrase « non vérifiable », et les énumérer noierait les noms que le lecteur doit vérifier.
+    """
+    said = folded(already_said)
+    names: list[str] = []
+    for path, status in statuses.items():
+        if "." in path or status in ("valide", "récupéré (corroboré par OCR)"):
+            continue
+        label = _human_field_name(path)
+        if label not in names and folded(label) not in said:
+            names.append(label)
+    return names
 
 
 def render_report(evidence: DocumentEvidence, validation: Validation, statuses: dict[str, str],
@@ -746,7 +858,12 @@ def render_report(evidence: DocumentEvidence, validation: Validation, statuses: 
     counts.append(uncertain_label)
     lines.append("**" + " ; ".join(counts) + ".**")
     if to_check:
-        lines.append("Valeur non recoupée : à vérifier manuellement.")
+        unspoken = _unspoken_withheld_fields(
+            statuses, "\n".join([*validation.not_verified, *(flag.location for flag in validation.flags)]))
+        lines.append(
+            (f"Champs non recoupés : {', '.join(unspoken)}. " if unspoken else "")
+            + "Valeur non recoupée : à vérifier manuellement."
+        )
     if suggestions:
         lines.append("### Lectures à vérifier — non intégrées au résultat")
         lines.append("Valeur non recoupée : à vérifier manuellement.")
