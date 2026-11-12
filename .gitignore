@@ -139,6 +139,14 @@ results/product-review115/
 # factures reelles. Regenere par scripts/pr116_*.py.
 results/product-review116/
 
+# PR123 : journal de la suite complete et matrices A/B de l'abstention sans operandes, rebuildes par
+# scripts/pr123_absent_operand_study.py. Les identifiants de documents y sont haches, les valeurs non.
+results/product-review123/
+
+# PR124 : traces de corruption de chiffres d'us-microspective (texte OCR verbatim d'un vrai scan) et
+# matrices A/B de l'hygiene monetaire, rebuildes par scripts/pr124_digit_corruption_trace.py.
+results/product-review124/
+
 # PR119 : rattrapage des captures de recherche PR83-PR104 restees sans regle de repertoire. Les 67
 # fichiers ainsi proteges sont tous non versionnes et les 15 repertoires cites ne suivent aucun fichier.
 # Regles etroites : un repertoire par revue, aucun motif global, aucune negation.
@@ -265,3 +273,18 @@ results/product-review104/
 /scripts/pr116_deliverables.py
 /scripts/pr116_harness.py
 /scripts/pr116_phase7.py
+
+# PR125 manual-retest deliverables quote real invoice suppliers, amounts and line text.
+results/product-review125/
+
+# PR130 audit deliverables quote production code findings and, for some documents, real invoice wording.
+results/product-review130/
+
+# PR131 recovery deliverables quote the same production findings and real invoice wording.
+results/product-review131/
+
+# PR132 live-parity deliverables embed the extracted payloads and server logs of real invoices.
+results/product-review132/
+
+# PR133 freeze deliverables embed the same extracted payloads and verification reports.
+results/product-review133/
