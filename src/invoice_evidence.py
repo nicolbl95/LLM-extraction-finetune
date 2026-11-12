@@ -30,7 +30,7 @@ def normalized_label(text: str) -> str:
 
 
 TOTAL_HT_LABEL = re.compile(
-    r"^(?:sous.total(?: ht)?|subtotal(?: \(net\))?|total excl\. tax|total ht|"
+    r"^(?:sous.total(?: ht)?|sub\s*total(?: \(net\))?|total excl\. tax|total ht|"
     r"total hors taxes?|total avant taxes?|total\s*\(\s*ht\s*\)|net total|net a payer ht)\s*:?\s*"
 )
 TOTAL_TTC_LABEL = re.compile(
