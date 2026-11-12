@@ -4,10 +4,12 @@ Offline and synthetic — no Tesseract, no model, no private fixture. The seven 
 come from PR86; each is asserted twice, once on the explicit `TableRow.amount_operand_veto` signal
 the consensus product guard sets, and once on the value the production export actually produces.
 The signal must never be inferred from empty cells: a row whose operands were merely absent keeps
-its printed amount.
+its printed amount unless printed document totals settle the interpretation, which is PR123's
+absent-operand abstention covered at the end of this module.
 """
 
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -272,3 +274,114 @@ def test_a_vat_rate_never_suppresses_an_amount_that_reconciles_as_ht():
     assert consensus.rows[0].amount_operand_veto is False
     grounded = reconcile(consensus, [{}])
     assert exported(grounded)["total_ht"] == 70.0
+
+
+# ------------------------------------------------------------------ PR123 absent operands
+# PR89's product check has nothing to compare when a quantity or price cell is absent, and the
+# operand-veto branch is unreachable because the guard never ran. Printed document totals can still
+# settle the interpretation; the value only abstains — no replacement HT amount is ever derived.
+
+
+def _fr(totals, amount="90,00", price="", tax_column=False):
+    from invoice_evidence import from_text
+    header = "Description | Quantité | Prix unitaire | % TVA | Montant" if tax_column \
+        else "Description | Quantité | Prix unitaire | Montant"
+    row = f"Prestation | 3 | {price} | {'20% | ' if tax_column else ''}{amount}"
+    return from_text("\n".join([header, row, *totals]) + "\n", locale="fr-FR")
+
+
+def _export(consensus):
+    return reconcile(consensus, [{}]).payload["line_items"][0]
+
+
+def test_absent_operands_with_labelled_ht_and_ttc_abstain():
+    """PR88's `tax_rate_recognized`: no price was read, so nothing reconciles, but the document prints
+    HT 75,00 / TTC 90,00 and the line amount is the TTC one."""
+    evidence = _fr(["Total HT : 75,00", "TVA 20% : 15,00", "Total TTC : 90,00"])
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    assert consensus.rows[0].amount_operand_veto is False
+    assert not consensus.rows[0].family_votes.get("unit_price")
+    assert _export(consensus)["total_ht"] is None
+
+
+def test_absent_operands_abstain_on_the_printed_ttc_total_alone():
+    """PR88's `operands_missing_price`: no HT total is printed, but a printed VAT amount means HT and
+    TTC differ, so an amount equal to the TTC total cannot be an HT amount."""
+    evidence = _fr(["TVA 20% : 15,00", "Total TTC : 90,00"])
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    assert _export(consensus)["total_ht"] is None
+
+
+def test_a_misrecognized_rate_still_abstains_on_the_printed_total_pair():
+    """PR88's `tax_rate_misrecognized` (`TVA 2O%`): the rate is unreadable, yet two distinct printed
+    totals already establish which one the line amount matches."""
+    evidence = _fr(["Total HT : 75,00", "TVA 2O% : 15,00", "Total TTC : 90,00"])
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    assert _export(consensus)["total_ht"] is None
+
+
+def test_absent_operands_without_any_tax_evidence_keep_the_amount():
+    """The documented residual: with only an unqualified total there is no evidence that the amount
+    includes tax, so the printed amount must stay (PR88's `tax_rate_missing`)."""
+    evidence = _fr(["Total : 90,00"])
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    assert _export(consensus)["total_ht"] == 90.0
+
+
+def test_an_amount_matching_the_labelled_ht_total_is_preserved_with_two_rates():
+    """Multiple VAT rates make the rate unusable; the amount must still export when it matches the
+    printed HT total, and abstain when it matches the TTC one instead."""
+    ht_side = _fr(["Total HT : 75,00", "TVA 20% : 12,00", "TVA 5,5% : 3,30", "Total TTC : 90,30"],
+                  amount="75,00")
+    consensus = build_consensus({"gray": [ht_side], "contrast": [copy.deepcopy(ht_side)]})
+    assert _export(consensus)["total_ht"] == 75.0
+    ttc_side = _fr(["Total HT : 75,00", "TVA 20% : 12,00", "TVA 5,5% : 3,30", "Total TTC : 90,30"],
+                   amount="90,30")
+    consensus = build_consensus({"gray": [ttc_side], "contrast": [copy.deepcopy(ttc_side)]})
+    assert _export(consensus)["total_ht"] is None
+
+
+def test_a_zero_vat_document_keeping_ht_equal_to_ttc_is_preserved():
+    """The 0 % case PR88's `document_ttc_sum` lost: the amount equals the labelled HT total, so it is
+    HT and must not abstain even though it also equals the TTC total."""
+    evidence = _fr(["Total HT : 90,00", "TVA 0% : 0,00", "Total TTC : 90,00"])
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    assert _export(consensus)["total_ht"] == 90.0
+
+
+def test_only_the_row_equal_to_the_ttc_total_abstains():
+    """Selectivity: a neighbour whose own amount equals the printed HT total keeps its value; only the
+    row equal to the TTC total abstains, so one tax-inclusive line cannot blank the whole table."""
+    from invoice_evidence import from_text
+    evidence = from_text(
+        "Description | Quantité | Prix unitaire | Montant\n"
+        "Prestation | 3 |  | 75,00\n"
+        "Atelier | 1 |  | 90,00\n"
+        "Total HT : 75,00\nTVA 20% : 15,00\nTotal TTC : 90,00\n", locale="fr-FR")
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    items = reconcile(consensus, [{}]).payload["line_items"]
+    assert [row.amount_operand_veto for row in consensus.rows] == [False, False]
+    assert items[0]["total_ht"] == 75.0
+    assert items[1]["total_ht"] is None
+
+
+def test_contradictory_printed_tax_information_abstains_rather_than_chooses():
+    """HT 75,00 + VAT 30,00 does not reach the printed TTC 90,00: the tax block is contradictory, so
+    no amount may be asserted as HT."""
+    evidence = _fr(["Total HT : 75,00", "TVA 20% : 30,00", "Total TTC : 90,00"])
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    assert _export(consensus)["total_ht"] is None
+
+
+def test_absent_operand_abstention_never_derives_a_replacement_amount():
+    """Phase 2.3/2.4: the corrected export is null, the printed value stays only as provenance and no
+    computed 75,00 ever appears in the payload."""
+    evidence = _fr(["Total HT : 75,00", "TVA 20% : 15,00", "Total TTC : 90,00"], tax_column=True,
+                   price="")
+    consensus = build_consensus({"gray": [evidence], "contrast": [copy.deepcopy(evidence)]})
+    grounded = reconcile(consensus, [{}])
+    item = grounded.payload["line_items"][0]
+    assert item["total_ht"] is None and item["unit_price"] is None
+    assert 75.0 not in set(item.values()) | {item.get("total_ht")}
+    assert "75.0" not in json.dumps(item)
+    assert any("total TTC" in warning for warning in grounded.warnings)

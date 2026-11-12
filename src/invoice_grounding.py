@@ -523,6 +523,11 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
             next(iter({number.value for number in row.cells.get("total_ht", [])}), None)
             if len({number.value for number in row.cells.get("total_ht", [])}) == 1 else None
         )
+        products = {
+            rounded_product(quantity, price)
+            for quantity in row.family_votes.get("quantity", {})
+            for price in row.family_votes.get("unit_price", {})
+        }
         if printed_amount is not None:
             row_rate = next(iter(tax_rates)) if tax_available and len(tax_rates) == 1 else None
             if row_rate is None:
@@ -530,16 +535,25 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
                 row_rate = next(iter(line_rates)) if len(line_rates) == 1 else None
             if row_rate is not None:
                 row_rate = row_rate / 100 if row_rate > 1 else row_rate
-                products = {
-                    rounded_product(quantity, price)
-                    for quantity in row.family_votes.get("quantity", {})
-                    for price in row.family_votes.get("unit_price", {})
-                }
                 tax_inclusive_amount = (
                     any(close(rounded_product(product, Decimal(1) + row_rate), printed_amount)
                         for product in products)
                     and not any(close(product, printed_amount) for product in products)
                 )
+        # Absent operands leave the product check above empty, so printed document totals settle the
+        # interpretation instead: an amount equal to the TTC total, not to the HT total, on a document
+        # that shows VAT is a tax-inclusive amount. Nothing is derived — the value only abstains.
+        printed_ht_total = (global_values["total_ht"][0]
+                            if len(global_values["total_ht"]) == 1 else None)
+        printed_ttc_total = (global_values["total_ttc"][0]
+                             if len(global_values["total_ttc"]) == 1 else None)
+        tax_inclusive_without_operands = (
+            rows_anchor_totals and printed_amount is not None and not products
+            and printed_ttc_total is not None and close(printed_amount, printed_ttc_total)
+            and not (printed_ht_total is not None and close(printed_amount, printed_ht_total))
+            and (tax_sum > 0 or (printed_ht_total is not None
+                                 and not close(printed_ht_total, printed_ttc_total)))
+        )
         exempt_amount = (
             (sum_supported or row.corroborated_amount_mismatch is not None)
             and not tax_inclusive_amount
@@ -564,7 +578,14 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
                 or corroborated_amount_cell
             ):
                 selected = next(iter(printed_values))
-            if key == "total_ht" and row.amount_operand_veto and not exempt_amount:
+            if key == "total_ht" and tax_inclusive_without_operands:
+                value = record(
+                    path, None, NULL,
+                    "montant de ligne non retenu : égal au total TTC imprimé et non au total HT, "
+                    "avec taxe imprimée ; opérandes de ligne absents, interprétation HT non établie",
+                    sources,
+                )
+            elif key == "total_ht" and row.amount_operand_veto and not exempt_amount:
                 value = record(
                     path, None, NULL,
                     "montant non retenu : quantité et prix recoupés puis rejetés par le contrôle du "
