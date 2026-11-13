@@ -579,9 +579,9 @@ def _combine_document(result: DocumentEvidence, other: DocumentEvidence,
                       strategy_name: str) -> list[dict]:
     """Fill only what the backing engine lacks; never overwrite a value it already printed.
 
-    Supplier names are never adopted. On Fast Photography both engines read the same logo the same wrong
-    way, so the agreement test passed and grounding presented a corrupted name as corroborated: agreement
-    between two readings of the same pixels establishes an amount, not a name.
+    Supplier names are never adopted. On the real scan PR101 measured here, both engines read the same
+    logo the same wrong way, so the agreement test passed and grounding presented a corrupted name as
+    corroborated: agreement between two readings of the same pixels establishes an amount, not a name.
     """
     changes = []
     if not result.supplier and getattr(other, "supplier", None):
