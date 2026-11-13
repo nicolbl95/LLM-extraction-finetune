@@ -1,0 +1,124 @@
+{
+  "campaign": "PR137",
+  "date_local": "2026-11-12",
+  "objective": "Restart the local Gradio demo on http://127.0.0.1:7860 and validate it functionally and visually from a recruiter's point of view.",
+  "reference_commit": "97435d7c0670d013c84467ecdadcd4e12d45a8be",
+  "verdict": "PASS_WITH_DISCLOSED_GAPS",
+  "code_changes": 0,
+  "tests_executed": 0,
+  "phase1_preconditions": {
+    "branch": "wip/layouts-reprise",
+    "head": "97435d7c0670d013c84467ecdadcd4e12d45a8be",
+    "server_tip_origin_wip_layouts_reprise": "97435d7c0670d013c84467ecdadcd4e12d45a8be",
+    "head_equals_server_tip": true,
+    "production_files_match_pr136": true,
+    "production_files_match_proof": "git status --porcelain lists no entry under src/ or app/",
+    "local_modifications_preserved": [
+      " M packages.txt",
+      " M scripts/diagnose_independent_benchmark.py",
+      " M scripts/experiment_ocr.py",
+      " M scripts/shadow_fast_path.py"
+    ],
+    "python": ".venv/Scripts/python.exe (3.12)",
+    "gradio": "6.30.0",
+    "tesseract": "5.4.0.20240606",
+    "ocr_languages": "eng, fra, osd",
+    "startup_ocr_log": "Startup OCR: available=True; fra+eng disponibles; revision=97435d7c0670d013c84467ecdadcd4e12d45a8be (modifications locales non commit\u00e9es)",
+    "port_7860_before_restart": "free (0 listeners, 0 python.exe, curl exit 7) so no process had to be stopped",
+    "qwen_lora_loaded": false,
+    "model_downloaded": false
+  },
+  "phase2_restart": {
+    "launcher": "C:/Users/nicol/AppData/Local/Temp/start-invoice-app-detached-v5.ps1 (copy of v4; only the log path changed)",
+    "log": "C:/Users/nicol/AppData/Local/Temp/gradio-7860-pr137.log",
+    "detachment": "Invoke-CimMethod Win32_Process Create, so the launcher parent is WmiPrvSE.exe",
+    "process_chain_final": "21064(python.exe) -> 2572(python.exe) -> 11168(powershell.exe)",
+    "python_process_count": 2,
+    "python_count_note": "documented normal venv redirector + base interpreter pair; no unrelated process touched",
+    "INVOICE_DEVICE": "unset (cpu would force a ~12 GB fp32 load and OOM-kill the server)",
+    "http": {"status": 200, "bytes": 40845, "measured_at_end_of_validation": true},
+    "server_left_running": true
+  },
+  "phase3_browser_criteria": {
+    "interface_loads": {"ok": true, "evidence": "h1 'Extraction standardis\u00e9e de donn\u00e9es de factures', upload label, JSON panel label"},
+    "examples_displayed": {
+      "ok": true,
+      "tiles": ["France \u00b7 EUR", "Royaume-Uni \u00b7 GBP", "\u00c9tats-Unis \u00b7 USD"],
+      "loaded_files": {"France": "france.png 56.0 KB", "Royaume-Uni": "uk.png 63.4 KB", "\u00c9tats-Unis": "us.png 68.9 KB"},
+      "swap_latency_clean_page_ms": 600
+    },
+    "invoice_import": {
+      "ok": true,
+      "evidence": "client-side DataTransfer File + change event on input[type=file], accept='.pdf, .png, .jpg, .jpeg', ma-facture-importee.png 57321 bytes, preview + extraction succeeded"
+    },
+    "extract_button": {"ok": true, "label": "Extraire les donn\u00e9es", "variant": "primary"},
+    "structured_json": {
+      "ok": true,
+      "france": {"supplier": "Services Horizon SAS", "date": "2025-04-30", "total_ht": 5716.77, "total_ttc": 6860.12, "rows": 4},
+      "uk": {"supplier": "Oak Studio Ltd", "date": "2025-05-18", "total_ht": 6527.52, "total_ttc": 7743.58, "rows": 3, "row_sum_equals_total_ht": true},
+      "us": {"supplier": "Cedar Office LLC", "date": "2023-12-07", "total_ht": 8972.8, "rows": 5}
+    },
+    "verification_report": {
+      "ok": true,
+      "france": "\u26a0\ufe0f Anomalies \u00e0 v\u00e9rifier \u2014 20/20 champs recoup\u00e9s | Couverture : 4/4 lignes document\u00e9es pr\u00e9sentes ; exhaustivit\u00e9 de la lecture non \u00e9tablie. | SIRET invalide (cl\u00e9 de contr\u00f4le)",
+      "uk": "\u2705 Extraction coh\u00e9rente \u2014 16/16 champs recoup\u00e9s",
+      "us": "\u2705 Extraction coh\u00e9rente \u2014 24/24 champs recoup\u00e9s | 5 lignes document\u00e9es ; exhaustivit\u00e9 de la lecture OCR non \u00e9tablie."
+    },
+    "json_download": {
+      "ok": true,
+      "mechanism": "each extraction writes invoice-*.json in the Gradio upload cache (app/main.py::_download_json)",
+      "artifact": "C:/Users/nicol/AppData/Local/Temp/gradio/invoice-eyg2jhmj.json",
+      "same_origin_fetch": {"status": 200, "content_type": "application/json", "bytes": 557, "keys": 5, "rows": 3, "identical_to_displayed_panel": true}
+    },
+    "no_developer_facing_text": {
+      "ok": true,
+      "visible_chars_scanned": 1407,
+      "terms_scanned": ["Qwen", "LoRA", "GPU", "CUDA", "Tesseract", "RapidOCR", "bitsandbytes", "torch", "traceback", "Exception", "RuntimeError", "safetensors", "adapter", "OCR seul", "python", "venv", "model_name"],
+      "hits": 0,
+      "browser_console_errors": 0
+    }
+  },
+  "performances_block": {
+    "required": "Performances / - Temps de traitement : XX,XX s",
+    "dom": "<h3>Performances</h3><ul><li><strong>Temps de traitement : 2,62 s</strong></li></ul>",
+    "conforms": true,
+    "mentions_qwen_lora_gpu": false,
+    "durations_observed_seconds": [24.03, 11.27, 10.62, 3.74, 2.62]
+  },
+  "framework_chrome": {
+    "visible": ["Runs", "Cr\u00e9\u00e9 avec Gradio", "Param\u00e8tres"],
+    "present_but_not_visible": ["Utiliser via API", "Stop Recording"],
+    "transient_during_job": "per-component '0.0s' timers; 0 visible after completion",
+    "origin": "Gradio Svelte app footer, not written by app/main.py",
+    "action": "owner decision only; PR137 authorizes no code or CSS change"
+  },
+  "retracted_observation": {
+    "claim": "clicking the Royaume-Uni example returned the France payload",
+    "status": "FALSE \u2014 caused by my own instrumentation",
+    "root_causes": [
+      "patched document.createElement and HTMLAnchorElement.prototype.click left over from probe scripts aborted by the tool's 15 s cap",
+      "2.5 s wait shorter than the queued load_example round-trip"
+    ],
+    "clean_page_result": "us.png loaded in 600 ms and the following extraction returned the US document",
+    "product_defect": false
+  },
+  "disclosed_gaps": [
+    "No pixel-level proof: take_screenshot and click fail with NATIVE_BROWSER_VIEWPORT_UNAVAILABLE (hidden 0x0 viewport); all visual evidence is DOM + computed geometry, so CSS rendering is unverified.",
+    "Native browser download not observable in the hidden tab; verified via the served artifact (HTTP 200, application/json) instead.",
+    "Server log shows double-encoded accents (r\u251c\u00a9cup\u251c\u00a9r\u251c\u00a9) because the launcher's PowerShell Out-File re-encodes UTF-8 output in the console codepage; the product UI text is correct.",
+    "Marketing subtitle says 'avec un mod\u00e8le sp\u00e9cialis\u00e9' while the demo runs OCR-only; recorded, not changed (no code modification authorized).",
+    "0 pytest executed in PR137: HEAD equals the validated version and no production file changed."
+  ],
+  "files_written": [
+    "results/product-review137/PR137-RAPPORT-VALIDATION-DEMO.md",
+    "results/product-review137/pr137-live-verification.json",
+    "C:/Users/nicol/AppData/Local/Temp/start-invoice-app-detached-v5.ps1",
+    "C:/Users/nicol/AppData/Local/Temp/pr137-chain.ps1"
+  ],
+  "git_operations": {"commits_created": 0, "pushes": 0, "huggingface": "none"},
+  "next_steps_recommended": [
+    "30-second human look at the demo in a real tab for the pixel/CSS dimension this tooling cannot prove.",
+    "Owner ruling on the Gradio footer (Runs / Cr\u00e9\u00e9 avec Gradio / Param\u00e8tres) and on the 'mod\u00e8le sp\u00e9cialis\u00e9' subtitle.",
+    "Do not publish anything to Hugging Face Spaces; do not start a next phase automatically."
+  ]
+}
