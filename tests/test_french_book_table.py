@@ -168,3 +168,49 @@ def test_french_numeric_locale_and_dollar_symbol_do_not_assert_euro_or_usd():
         "Livre | 2 | 10,00 $ | 20,00 $\nTotal général: 20,00 $"
     )
     assert "Devise lue : CAD." in document_validation(explicit).passed
+
+
+def table_blocks():
+    return [
+        "Facture",
+        "Désignation | Quantité | Prix unitaire | Montant",
+        "Livre A | 2 | 10,00 $ | 20,00 $",
+        "Livre B | 3 | 8,50 $ | 25,50 $",
+        "Montant total: 45,50 $", "TPS: 2,28 $", "Total général: 47,78 $",
+    ]
+
+
+def cells_of(evidence):
+    return [(row.description, row.secondary_description,
+             tuple(str(cell.value) for key in ("quantity", "unit_price", "total_ht")
+                   for cell in row.cells.get(key, [])))
+            for row in evidence.rows]
+
+
+def test_explicit_semicolon_consensus_text_keeps_the_same_boundaries_as_lines():
+    """A pasted one-line table keeps its rows: ` ; ` ends a line and `|` never joins two cells.
+
+    `from_text` reads a separator convention instead of a newline count, so this is the only
+    guard that a text arriving without line breaks still yields one row per printed line.
+    """
+    blocks = table_blocks()
+    lined = from_text("\n".join(blocks))
+    explicit = from_text(" ; ".join(blocks))
+    assert [line.text for line in explicit.lines] == [line.text for line in lined.lines]
+    assert cells_of(explicit) == cells_of(lined)
+    assert [row[0] for row in cells_of(explicit)] == ["Livre A", "Livre B"]
+    assert any(token.text == "|" for token in explicit.tokens), (
+        "le séparateur de colonne n'est plus un token à lui seul : les colonnes littérales "
+        "ne peuvent plus être dérivées de sa position"
+    )
+    assert not [token.text for token in explicit.tokens if "|" in token.text and token.text != "|"]
+    assert explicit.totals["total_ttc"][0].value == lined.totals["total_ttc"][0].value
+
+
+def test_two_rows_on_one_line_collapse_without_moving_an_amount_onto_the_wrong_item():
+    """Mixed separators lose a row rather than export it: the guard is the surviving cell values."""
+    blocks = table_blocks()
+    collapsed = from_text("\n".join([blocks[0], blocks[1], " ; ".join(blocks[2:4]), *blocks[4:]]))
+    assert [row[0] for row in cells_of(collapsed)] == ["Livre A"]
+    assert cells_of(collapsed)[0][2] == ("2", "10.00", "20.00")
+    assert collapsed.totals["total_ttc"][0].value == Decimal("47.78")
