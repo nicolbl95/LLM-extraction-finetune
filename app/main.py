@@ -1,5 +1,6 @@
 """Gradio demo: invoice document -> text/OCR -> fine-tuned LoRA -> Invoice."""
 
+import hashlib
 import json
 import html
 import logging
@@ -9,7 +10,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from collections import deque
 from decimal import Decimal, InvalidOperation
@@ -74,6 +74,28 @@ ADDITIONAL_EXAMPLES = [
     ("Modèle vierge à compléter", (ROOT / "app/examples/modele-vierge.png").resolve()),
 ]
 EXAMPLES = REGIONAL_EXAMPLES
+# A visitor selecting an example gets Gradio's copy of it in the cache folder, never this path, so
+# the bundled documents are recognised by content. Both digests cost a few milliseconds of reading.
+SYNTHETIC_DOCUMENT_DIGESTS = frozenset(
+    processing_utils.hash_file(path) for _, path in EXAMPLES if path.is_file()
+)
+SYNTHETIC_ONLY_ERROR = (
+    "Cette démonstration n'accepte que ses trois factures d'exemple synthétiques."
+)
+# `checked_path` runs on a path Gradio has already written, so it can reject a document it cannot
+# unwrite. The staging guard below therefore compares plain file digests, computed on the request
+# bytes before anything is stored, and needs its own allowlist that does not carry the per-process
+# hash seed of `processing_utils.hash_file`.
+SYNTHETIC_UPLOAD_DIGESTS = frozenset(
+    hashlib.sha256(path.read_bytes()).hexdigest() for _, path in EXAMPLES if path.is_file()
+)
+UPLOAD_STAGING_ROUTES = frozenset({"/gradio_api/upload", "/upload"})
+# `/gradio_api/process_recording` is a second multipart writer, and this interface owns no microphone
+# and no camera: `gr.File` is its only input. Nothing a visitor could legitimately send there belongs
+# in the demo, so the public build turns the route away instead of letting Gradio spill its bytes into
+# the container's temporary directory, where no cache sweep would ever reach them.
+DEAD_MULTIPART_ROUTES = frozenset({"/gradio_api/process_recording", "/process_recording"})
+DEAD_MULTIPART_ERROR = "Cette démonstration n'a ni micro ni caméra : cette route ne sert à rien ici."
 DEFAULT_ADAPTER = (
     ROOT / "results/qwen25-3b-international-v3-20261021T053959288046Z/lora_adapter"
 )
@@ -125,6 +147,156 @@ FEW_SHOT_RESULT = {
 }
 
 
+def free_upload_enabled() -> bool:
+    """Whether a visitor may have a document they brought processed.
+
+    A Space exposes every file this app created from one shared, unauthenticated folder for as long
+    as it stays cached, so an uploaded invoice remains fetchable by other visitors. Until that
+    isolation exists, a hosted deployment processes only the bundled synthetic examples; local
+    development keeps free upload.
+    """
+    override = os.environ.get("INVOICE_FREE_UPLOAD", "").strip().casefold()
+    if override in {"0", "false", "no", "off"}:
+        return False
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    return not os.environ.get("SPACE_ID")
+
+
+def _file_part_digests(body: bytes, content_type: str) -> list[tuple[str | None, str]]:
+    """One (declared filename, sha256 of the part) per multipart part.
+
+    The parser and the Content-Disposition reader are the ones Gradio itself uses to decide which
+    parts become files (`route_utils.py` `GradioMultiPartParser`), so a part this function calls a
+    file is byte-for-byte the one the writer would have stored.
+    """
+    from python_multipart.multipart import MultipartParser, parse_options_header
+
+    boundary = parse_options_header(content_type.encode("latin-1"))[1].get(b"boundary")
+    if not boundary:
+        raise ValueError("multipart sans boundary")
+    parts: list[tuple[str | None, str]] = []
+    state: dict = {}
+
+    def on_part_begin() -> None:
+        state.clear()
+        state.update({"field": b"", "value": b"", "disposition": "", "data": b""})
+
+    def on_header_field(data: bytes, start: int, end: int) -> None:
+        state["field"] += data[start:end]
+
+    def on_header_value(data: bytes, start: int, end: int) -> None:
+        state["value"] += data[start:end]
+
+    def on_header_end() -> None:
+        if state["field"].strip().lower() == b"content-disposition":
+            state["disposition"] = state["value"].decode("latin-1")
+        state["field"] = b""
+        state["value"] = b""
+
+    def on_part_data(data: bytes, start: int, end: int) -> None:
+        state["data"] += data[start:end]
+
+    def on_part_end() -> None:
+        params = parse_options_header(state["disposition"])[1]
+        filename = params.get(b"filename")
+        parts.append((
+            filename.decode("utf-8", errors="replace") if filename is not None else None,
+            hashlib.sha256(state["data"]).hexdigest(),
+        ))
+
+    parser = MultipartParser(boundary, {
+        "on_part_begin": on_part_begin,
+        "on_header_field": on_header_field,
+        "on_header_value": on_header_value,
+        "on_header_end": on_header_end,
+        "on_part_data": on_part_data,
+        "on_part_end": on_part_end,
+    })
+    parser.write(body)
+    return parts
+
+
+async def _staging_refusal(status_code: int, detail: str, send) -> None:
+    payload = json.dumps({"detail": detail}).encode("utf-8")
+    await send({
+        "type": "http.response.start",
+        "status": status_code,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(payload)).encode("latin-1")),
+        ],
+    })
+    await send({"type": "http.response.body", "body": payload})
+
+
+class SyntheticUploadStagingGuard:
+    """Turn away an upload the demo may not process before Gradio stores a single byte of it.
+
+    Gradio's multipart parser opens its scratch file directly inside the served upload folder
+    (`route_utils.py:811`) and renames it once the request ends, so `checked_path`, which only sees
+    the finished path, can refuse a document it cannot unwrite; that document stays fetchable by
+    public URL for the cache lifetime. This middleware is the missing pre-write half of the same
+    rule and covers clients that post to the staging route directly. It also closes the one other
+    multipart writer this app never uses, `DEAD_MULTIPART_ROUTES`. Local development keeps free
+    upload: the guard is inert while `free_upload_enabled()`.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        root_path = scope.get("root_path") or ""
+        path = scope.get("path", "")
+        if root_path and path.startswith(root_path):
+            path = path[len(root_path):]
+        path = path.rstrip("/")
+        if (scope["type"] != "http" or scope["method"] != "POST" or free_upload_enabled()):
+            await self.app(scope, receive, send)
+            return
+        if path in DEAD_MULTIPART_ROUTES:
+            await _staging_refusal(403, DEAD_MULTIPART_ERROR, send)
+            return
+        if path not in UPLOAD_STAGING_ROUTES:
+            await self.app(scope, receive, send)
+            return
+        headers = {key.decode("latin-1").lower(): value.decode("latin-1")
+                   for key, value in scope.get("headers", [])}
+        content_type = headers.get("content-type", "")
+        if "multipart/form-data" not in content_type:
+            await self.app(scope, receive, send)  # Gradio répond 400 sans écrire
+            return
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body += message.get("body", b"")
+            if len(body) > MAX_BYTES:
+                await _staging_refusal(413, "Le fichier dépasse 20 Mo.", send)
+                return
+            if not message.get("more_body", False):
+                break
+        try:
+            parts = _file_part_digests(bytes(body), content_type)
+        except Exception:
+            await _staging_refusal(400, "Requête multipart illisible.", send)
+            return
+        if any(name is not None and digest not in SYNTHETIC_UPLOAD_DIGESTS for name, digest in parts):
+            await _staging_refusal(403, SYNTHETIC_ONLY_ERROR, send)
+            return
+        replayed: dict | None = {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        async def replay():
+            nonlocal replayed
+            if replayed is not None:
+                message, replayed = replayed, None
+                return message
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
 def checked_path(filename: str | None) -> Path:
     if not filename:
         raise ValueError("Sélectionnez une facture avant de lancer l'extraction.")
@@ -149,6 +321,8 @@ def checked_path(filename: str | None) -> Path:
             raise ValueError("Le fichier n'est plus disponible : importez-le de nouveau.")
     if not 0 < path.stat().st_size <= MAX_BYTES:
         raise ValueError("Le fichier doit être non vide et ne pas dépasser 20 Mo.")
+    if not free_upload_enabled() and processing_utils.hash_file(path) not in SYNTHETIC_DOCUMENT_DIGESTS:
+        raise ValueError(SYNTHETIC_ONLY_ERROR)
     return path
 
 
@@ -213,6 +387,7 @@ def preview_document(filename: str | None):
             "Image ou page trop grande : limite de 25 mégapixels.",
             "Les PDF protégés par mot de passe ne sont pas acceptés.",
             "Le PDF doit contenir entre 1 et 10 pages.",
+            SYNTHETIC_ONLY_ERROR,
         }
         if isinstance(exc, ValueError):
             reason = str(exc) if str(exc) in safe_validation_errors else "Fichier ou demande invalide."
@@ -453,9 +628,22 @@ def module_preload_enabled() -> bool:
     return os.environ.get("INVOICE_MODULE_PRELOAD", "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
+def model_enabled() -> bool:
+    """Single switch for an OCR-only deployment: off, no weight is fetched and no GPU window opens.
+
+    The check has to stay outside ``predict_invoice``: on ZeroGPU the ``@spaces.GPU`` decorator
+    schedules and charges a window before the function body runs, so a guard placed inside it
+    would still bill every visitor for a pass that never happens.
+    """
+    return os.environ.get("INVOICE_MODEL", "1").strip().casefold() not in {"0", "false", "no", "off"}
+
+
 def startup_prefetch() -> None:
     """Space-only warm-up: local imports, tests and CPU runs are untouched."""
     if not os.environ.get("SPACE_ID"):
+        return
+    if not model_enabled():
+        LOGGER.info("Model disabled by INVOICE_MODEL; skipping the weight warm-up")
         return
     if os.environ.get("INVOICE_PREFETCH", "1").strip().casefold() in {"0", "false", "no", "off"}:
         LOGGER.info("Model prefetch disabled by INVOICE_PREFETCH")
@@ -487,6 +675,13 @@ def predict_invoice(row: dict, messages: list[dict]) -> dict:
     return result
 
 
+def run_model_pass(row: dict, messages: list[dict]) -> dict:
+    """Guarded entry to the GPU-decorated inference, so INVOICE_MODEL=0 costs no window."""
+    if not model_enabled():
+        raise RuntimeError("Modèle désactivé par INVOICE_MODEL : extraction OCR seule.")
+    return predict_invoice(row, messages)
+
+
 def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics: dict | None = None) -> dict:
     messages = [
         {"role": "system", "content": LIVE_SYSTEM_PROMPT},
@@ -497,7 +692,7 @@ def extract_invoice(text: str, *, warnings: list[str] | None = None, diagnostics
     row = {"id": "live-upload", "input": str(text)}
     evidence = text.evidence if isinstance(text, EvidenceText) else from_text(text)
     result = run_grounded_inference(
-        evidence, row, messages, lambda row, messages: predict_invoice(row, messages),
+        evidence, row, messages, run_model_pass,
         recoverable_errors=(OSError, ValueError, RuntimeError, ImportError, gr.Error),
         source_size=getattr(evidence, "source_size", None),
     )
@@ -714,10 +909,10 @@ def run_extraction_ui(filename: str | None, diagnostics: dict | None = None):
         if payload is not None:
             try:
                 download = _download_json(payload)
-            except OSError as exc:
+            except (TypeError, ValueError) as exc:
                 LOGGER.error(
-                    "Strict JSON download file could not be created (%s, errno=%s): %s",
-                    type(exc).__name__, exc.errno, sanitized_exception_detail(exc),
+                    "Strict JSON download value could not be serialised (%s): %s",
+                    type(exc).__name__, sanitized_exception_detail(exc),
                 )
                 report += (
                     "\n\nLe résultat est affiché, mais le téléchargement du JSON est "
@@ -1103,14 +1298,9 @@ def run_recruiter_extraction_ui(filename: str | None):
 
 
 def _download_json(payload: dict) -> str:
-    cache_dir = Path(gr.utils.get_upload_folder())
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", suffix=".json", prefix="invoice-",
-        dir=cache_dir, delete=False,
-    ) as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=False)
-        return handle.name
+    # La route fichier de Gradio (`/gradio_api/file=`) ne verifie que l'appartenance au dossier
+    # servi, jamais la session : ecrire le JSON l'aurait rendu telechargeable par un autre visiteur.
+    return json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 def preview_ui(filename: str | None):
@@ -1498,29 +1688,49 @@ def build_app(*, persistence=None) -> gr.Blocks:
     )
     with gr.Blocks(
         title="Extraction standardisée de données de factures",
-        delete_cache=(600, 600),
+        delete_cache=(60, 600),
     ) as demo:
+        if model_enabled():
+            tagline = (
+                "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
+                "des données importantes standardisées."
+            )
+        else:
+            tagline = (
+                "en données JSON structurées : la lecture est réalisée par OCR, puis les valeurs "
+                "sont recoupées entre plusieurs passes de lecture. Le rapport d'extraction indique "
+                "les champs confirmés et ceux qui restent à vérifier."
+            )
         gr.Markdown(
             "# Extraction standardisée de données de factures\n"
-            "Transformez vos factures françaises, britanniques et américaines "
-            "en données JSON structurées avec un modèle spécialisé pour obtenir un output clair "
-            "des données importantes standardisées."
+            "Transformez vos factures françaises, britanniques et américaines " + tagline
         )
         if os.environ.get("SPACE_ID"):
+            treatment = "traitement OCR et modèle" if model_enabled() else "traitement OCR"
             gr.Markdown(
                 "**Confidentialité — Espace Hugging Face :** les fichiers importés sont "
-                "transmis à l'infrastructure de cet Espace pour traitement OCR et modèle. "
+                f"transmis à l'infrastructure de cet Espace pour {treatment}. "
                 "N'importez pas de facture confidentielle ou de document que vous n'êtes pas "
                 "autorisé à partager."
             )
         with gr.Row():
             with gr.Column():
+                uploads_allowed = free_upload_enabled()
                 upload = gr.File(
-                    label="Importer une facture — PDF ou image",
+                    label=(
+                        "Importer une facture — PDF ou image" if uploads_allowed
+                        else "Téléversement désactivé — factures d'exemple uniquement"
+                    ),
                     file_types=[".pdf", ".png", ".jpg", ".jpeg"],
                     type="filepath",
+                    interactive=uploads_allowed,
                 )
-                gr.Markdown("PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais")
+                gr.Markdown(
+                    "PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais"
+                    if uploads_allowed else
+                    "Cette version publique traite uniquement les trois factures d'exemple "
+                    "synthétiques ci-dessous ; le téléversement d'un autre document est refusé."
+                )
                 gr.Markdown(
                     "Essayer une facture d'exemple : France / Royaume-Uni / États-Unis 🔽"
                 )
@@ -1539,7 +1749,13 @@ def build_app(*, persistence=None) -> gr.Blocks:
             with gr.Column():
                 status = gr.Markdown("", buttons=["copy"])
                 result = gr.JSON(label="Résultat de l'extraction — JSON structuré")
-                download = gr.DownloadButton("Télécharger le JSON")
+                download = gr.Code(
+                    label="Télécharger le JSON",
+                    language="json",
+                    buttons=["copy", "download"],
+                    lines=3,
+                    max_lines=10,
+                )
                 performance = gr.Markdown("### Performances")
         upload.change(
             preview_recruiter_ui, inputs=[upload],
@@ -1554,6 +1770,17 @@ def build_app(*, persistence=None) -> gr.Blocks:
     return demo.queue(default_concurrency_limit=1, max_size=8)
 
 
+def launch_app_kwargs() -> dict:
+    """ASGI wiring for the pre-write staging refusal.
+
+    Kept out of the `__main__` block so a research arm mounting these very bytes installs the same
+    guard the Space runs, instead of measuring an app that is only half the deployment.
+    """
+    from starlette.middleware import Middleware
+
+    return {"middleware": [Middleware(SyntheticUploadStagingGuard)]}
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     startup_prefetch()
@@ -1561,4 +1788,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", "7860")),
         max_file_size="20mb",
+        app_kwargs=launch_app_kwargs(),
     )
