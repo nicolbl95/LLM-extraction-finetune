@@ -144,6 +144,11 @@ Lecture littérale des chiffres : [détails du prompt système](docs/DESIGN.md).
 
 Vérifications logicielles et évaluation des rejeux (aucun LLM réel appelé) :
 
+La suite hors ligne s'installe avec `python -m pip install -r requirements-dev.txt` et
+exige les données de langue `fra` **et** `eng` ; [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)
+donne l'environnement reproductible complet (Tesseract, `TESSDATA_PREFIX`, flags,
+fins de ligne, empreintes de configuration).
+
 ```bash
 python -m pytest -q
 python src/evaluate_grounding.py --replays tests/fixtures/invoice_model_errors.json

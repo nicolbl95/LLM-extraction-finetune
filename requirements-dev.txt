@@ -1,0 +1,7 @@
+# Environnement de test uniquement — jamais installé par le Space.
+# Le Space ne monte que `requirements.txt` ; ce fichier ajoute le runner de la suite hors ligne.
+# Les dépendances de recherche (rapidocr, onnxruntime) restent volontairement absentes :
+# elles ne servent qu'aux modules expérimentaux derrière un flag et ne sont déclarées nulle part.
+-r requirements.txt
+pytest>=9,<10
+packaging>=24
