@@ -134,7 +134,7 @@ def test_scanned_pdf_pages_share_the_same_budget_without_reparse_of_rejected_num
         proof.rows[0].cells["quantity"] = []
         return EvidenceText(proof)
 
-    with tempfile.TemporaryDirectory(dir=ROOT / "tests") as directory:
+    with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "scanned.pdf"
         with pymupdf.open() as pdf:
             for _ in range(3):

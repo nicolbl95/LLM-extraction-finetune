@@ -15,7 +15,7 @@ from evaluate_real_scans import load_truth, run
 
 @pytest.fixture
 def tmp_path():
-    with tempfile.TemporaryDirectory(dir=ROOT / "tests") as directory:
+    with tempfile.TemporaryDirectory() as directory:
         yield Path(directory)
 
 

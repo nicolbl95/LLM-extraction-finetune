@@ -10,7 +10,7 @@ from app import main
 
 
 def test_checked_path_skips_missing_pruned_example_files():
-    with tempfile.TemporaryDirectory(dir=main.ROOT / ".venv") as directory:
+    with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         stale_upload = root / "expired-upload.png"
         absent_example = root / "pruned-example.png"

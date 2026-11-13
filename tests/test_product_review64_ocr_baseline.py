@@ -137,7 +137,9 @@ def test_microspective_rate_price_header_should_identify_unit_price_column(cases
     assert probe["header_matches"]["description"] is True
 
 
-def test_microspective_captured_tokens_do_not_assemble_incomplete_rows():
+def test_microspective_captured_tokens_do_not_assemble_incomplete_rows(results):
+    # `results` is requested, not read: this probe shells out to the capture file itself, so the
+    # module's own skip guard is the only thing that keeps a checkout without it from hard-failing.
     probe = (
         "import json,sys;"
         "from pathlib import Path;"

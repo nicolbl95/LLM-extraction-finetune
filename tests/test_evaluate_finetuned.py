@@ -112,7 +112,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(report["num_examples"], 60)
 
     def test_bad_test_split_and_leakage_are_rejected(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "test.jsonl"
             rows = copy.deepcopy(self.rows)
             rows[0]["currency"] = "BAD"
@@ -142,7 +142,7 @@ class EvaluationTests(unittest.TestCase):
         return adapter
 
     def test_training_manifest_hashes_prevent_wrong_dataset_evaluation(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             adapter = self.make_adapter(directory)
             test_path = ROOT / "data" / "test.jsonl"
             self.assertEqual(evaluation.check_training_provenance(adapter, test_path), ["train", "val"])
@@ -171,7 +171,7 @@ class EvaluationTests(unittest.TestCase):
         return {"torch": torch, "transformers": transformers, "peft": peft}
 
     def test_lora_loads_declared_base_revision_and_saved_tokenizer(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             adapter = self.make_adapter(directory)
             modules = self.mocked_dependencies()
             with patch.dict(sys.modules, modules):
@@ -529,7 +529,7 @@ class EvaluationTests(unittest.TestCase):
                 evaluation.main()
 
     def test_base_only_full_split_cli_persists_real_backend_contract(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "baseline-qwen"
             golds = {row["id"]: row["output"] for row in self.rows}
             argv = ["evaluate_finetuned.py", "--base-only", "--self-correct",
@@ -554,7 +554,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(len((output / "predictions.jsonl").read_text(encoding="utf-8").splitlines()), 60)
 
     def test_cli_persists_grounded_payload_and_raw_failures_without_inflating_metrics(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "partial-results"
             invalid = copy.deepcopy(self.gold)
             invalid["line_items"][0]["quantity"] += 100
@@ -580,7 +580,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(report["exact_match_rate"], 0)
 
     def test_lora_generation_slices_prompt_and_checks_budget(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             adapter = self.make_adapter(directory)
             modules = self.mocked_dependencies()
             with patch.dict(sys.modules, modules):
@@ -625,7 +625,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(llm.create_chat_completion.call_args.kwargs["temperature"], 0.0)
 
     def test_cli_writes_auditable_outputs_without_overwriting(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             adapter = self.make_adapter(directory)
             output = Path(directory) / "evaluation"
             argv = ["evaluate_finetuned.py", "--adapter-path", str(adapter), "--limit", "1",

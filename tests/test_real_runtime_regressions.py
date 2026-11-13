@@ -30,7 +30,7 @@ def test_us_example_selection_and_altered_upload_have_distinct_grounded_results(
     if not {"fra", "eng"} <= set(main.pytesseract.get_languages()):
         pytest.skip("This real-image/captured-OCR test needs Tesseract fra+eng")
     row = reference("invoice-0435")
-    with tempfile.TemporaryDirectory(dir=ROOT / ".venv") as directory, \
+    with tempfile.TemporaryDirectory() as directory, \
             patch.dict(os.environ, {"GRADIO_TEMP_DIR": directory}):
         app = main.build_app()
         events = {event["api_name"]: event for event in app.config["dependencies"]}
@@ -83,7 +83,7 @@ def test_observed_zerogpu_worker_abort_preserves_twenty_ocr_fields_without_claim
         result = original(text, **kwargs)
         captured.update(kwargs["diagnostics"])
         return result
-    with tempfile.TemporaryDirectory(dir=ROOT / ".venv") as directory, \
+    with tempfile.TemporaryDirectory() as directory, \
             patch.dict(os.environ, {"GRADIO_TEMP_DIR": directory}), \
             patch.object(main, "document_text", return_value=EvidenceText(from_text(
                 row["input"], locale=row["locale"],

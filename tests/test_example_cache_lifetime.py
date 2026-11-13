@@ -15,7 +15,7 @@ from app import main
 
 @pytest.fixture
 def cache_app():
-    with tempfile.TemporaryDirectory(dir=main.ROOT / "tests") as directory:
+    with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         with patch.dict(main.os.environ, {"GRADIO_TEMP_DIR": str(root / "cache")}), \
                 patch.object(main, "get_extractor", side_effect=AssertionError("No model load")):

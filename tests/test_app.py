@@ -21,7 +21,7 @@ class AppTests(unittest.TestCase):
     def setUp(self):
         main.resolve_adapter_path.cache_clear()
         self.addCleanup(main.resolve_adapter_path.cache_clear)
-        self.directory = tempfile.TemporaryDirectory(dir=main.ROOT / "app")
+        self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.folder = Path(self.directory.name)
         self.gold = {
@@ -348,7 +348,7 @@ class AppTests(unittest.TestCase):
         }
         reference_ids = ("invoice-0406", "invoice-0110", "invoice-0435")
         with tempfile.TemporaryDirectory(
-            prefix="gradio-example-cache-", dir=main.ROOT / "tests",
+            prefix="gradio-example-cache-",
         ) as cache_dir, patch.dict(os.environ, {"GRADIO_TEMP_DIR": cache_dir}):
             app = main.build_app()
             dependencies = {
@@ -732,7 +732,7 @@ class AppTests(unittest.TestCase):
 
     def test_missing_uploaded_temp_file_returns_reimport_message_without_trace(self):
         with tempfile.TemporaryDirectory(
-            prefix="gradio-upload-cache-", dir=main.ROOT / "tests",
+            prefix="gradio-upload-cache-",
         ) as cache_dir, patch.dict(os.environ, {"GRADIO_TEMP_DIR": cache_dir}):
             app = main.build_app()
             dependency = next(

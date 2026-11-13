@@ -49,7 +49,7 @@ class ReviewUiTests(unittest.TestCase):
     def setUp(self):
         main.resolve_adapter_path.cache_clear()
         self.addCleanup(main.resolve_adapter_path.cache_clear)
-        self.directory = tempfile.TemporaryDirectory(dir=main.ROOT / "app")
+        self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.folder = Path(self.directory.name)
         self.example = str(main.REGIONAL_EXAMPLES[0][1])

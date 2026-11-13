@@ -554,7 +554,7 @@ def test_native_pdf_text_keeps_positions_without_ocr():
     import tempfile
     import pymupdf
     from app import main
-    with tempfile.TemporaryDirectory(dir=ROOT / "tests") as directory:
+    with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "proof.pdf"
         with pymupdf.open() as pdf:
             page = pdf.new_page()

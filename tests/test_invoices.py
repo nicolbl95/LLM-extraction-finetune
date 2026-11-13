@@ -123,7 +123,7 @@ class InvoiceTests(unittest.TestCase):
         )
 
     def test_render_all_templates_and_locales(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             rng = random.Random(7)
             for locale in LOCALES:
                 invoice, ctx = build_invoice(rng, locale, 1)
