@@ -173,9 +173,7 @@ class ReviewUiTests(unittest.TestCase):
                         self.assertNotIn(failure_word, frame[2])
                 self.assertIsNone(frames[-1][0]["line_items"][0]["quantity"])
                 self.assertIsNone(frames[-1][0]["line_items"][0]["unit_price"])
-                self.assertEqual(
-                    Path(frames[-1][-1]).read_bytes(), Path(baseline[-1][-1]).read_bytes(),
-                )
+                self.assertEqual(frames[-1][-1], baseline[-1][-1])
                 self.assertEqual(predict.call_count, 1)
                 backend.assert_not_called()
                 review_builder.assert_not_called()
@@ -440,7 +438,9 @@ class ReviewUiTests(unittest.TestCase):
             "Les brouillons humains ne sont pas sauvegardés",
         ):
             self.assertNotIn(removed, public_configuration)
-        self.assertEqual(public_app.delete_cache, (600, 600))
+        # (frequency, age): the 600 s floor keeps an in-flight extraction intact, the 60 s
+        # pass bounds how long a served artifact stays reachable after it is finished.
+        self.assertEqual(public_app.delete_cache, (60, 600))
 
         with self.environment(False), patch.dict(os.environ, {"SPACE_ID": ""}):
             local_app = main.build_app()

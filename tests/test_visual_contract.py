@@ -1,10 +1,13 @@
-"""PR135 Phase 3: the recruiter landing page is frozen by assertions, not by prose.
+"""PR135 phase 3: the recruiter landing page is frozen by assertions, not by prose.
 
 `tests/test_app.py` pins the strings that are rendered today. This module pins the strings the
 recruiter page is *allowed* to render, so a future edit cannot quietly reintroduce a capability
-claim. Three contract items are known-unmet against the current `app/main.py`; they carry
+claim. Two contract items are known-unmet against the current `app/main.py`; they carry
 `xfail(strict=True)` so the gap stays registered in the suite, the suite stays failure-free, and
 an implementation that satisfies the contract has to delete the marker to stay green.
+
+The model-backend claim is no longer one of them: PR140 phase 4 made `INVOICE_MODEL=0` render
+the OCR wording instead, so `test_no_model_backend_claim` now asserts the contract directly.
 """
 
 import os
@@ -80,6 +83,8 @@ CURRENT_TAGLINE = (
     "Transformez vos factures françaises, britanniques et américaines en données JSON structurées "
     "avec un modèle spécialisé pour obtenir un output clair des données importantes standardisées."
 )
+OCR_ONLY_CLAIMS = ("réalisée par OCR", "recoupées entre plusieurs passes de lecture")
+MODEL_NOTICE = "traitement OCR et modèle"
 
 
 @contextmanager
@@ -91,9 +96,13 @@ def environment(**values):
         yield
 
 
-def landing_page(space_id=None):
-    """The recruiter page exactly as `build_app()` renders it, without touching a model backend."""
-    with environment(SPACE_ID=space_id):
+def landing_page(space_id=None, invoice_model="1"):
+    """The recruiter page exactly as `build_app()` renders it, without touching a model backend.
+
+    `invoice_model` pins `INVOICE_MODEL` so the copy is deterministic instead of following the
+    ambient deployment switch; None removes the variable and inherits its default of on.
+    """
+    with environment(SPACE_ID=space_id, INVOICE_MODEL=invoice_model):
         with patch.object(main, "get_extractor") as backend:
             demo = main.build_app()
     backend.assert_not_called()
@@ -147,18 +156,25 @@ def test_no_three_locale_claim():
         assert claim not in text, claim
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "'avec un modèle spécialisé' is stated on the landing page (app/main.py:1506) while the "
-        "served demo runs OCR-only; the phrase is on the PR135 forbidden-claim list."
-    ),
-)
 def test_no_model_backend_claim():
     for space_id in (None, "dummy/space"):
-        text = landing_text(landing_page(space_id=space_id))
+        text = landing_text(landing_page(space_id=space_id, invoice_model="0"))
         for claim in MODEL_CLAIMS:
             assert claim.casefold() not in text, claim
+        for claim in OCR_ONLY_CLAIMS:
+            assert claim.casefold() in text, claim
+        assert MODEL_NOTICE.casefold() not in text, space_id
+
+
+def test_model_backend_claim_only_accompanies_an_enabled_model():
+    """The honest copy is a switch, not a deletion: with the model on the claim stays true."""
+    for space_id in (None, "dummy/space"):
+        text = landing_text(landing_page(space_id=space_id, invoice_model="1"))
+        assert "modèle spécialisé" in text, space_id
+        for claim in OCR_ONLY_CLAIMS:
+            assert claim.casefold() not in text, claim
+        if space_id:
+            assert MODEL_NOTICE.casefold() in text, space_id
 
 
 @pytest.mark.parametrize("space_id", [None, "dummy/space"])
@@ -207,6 +223,6 @@ def test_single_upload_and_extraction_controls():
     buttons = components(demo, "button")
     assert [c["props"]["value"] for c in buttons] == ["Extraire les données"]
     assert buttons[0]["props"]["variant"] == "primary"
-    assert len(components(demo, "downloadbutton")) == 1
+    assert len(components(demo, "code")) == 1
     assert len(components(demo, "json")) == 1
     assert len(components(demo, "image")) == 1

@@ -42,18 +42,13 @@ def test_standard_example_file_delivery_survives_cache_cleanup(cache_app):
         assert select((index, [str(original)]))["value"]["path"] == str(cached)
 
 
-def test_cache_protection_does_not_retain_new_uploads_or_json(cache_app):
+def test_cache_protection_does_not_retain_new_uploads(cache_app):
     root, app, upload, _ = cache_app
     ordinary = root / "ordinary.png"
     ordinary.write_bytes(b"ordinary uploaded content")
     uploaded_cache = Path(upload.move_resource_to_block_cache(str(ordinary)))
-    download = next(block for block in app.blocks.values() if isinstance(block, main.gr.DownloadButton))
-    result = root / "result.json"
-    result.write_text('{"supplier_name": null}', encoding="utf-8")
-    result_cache = Path(download.move_resource_to_block_cache(str(result)))
     assert str(uploaded_cache) not in upload.keep_in_cache
     time.sleep(1.1)
     route_utils.delete_files_created_by_app(app, age=0)
     assert not uploaded_cache.exists()
-    assert not result_cache.exists()
-    assert ordinary.exists() and result.exists()
+    assert ordinary.exists()

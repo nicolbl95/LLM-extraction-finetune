@@ -832,9 +832,11 @@ def test_ui_has_compact_results_without_developer_sections():
     components = demo.config["components"]
     configuration = str(demo.config)
     assert not any(
-        component["type"] in {"accordion", "code", "html"}
+        component["type"] in {"accordion", "html"}
         for component in components
     )
+    assert [component["props"]["label"] for component in components if component["type"] == "code"] \
+        == ["Télécharger le JSON"]
     assert any(
         component["type"] == "json"
         and component["props"]["label"] == "Résultat de l'extraction — JSON structuré"
@@ -855,7 +857,7 @@ def test_ui_has_compact_results_without_developer_sections():
     assert main.preview_ui(None) == (
         None, None, "", "", "", "", {"flags": [], "passed": [], "not_verified": []}, None,
     )
-    assert any(component["type"] == "downloadbutton" for component in components)
+    assert any(component["type"] == "code" for component in components)
     assert any(
         "copy" in component["props"].get("buttons", [])
         for component in components if component["type"] == "markdown"
@@ -873,7 +875,7 @@ def test_app_ocr_failure_is_reported_without_loading_model(caplog):
     assert "Pydantic" not in report
     assert "- Erreur de lecture : OCR absent." in technical
     assert "Empreinte de configuration OCR" in advanced
-    assert download.endswith(".json")
+    assert json.loads(download) == payload
     assert not validation["flags"]
     assert all(payload[key] is None for key in ("supplier_name", "invoice_date", "total_ht", "total_ttc"))
     for forbidden in ("None", "non ancré", "ancrage", "description_non_verifiee"):
@@ -890,26 +892,23 @@ def test_ui_technical_details_are_compact_and_json_download_matches_result():
         payload, report, technical, advanced, raw, validation, download = list(
             main.run_extraction_ui(str(main.EXAMPLES[1][1]))
         )[-1]
-    try:
-        for heading in ("### Lecture du document", "### Modèle", "### Champs", "### Version"):
-            assert technical.count(heading) == 1
-        assert "non utilisé — quota ZeroGPU indisponible" in technical
-        assert "passes demandées : 1 ; réussies : 0" in technical
-        assert "| Champ | Valeur | Statut | Source |" in technical
-        assert "| Ligne 1 — Quantité | 7.8 | récupéré (document) | document seul |" in technical
-        assert "durée des appels" not in technical
-        assert "prétraitements" not in technical
-        assert "Prétraitements utilisés" in advanced
-        assert "Révision déployée" in advanced
-        assert "Aucune réponse du modèle à comparer." in technical
-        assert "Aucune réponse brute" in raw
-        assert len(re.search(r"[a-f0-9]{64}", advanced).group()) == 64
-        assert json.loads(Path(download).read_text(encoding="utf-8")) == payload
-        for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
-            assert forbidden not in report + technical
-        assert not validation["flags"]
-    finally:
-        Path(download).unlink(missing_ok=True)
+    for heading in ("### Lecture du document", "### Modèle", "### Champs", "### Version"):
+        assert technical.count(heading) == 1
+    assert "non utilisé — quota ZeroGPU indisponible" in technical
+    assert "passes demandées : 1 ; réussies : 0" in technical
+    assert "| Champ | Valeur | Statut | Source |" in technical
+    assert "| Ligne 1 — Quantité | 7.8 | récupéré (document) | document seul |" in technical
+    assert "durée des appels" not in technical
+    assert "prétraitements" not in technical
+    assert "Prétraitements utilisés" in advanced
+    assert "Révision déployée" in advanced
+    assert "Aucune réponse du modèle à comparer." in technical
+    assert "Aucune réponse brute" in raw
+    assert len(re.search(r"[a-f0-9]{64}", advanced).group()) == 64
+    assert json.loads(download) == payload
+    for forbidden in ("None", "non ancré", "description_non_verifiee", "ancrage", "Pydantic"):
+        assert forbidden not in report + technical
+    assert not validation["flags"]
 
 
 def test_first_pass_raw_json_and_model_result_comparison_are_available_in_details():
@@ -923,14 +922,11 @@ def test_first_pass_raw_json_and_model_result_comparison_are_available_in_detail
         payload, report, technical, advanced, first_pass_raw, validation, download = list(
             main.run_extraction_ui(str(main.EXAMPLES[0][1]))
         )[-1]
-    try:
-        assert first_pass_raw == raw
-        assert "Aucune différence entre les valeurs lues par le modèle et celles retenues." in technical
-        assert "génération : 1.25 s" in technical
-        assert "durée des appels" not in technical
-        assert "Révision déployée" in advanced
-    finally:
-        Path(download).unlink(missing_ok=True)
+    assert first_pass_raw == raw
+    assert "Aucune différence entre les valeurs lues par le modèle et celles retenues." in technical
+    assert "génération : 1.25 s" in technical
+    assert "durée des appels" not in technical
+    assert "Révision déployée" in advanced
 
 
 def test_model_result_comparison_lists_differences_and_formats_integer_quantities():

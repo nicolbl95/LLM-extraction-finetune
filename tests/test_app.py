@@ -157,11 +157,11 @@ class AppTests(unittest.TestCase):
         self.assertIn("cannot identify image file", "\n".join(logs.output))
         self.assertEqual(main.preview_document(None), (None, None, ""))
 
-    def test_json_download_write_failure_keeps_result_and_hides_internal_path(self):
+    def test_json_download_serialisation_failure_keeps_result_and_hides_internal_path(self):
         private_path = "C:/private/gradio/invoice.json"
         with patch.object(
             main, "_download_json",
-            side_effect=OSError(f"permission denied: {private_path}"),
+            side_effect=ValueError(f"could not serialise {private_path}"),
         ) as download, self.assertLogs(main.LOGGER, level="ERROR") as logs:
             (payload, status, _, output_file), _ = self.run_recruiter_ui(
                 self.evidence_text(), "en-GB",
@@ -172,8 +172,8 @@ class AppTests(unittest.TestCase):
         self.assertIn("téléchargement du JSON est indisponible", status)
         self.assertNotIn(private_path, status)
         self.assertNotIn(private_path, "\n".join(logs.output))
-        self.assertIn("OSError", "\n".join(logs.output))
-        self.assertIn("permission denied", "\n".join(logs.output))
+        self.assertIn("ValueError", "\n".join(logs.output))
+        self.assertIn("could not serialise", "\n".join(logs.output))
         download.assert_called_once()
 
     def test_successful_download_is_preserved_and_failed_next_request_has_no_stale_result(self):
@@ -183,16 +183,14 @@ class AppTests(unittest.TestCase):
             {"raw": json.dumps(first_expected), "finish_reason": "stop"},
         )
         first_payload, first_status, _, first_download = first_frame
-        first_path = Path(first_download)
-        self.assertTrue(first_path.is_file())
-        self.assertEqual(json.loads(first_path.read_text(encoding="utf-8")), first_payload)
+        self.assertEqual(json.loads(first_download), first_payload)
         self.assertNotIn("téléchargement du JSON est indisponible", first_status)
 
         second_expected = {**self.gold, "supplier_name": "Other supplier"}
         private_path = "C:/private/gradio/second-invoice.json"
         with patch.object(
             main, "_download_json",
-            side_effect=OSError(f"permission denied: {private_path}"),
+            side_effect=ValueError(f"could not serialise {private_path}"),
         ), self.assertLogs(main.LOGGER, level="ERROR"):
             second_frame, _ = self.run_recruiter_ui(
                 self.evidence_text(second_expected), "en-GB",
@@ -203,7 +201,7 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(second_download)
         self.assertIn("téléchargement du JSON est indisponible", second_status)
         self.assertNotIn(private_path, second_status)
-        self.assertEqual(json.loads(first_path.read_text(encoding="utf-8")), first_payload)
+        self.assertNotIn("Other supplier", first_download)
 
     def test_interleaved_ui_sessions_keep_results_and_download_status_separate(self):
         payloads = {
@@ -213,7 +211,7 @@ class AppTests(unittest.TestCase):
 
         def session_frames(filename, diagnostics):
             diagnostics.update({"field_statuses": {}, "model_info": {"used": False}})
-            download = None if filename == "session-a" else "session-b-download.json"
+            download = None if filename == "session-a" else main._download_json(payloads[filename])
             yield payloads[filename], "completed", "", "", "", {
                 "flags": [], "passed": [], "not_verified": [],
             }, download
@@ -228,7 +226,8 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(result_a[3])
         self.assertIn("téléchargement du JSON est indisponible", result_a[1])
         self.assertEqual(result_b[0], payloads["session-b"])
-        self.assertEqual(result_b[3], "session-b-download.json")
+        self.assertEqual(json.loads(result_b[3]), payloads["session-b"])
+        self.assertNotIn("Session A", result_b[3])
         self.assertNotIn("téléchargement du JSON est indisponible", result_b[1])
 
     def test_encrypted_pdf_is_rejected(self):
@@ -466,7 +465,7 @@ class AppTests(unittest.TestCase):
             performance.splitlines()[1], r"^- \*\*Temps de traitement : \d+,\d\d s\*\*$",
         )
         self.assertEqual(
-            json.loads(Path(download).read_text(encoding="utf-8")),
+            json.loads(download),
             payload,
         )
         for duplicated in (
@@ -503,7 +502,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(line["total_ht"], 369.07)
         self.assertEqual(payload["total_ht"], 8972.8)
         self.assertEqual(
-            json.loads(Path(download).read_text(encoding="utf-8")),
+            json.loads(download),
             payload,
         )
 
@@ -543,7 +542,7 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(payload["line_items"][0]["quantity"])
         self.assertNotIn(7.8, payload["line_items"][0].values())
         self.assertEqual(
-            json.loads(Path(download).read_text(encoding="utf-8")),
+            json.loads(download),
             payload,
         )
         self.assertEqual(predict.call_count, 1)
@@ -1247,7 +1246,9 @@ class AppTests(unittest.TestCase):
         self.assertIn("terminée", last_update[1])
 
     def test_gradio_interface_builds_without_loading_model(self):
-        with patch.object(main, "get_extractor") as backend:
+        # INVOICE_MODEL is pinned: the tagline below is the model-enabled wording.
+        with patch.dict(os.environ, {"INVOICE_MODEL": "1"}), \
+                patch.object(main, "get_extractor") as backend:
             demo = main.build_app()
         backend.assert_not_called()
         types = [component["type"] for component in demo.config["components"]]
@@ -1307,7 +1308,7 @@ class AppTests(unittest.TestCase):
         self.assertFalse(any("Confidentialité" in text for text in markdown))
         buttons = [c["props"]["value"] for c in demo.config["components"] if c["type"] == "button"]
         self.assertEqual(buttons, ["Extraire les données"])
-        self.assertIn("downloadbutton", types)
+        self.assertIn("code", types)
         self.assertEqual(
             [c["props"]["label"] for c in demo.config["components"] if c["type"] == "accordion"],
             [],
@@ -1370,6 +1371,66 @@ class AppTests(unittest.TestCase):
                 patch.object(main, "get_extractor", return_value=object()) as extractor:
             main.startup_prefetch()
         extractor.assert_called_once_with()
+
+    def test_model_switch_stays_on_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(main.model_enabled())
+            with patch.object(main, "predict_invoice", return_value={"ok": True}) as predict:
+                self.assertEqual(main.run_model_pass({"id": "x"}, []), {"ok": True})
+        predict.assert_called_once_with({"id": "x"}, [])
+
+    def test_disabled_model_never_reaches_the_gpu_decorated_call(self):
+        # Reaching predict_invoice would open and bill a ZeroGPU window for a pass that never runs.
+        with patch.dict(os.environ, {"INVOICE_MODEL": "0"}, clear=True):
+            self.assertFalse(main.model_enabled())
+            with patch.object(main, "predict_invoice") as predict, \
+                    patch.object(main, "get_extractor") as extractor, \
+                    patch.object(main, "snapshot_download") as download:
+                with self.assertRaisesRegex(RuntimeError, "INVOICE_MODEL"):
+                    main.run_model_pass({"id": "x"}, [])
+        predict.assert_not_called()
+        extractor.assert_not_called()
+        download.assert_not_called()
+
+    def test_disabled_model_is_a_recoverable_inference_error(self):
+        # The guard only degrades to OCR-only while extract_invoice still treats it as recoverable.
+        with patch.dict(os.environ, {"INVOICE_MODEL": "0"}, clear=True), \
+                patch.object(main, "run_grounded_inference", return_value={
+                    "payload": {}, "warnings": [], "raw": "", "passes_requested": 0,
+                    "passes_succeeded": 0, "errors": []}) as run:
+            main.extract_invoice("Total HT: 100,00 €")
+        _, _, _, predict = run.call_args.args
+        self.assertIs(predict, main.run_model_pass)
+        self.assertIn(RuntimeError, run.call_args.kwargs["recoverable_errors"])
+
+    def test_startup_prefetch_skips_weights_when_the_model_is_disabled(self):
+        with patch.dict(os.environ, {"SPACE_ID": "demo", "INVOICE_MODEL": "0"}, clear=True), \
+                patch.object(main, "prefetch_model_artifacts") as prefetch, \
+                patch.object(main, "snapshot_download") as download, \
+                patch.object(main, "get_extractor") as extractor:
+            main.startup_prefetch()
+        prefetch.assert_not_called()
+        download.assert_not_called()
+        extractor.assert_not_called()
+
+    def test_ocr_only_landing_page_describes_ocr_instead_of_a_model(self):
+        with patch.dict(os.environ, {"INVOICE_MODEL": "0"}), \
+                patch.object(main, "get_extractor") as backend:
+            demo = main.build_app()
+        backend.assert_not_called()
+        heading = next(
+            component["props"]["value"] for component in demo.config["components"]
+            if component["type"] == "markdown"
+        )
+        self.assertIn("# Extraction standardisée de données de factures", heading)
+        self.assertNotIn("modèle", heading)
+        self.assertIn("réalisée par OCR", heading)
+        self.assertIn("recoupées entre plusieurs passes de lecture", heading)
+        self.assertEqual(
+            [component["props"]["value"] for component in demo.config["components"]
+             if component["type"] == "markdown"][1],
+            "PDF de 10 pages maximum · 20 Mo maximum · OCR français/anglais",
+        )
 
     def test_gpu_callback_returns_raw_predictions_without_pydantic_validation(self):
         prediction = {"raw": '{"supplier_name":"Incomplete invoice"}', "finish_reason": "stop"}

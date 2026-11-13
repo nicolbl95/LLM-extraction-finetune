@@ -71,7 +71,7 @@ def test_us_example_selection_and_altered_upload_have_distinct_grounded_results(
             assert payload == row["output"]
             assert "Extraction cohérente — 24/24" in status
             assert not diagnostics["validation"]["flags"]
-        assert json.loads(Path(download).read_text(encoding="utf-8")) == payload
+        assert json.loads(download) == payload
         assert predict.call_count == 1
 
 

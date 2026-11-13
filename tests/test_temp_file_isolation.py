@@ -94,13 +94,13 @@ def _porcelain() -> str:
     ).stdout
 
 
-def test_download_json_outside_the_worktree_leaves_git_status_unchanged():
+def test_download_json_creates_no_file_and_leaves_git_status_unchanged():
     before = _porcelain()
     with tempfile.TemporaryDirectory(prefix="pr135-upload-") as directory, \
             patch.dict(os.environ, {"GRADIO_TEMP_DIR": directory}):
-        created = main._download_json({"supplier_name": None, "line_items": []})
-        assert Path(created).resolve().is_relative_to(Path(directory).resolve())
-        assert Path(created).read_text(encoding="utf-8")
+        value = main._download_json({"supplier_name": None, "line_items": []})
+        assert json.loads(value) == {"supplier_name": None, "line_items": []}
+        assert not list(Path(directory).rglob("*")), "a servable download file was created"
         assert _porcelain() == before
     assert _porcelain() == before
 
@@ -142,10 +142,9 @@ def _frames(revision: str, call):
     ), patch.dict(os.environ, {"GRADIO_TEMP_DIR": directory}):
         frames = []
         for frame in call(diagnostics):
-            download = Path(frame[-1]).read_text(encoding="utf-8") if frame[-1] else None
             frames.append((
                 json.dumps(frame[0], sort_keys=True) if frame[0] is not None else None,
-                *frame[1:-1], json.loads(download) if download else None,
+                *frame[1:-1], json.loads(frame[-1]) if frame[-1] else None,
             ))
         return frames
 
