@@ -5,3 +5,4 @@
 -r requirements.txt
 pytest>=9,<10
 packaging>=24
+python-multipart>=0.0.18,<1.0  # parseur multipart importe par tests/test_upload_staging_guard.py
