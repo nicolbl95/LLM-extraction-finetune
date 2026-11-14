@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "invoice-engine-run-v1",
+  "title": "Paired OCR benchmark run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "document_id",
+    "input_sha256",
+    "split",
+    "locale",
+    "system",
+    "execution",
+    "software_revision",
+    "configuration",
+    "engines",
+    "tokens",
+    "cell_hypotheses",
+    "strict_output",
+    "latency_seconds",
+    "resources",
+    "cost"
+  ],
+  "properties": {
+    "schema_version": {"const": "invoice-engine-run-v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "document_id": {"type": "string", "minLength": 1},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "split": {"enum": ["development", "validation", "final_test"]},
+    "locale": {"enum": ["fr-FR", "en-GB", "en-US"]},
+    "system": {
+      "enum": ["tesseract_current", "rapidocr_independent", "combined_proposals"]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "model_used", "network_calls", "gpu_used"],
+      "properties": {
+        "mode": {"const": "local"},
+        "model_used": {"type": "boolean"},
+        "network_calls": {"const": 0},
+        "gpu_used": {"type": "boolean"}
+      }
+    },
+    "software_revision": {"type": "string", "minLength": 1},
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configuration_sha256",
+        "languages",
+        "preprocessing",
+        "psm_modes",
+        "quality_mean_threshold",
+        "token_threshold",
+        "feature_flags"
+      ],
+      "properties": {
+        "configuration_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "languages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "preprocessing": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "psm_modes": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0, "maximum": 13}
+        },
+        "quality_mean_threshold": {"type": "number", "minimum": 0, "maximum": 100},
+        "token_threshold": {"type": "number", "minimum": 0, "maximum": 100},
+        "feature_flags": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": ["OFF", "ON", "absent"]
+          }
+        }
+      }
+    },
+    "engines": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["engine_id", "name", "version", "model_sha256", "language_model"],
+        "properties": {
+          "engine_id": {"type": "string", "minLength": 1},
+          "name": {"type": "string", "minLength": 1},
+          "version": {"type": "string", "minLength": 1},
+          "model_sha256": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "language_model": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "tokens": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "token_id",
+          "engine_id",
+          "read_id",
+          "page_index",
+          "bbox",
+          "visible_text",
+          "confidence"
+        ],
+        "properties": {
+          "token_id": {"type": "string", "minLength": 1},
+          "engine_id": {"type": "string", "minLength": 1},
+          "read_id": {"type": "string", "minLength": 1},
+          "page_index": {"type": "integer", "minimum": 0},
+          "bbox": {"$ref": "#/$defs/coordinateBox"},
+          "visible_text": {"type": "string"},
+          "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 100}
+        }
+      }
+    },
+    "cell_hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "hypothesis_id",
+          "field_path",
+          "row_id",
+          "page_index",
+          "bbox",
+          "visible_text",
+          "normalized_candidate",
+          "engine_ids",
+          "token_ids",
+          "disposition",
+          "reason"
+        ],
+        "properties": {
+          "hypothesis_id": {"type": "string", "minLength": 1},
+          "field_path": {
+            "enum": [
+              "supplier_name",
+              "invoice_date",
+              "total_ht",
+              "total_ttc",
+              "description",
+              "line_items[].description",
+              "quantity",
+              "line_items[].quantity",
+              "unit_price",
+              "line_items[].unit_price",
+              "line_items[].total_ht"
+            ]
+          },
+          "row_id": {"type": ["string", "null"]},
+          "page_index": {"type": "integer", "minimum": 0},
+          "bbox": {"$ref": "#/$defs/coordinateBox"},
+          "visible_text": {"type": ["string", "null"]},
+          "normalized_candidate": {"type": ["string", "null"]},
+          "engine_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "token_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "disposition": {
+            "enum": ["proposal", "conflict", "abstained", "not_read"]
+          },
+          "reason": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "strict_output": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "supplier_name",
+        "invoice_date",
+        "total_ht",
+        "total_ttc",
+        "line_items"
+      ],
+      "properties": {
+        "supplier_name": {"type": ["string", "null"]},
+        "invoice_date": {
+          "type": ["string", "null"],
+          "format": "date"
+        },
+        "total_ht": {"type": ["number", "null"]},
+        "total_ttc": {"type": ["number", "null"]},
+        "line_items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["description", "quantity", "unit_price", "total_ht"],
+            "properties": {
+              "description": {"type": ["string", "null"]},
+              "quantity": {"type": ["number", "null"]},
+              "unit_price": {"type": ["number", "null"]},
+              "total_ht": {"type": ["number", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "latency_seconds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initialization", "ocr", "reconstruction", "end_to_end"],
+      "properties": {
+        "initialization": {"type": ["number", "null"], "minimum": 0},
+        "ocr": {"type": ["number", "null"], "minimum": 0},
+        "reconstruction": {"type": ["number", "null"], "minimum": 0},
+        "end_to_end": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_seconds", "peak_rss_bytes", "peak_vram_bytes"],
+      "properties": {
+        "cpu_seconds": {"type": ["number", "null"], "minimum": 0},
+        "peak_rss_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "peak_vram_bytes": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "amount", "basis"],
+      "properties": {
+        "currency": {"type": ["string", "null"]},
+        "amount": {"type": ["string", "null"]},
+        "basis": {
+          "enum": ["local_compute", "per_page_service", "not_applicable", "unknown"]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "coordinateBox": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    }
+  }
+}

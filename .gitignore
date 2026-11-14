@@ -189,7 +189,15 @@ results/product-review100/
 results/product-review102/
 
 # PR103 : manifest du jeu de validation (602 lignes referenceant data/invoices/) et instantanes de gel.
-results/product-review103/
+# PR147 : `dir/*` et non `dir/` pour que la re-inclusion ci-dessous fonctionne ; Git ne descend pas
+# dans un repertoire exclu, donc `!dir/fichier` n'aurait aucun effet avec la forme ancienne.
+# Seuls les noms de codes sources et leurs empreintes sortent du privatif ; le manifeste du jeu de
+# validation (pr103-dataset-manifest.json) et l'inventaire PR129 citent data/invoices/ et restent exclus.
+# PR147 le mesure au lieu de le supposer (results/product-review147/pr147-manifest-screen.json) : 268 Ko,
+# 1322 contacts de marqueurs prives dont 14 marqueurs d'identite non qualifie (30 occurrences). La copie
+# depuis la machine du proprietaire reste donc la seule procedure sur une machine neuve (OWNER_GUIDE.md §0).
+results/product-review103/*
+!results/product-review103/pr103-implementation-manifest.json
 
 # PR104 : inventaire, verite terrain, sortie OCR et analyses par etape citant le texte imprime des
 # factures de developpement et du jeu prive.
@@ -332,7 +340,9 @@ results/product-review135/
 /PRODUCT_REVIEW_89_RESULTS.json
 /PRODUCT_REVIEW_95_MONETARY_EVIDENCE_ARBITRATION.md
 /VSCODE_HANDOVER.md
-/benchmark_prep
+# PR147 : la regle `/benchmark_prep` est retiree. Elle excluait l'outillage de saisie et ses schemas,
+# alors que l'exigence de confidentialite ne porte que sur les deux sous-repertoires de donnees, deja
+# couverts plus haut par `benchmark_prep/invoices/` et `benchmark_prep/references/`.
 /benchmark_prep_70a_vscode_c461e198
 /run-phase7.log
 /docs/FINAL_LOCAL_TARGETED_AUDIT.md
@@ -499,8 +509,39 @@ results/product-review143/
 results/product-review144/
 results/product-review145/
 
+# PR147: re-inclusion de l'outillage de validation independante (PR110) et de sa fermeture de
+# dependances, pour qu'un nouveau poste puisse reconstruire la porte `python scripts/pr110_ready.py`.
+# La mesure AST de results/product-review147/pr147_closure.py montre que les six scripts PR110
+# importent transitivement dix harnais de recherche PR103-PR109 : suivre les six sans les dix ne
+# deplace l'erreur que d'un cran (lecon PR118, FileNotFoundError -> ModuleNotFoundError).
+# Ces regles de fichiers individuelles viennent du bloc PR135 ; la priorite « la derniere regle qui
+# correspond gagne » suffit a les ecraser, le bloc PR135 reste donc intact comme preuve d'origine.
+# Les donnees restent privees : benchmark_prep/invoices/, benchmark_prep/references/, data/invoices/
+# et tous les autres repertoire results/product-review1xx/ ne sont pas touches par ce bloc.
+# Crible de confidentialite des 19 chemins (results/product-review147/pr147-pr110-audit.json) :
+# 0 contact de niveau identite nouvellement expose. Les seuls contacts non qualifies sont six alias
+# internes de documents du corpus de developpement et un nom de metrique en anglais ; les noms reels
+# correspondants sont deja publishes dans onze chemins suivis (PR121).
+!/scripts/pr103_validate_reference.py
+!/scripts/pr105b_capture.py
+!/scripts/pr105b_factorial.py
+!/scripts/pr105b_harness.py
+!/scripts/pr106_candidates.py
+!/scripts/pr106_harness.py
+!/scripts/pr107_measure.py
+!/scripts/pr107_trace.py
+!/scripts/pr109_dev_cohort.py
+!/scripts/pr109_intake.py
+!/scripts/pr110_annotate.py
+!/scripts/pr110_eligibility.py
+!/scripts/pr110_evaluate.py
+!/scripts/pr110_harness.py
+!/scripts/pr110_ready.py
+!/scripts/pr110_status.py
+!/tests/test_ocr_research_provenance.py
+!/tests/test_pr103_reference_validator.py
+!/tests/test_pr110_benchmark_prep.py
 
-
-
-
-
+# PR147: les livrables des revues 146-149 (rapports internes, evidences, clones jetables de
+# verification) suivent le meme sort que PR139-PR145 : aucun chemin n'est suivi sous results/product-review14x/.
+results/product-review14*/

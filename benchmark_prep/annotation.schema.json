@@ -1,0 +1,428 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "invoice-annotation-v1",
+  "title": "Blind invoice annotation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "annotation_kind",
+    "annotation_id",
+    "protocol_version",
+    "created_at",
+    "document",
+    "reviewer",
+    "provenance",
+    "invoice",
+    "line_items",
+    "taxes",
+    "discounts",
+    "financial_summary",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "invoice-annotation-v1"
+    },
+    "annotation_kind": {
+      "enum": ["independent", "adjudicated", "synthetic_test"]
+    },
+    "annotation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "protocol_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "document": {
+      "$ref": "#/$defs/document"
+    },
+    "reviewer": {
+      "$ref": "#/$defs/reviewer"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "invoice": {
+      "$ref": "#/$defs/invoiceFields"
+    },
+    "line_items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/lineItem"
+      }
+    },
+    "taxes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tax"
+      }
+    },
+    "discounts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/discount"
+      }
+    },
+    "financial_summary": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/summaryEntry"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "coordinateBox": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page_index", "bbox", "label_text"],
+      "properties": {
+        "page_index": {"type": "integer", "minimum": 0},
+        "bbox": {"$ref": "#/$defs/coordinateBox"},
+        "label_text": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "derivation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["value", "formula", "source_paths"],
+      "properties": {
+        "value": {"type": "string", "minLength": 1},
+        "formula": {"type": "string", "minLength": 1},
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "visible_text",
+        "normalized_value",
+        "evidence",
+        "candidates",
+        "derivation",
+        "note"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "present",
+            "absent",
+            "unreadable",
+            "ambiguous",
+            "derived_only",
+            "unscorable"
+          ]
+        },
+        "visible_text": {"type": ["string", "null"]},
+        "normalized_value": {"type": ["string", "null"]},
+        "evidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "candidates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "derivation": {"$ref": "#/$defs/derivation"},
+        "note": {"type": ["string", "null"]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"state": {"const": "present"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "visible_text": {"type": "string", "minLength": 1},
+              "normalized_value": {"type": "string", "minLength": 1},
+              "evidence": {"minItems": 1},
+              "candidates": {"maxItems": 0},
+              "derivation": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"state": {"const": "absent"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "visible_text": {"type": "null"},
+              "normalized_value": {"type": "null"},
+              "candidates": {"maxItems": 0},
+              "derivation": {"type": "null"},
+              "note": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"state": {"const": "unreadable"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "normalized_value": {"type": "null"},
+              "evidence": {"minItems": 1},
+              "note": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"state": {"const": "ambiguous"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "visible_text": {"type": "null"},
+              "normalized_value": {"type": "null"},
+              "evidence": {"minItems": 1},
+              "candidates": {"minItems": 2},
+              "derivation": {"type": "null"},
+              "note": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"state": {"const": "derived_only"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "visible_text": {"type": "null"},
+              "normalized_value": {"type": "null"},
+              "candidates": {"maxItems": 0},
+              "derivation": {"type": "object"},
+              "note": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"state": {"const": "unscorable"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "visible_text": {"type": "null"},
+              "normalized_value": {"type": "null"},
+              "candidates": {"maxItems": 0},
+              "derivation": {"type": "null"},
+              "note": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_id",
+        "relative_path",
+        "sha256",
+        "file_type",
+        "country",
+        "language",
+        "currency"
+      ],
+      "properties": {
+        "document_id": {"type": "string", "minLength": 1},
+        "relative_path": {"type": "string", "minLength": 1},
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "file_type": {"enum": ["pdf", "png", "jpg", "jpeg"]},
+        "country": {"type": ["string", "null"]},
+        "language": {"type": ["string", "null"]},
+        "currency": {"$ref": "#/$defs/field"}
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewer_id", "role", "attestation"],
+      "properties": {
+        "reviewer_id": {"type": "string", "minLength": 1},
+        "role": {
+          "enum": ["independent_annotator", "adjudicator", "test_fixture"]
+        },
+        "attestation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_image_viewed",
+            "predictions_viewed",
+            "prior_annotations_viewed",
+            "peer_annotation_viewed",
+            "pr64_to_pr69_viewed"
+          ],
+          "properties": {
+            "source_image_viewed": {"type": "boolean"},
+            "predictions_viewed": {"type": "boolean"},
+            "prior_annotations_viewed": {"type": "boolean"},
+            "peer_annotation_viewed": {"type": "boolean"},
+            "pr64_to_pr69_viewed": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "derived_from_existing_reference",
+        "permission_status",
+        "prior_use_status"
+      ],
+      "properties": {
+        "source_kind": {
+          "enum": ["manual_visual", "human_adjudication", "synthetic_test"]
+        },
+        "derived_from_existing_reference": {"type": "boolean"},
+        "permission_status": {
+          "enum": ["approved", "pending", "not_applicable"]
+        },
+        "prior_use_status": {
+          "enum": ["none_confirmed", "known_used", "unknown", "not_applicable"]
+        }
+      }
+    },
+    "invoiceFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supplier_name", "invoice_date", "total_ht", "total_ttc"],
+      "properties": {
+        "supplier_name": {"$ref": "#/$defs/field"},
+        "invoice_date": {"$ref": "#/$defs/field"},
+        "total_ht": {"$ref": "#/$defs/field"},
+        "total_ttc": {"$ref": "#/$defs/field"}
+      }
+    },
+    "lineItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "row_state", "page_index", "bbox", "fields"],
+      "properties": {
+        "row_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "row_state": {"enum": ["present", "ambiguous", "unscorable"]},
+        "page_index": {"type": "integer", "minimum": 0},
+        "bbox": {"$ref": "#/$defs/coordinateBox"},
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["description", "quantity", "unit_price", "total_ht"],
+          "properties": {
+            "description": {"$ref": "#/$defs/field"},
+            "quantity": {"$ref": "#/$defs/field"},
+            "unit_price": {"$ref": "#/$defs/field"},
+            "total_ht": {"$ref": "#/$defs/field"}
+          }
+        }
+      }
+    },
+    "tax": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tax_id", "page_index", "bbox", "fields"],
+      "properties": {
+        "tax_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "page_index": {"type": "integer", "minimum": 0},
+        "bbox": {"$ref": "#/$defs/coordinateBox"},
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label", "rate", "base", "amount"],
+          "properties": {
+            "label": {"$ref": "#/$defs/field"},
+            "rate": {"$ref": "#/$defs/field"},
+            "base": {"$ref": "#/$defs/field"},
+            "amount": {"$ref": "#/$defs/field"}
+          }
+        }
+      }
+    },
+    "discount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discount_id", "page_index", "bbox", "fields"],
+      "properties": {
+        "discount_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "page_index": {"type": "integer", "minimum": 0},
+        "bbox": {"$ref": "#/$defs/coordinateBox"},
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["description", "amount"],
+          "properties": {
+            "description": {"$ref": "#/$defs/field"},
+            "amount": {"$ref": "#/$defs/field"}
+          }
+        }
+      }
+    },
+    "summaryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_id", "kind", "page_index", "bbox", "fields"],
+      "properties": {
+        "entry_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "kind": {
+          "enum": ["subtotal", "tax", "shipping", "discount", "balance", "total", "other"]
+        },
+        "page_index": {"type": "integer", "minimum": 0},
+        "bbox": {"$ref": "#/$defs/coordinateBox"},
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label", "amount"],
+          "properties": {
+            "label": {"$ref": "#/$defs/field"},
+            "amount": {"$ref": "#/$defs/field"}
+          }
+        }
+      }
+    }
+  }
+}

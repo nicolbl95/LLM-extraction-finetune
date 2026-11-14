@@ -1,0 +1,110 @@
+{
+  "schema_version": "invoice-holdout-selection-v1",
+  "status": "not_ready",
+  "policy_version": "invoice-blind-annotation-v1",
+  "source_inventory": "../INVOICE_BENCHMARK_MANIFEST.json",
+  "rules": {
+    "genuine_issued_invoice_required": true,
+    "permission_approved_before_collection": true,
+    "sha256_frozen_before_annotation": true,
+    "source_and_annotation_not_used_in_development": true,
+    "exclude_existing_asset_hashes_ids_paths_and_known_layouts": true,
+    "two_blind_annotations_before_adjudication": true,
+    "do_not_use_arithmetic_to_replace_printed_values": true,
+    "private_storage_for_unredacted_documents": true
+  },
+  "selected_document_record_fields": [
+    "document_id",
+    "relative_path",
+    "sha256",
+    "split",
+    "locale",
+    "country",
+    "language",
+    "file_type",
+    "genuine_invoice_verified",
+    "permission_status",
+    "prior_use_status",
+    "supplier_group_id",
+    "layout_family_id",
+    "visual_quality_band",
+    "edge_cases",
+    "annotation_status",
+    "annotation_a_path",
+    "annotation_a_sha256",
+    "annotation_b_path",
+    "annotation_b_sha256",
+    "adjudication_path",
+    "adjudication_sha256",
+    "scored_field_count",
+    "line_item_count",
+    "expected_proposal_count"
+  ],
+  "visual_quality_band_values": ["clear", "mixed", "degraded", "unassessed"],
+  "planned_splits": {
+    "development": {
+      "target_documents": 6,
+      "per_locale": {
+        "fr-FR": 2,
+        "en-GB": 2,
+        "en-US": 2
+      },
+      "purpose": "implementation and error analysis; never part of final test"
+    },
+    "validation": {
+      "target_documents": 9,
+      "per_locale": {
+        "fr-FR": 3,
+        "en-GB": 3,
+        "en-US": 3
+      },
+      "purpose": "pre-registered model/configuration selection; not final test"
+    },
+    "final_test": {
+      "target_documents": 15,
+      "per_locale": {
+        "fr-FR": 5,
+        "en-GB": 5,
+        "en-US": 5
+      },
+      "minimum_distinct_layout_families": 8,
+      "minimum_supplier_families_per_locale": 3,
+      "minimum_scored_fields": 120,
+      "minimum_line_items": 30,
+      "minimum_expected_proposals": 50,
+      "purpose": "sealed, one-time pilot evaluation; no tuning or retries"
+    }
+  },
+  "edge_case_targets_for_final_test": {
+    "logo_only_or_unlabelled_supplier": 3,
+    "ttc_only_or_unlabelled_total": 3,
+    "legitimate_quantity_equal_to_unit_price": 3,
+    "multiline_description": 3,
+    "repeated_or_similar_rows": 3,
+    "credit_note_or_negative_line": 2,
+    "discount_or_multiple_tax_rates": 2,
+    "ambiguous_or_unreconstructed_table": 2
+  },
+  "statistical_note": {
+    "pilot_is_not_confirmatory": true,
+    "confirmatory_size": "Determine from pilot variance and a pre-registered power analysis clustered by invoice and stratified by locale; do not treat cells from one invoice as independent documents."
+  },
+  "selected_documents": [],
+  "missing_documents": {
+    "development": {
+      "fr-FR": 2,
+      "en-GB": 2,
+      "en-US": 2
+    },
+    "validation": {
+      "fr-FR": 3,
+      "en-GB": 3,
+      "en-US": 3
+    },
+    "final_test": {
+      "fr-FR": 5,
+      "en-GB": 5,
+      "en-US": 5
+    }
+  }
+}

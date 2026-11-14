@@ -1,0 +1,62 @@
+{
+  "schema": "pr103-independent-reference",
+  "version": 1,
+  "purpose": "Blind manual reference for one genuine invoice, written from the printed document before any OCR or model output is seen.",
+  "rules": [
+    "Record only what is printed. Never compute a missing value and present it as printed.",
+    "Every monetary field carries provenance: printed, absent (not on the document) or illegible (present but unreadable).",
+    "An absent field and an illegible field are different states and must never be merged.",
+    "Do not normalise a printed inconsistency: if quantity x unit_price does not equal the printed line total, record both and describe the discrepancy.",
+    "Shipping, discounts and tax are recorded separately and are never product rows.",
+    "Two annotators must resolve any disagreement before the evaluation runs; record the resolution.",
+    "The reference and the image hash are frozen before the pipeline is run."
+  ],
+  "document": {
+    "id": null,
+    "source_file": null,
+    "sha256": null,
+    "owner_permission": {
+      "authorized_for_local_evaluation": null,
+      "evidence": null,
+      "date": null
+    },
+    "language": null,
+    "region": null,
+    "input_kind": null,
+    "image_resolution_dpi": null,
+    "template_description": null,
+    "annotators": [],
+    "annotation_date": null,
+    "ocr_output_seen_before_annotation": false,
+    "disagreements": []
+  },
+  "reference": {
+    "supplier_name": {"value": null, "provenance": null},
+    "invoice_date": {"value": null, "provenance": null, "printed_form": null, "order_evidence": null},
+    "currency": {"value": null, "provenance": null},
+    "total_ht": {"value": null, "provenance": null, "printed_label": null},
+    "total_ttc": {"value": null, "provenance": null, "printed_label": null},
+    "tax": {"rate": null, "amount": null, "provenance": null, "printed_label": null},
+    "shipping": {"value": null, "provenance": null, "printed_label": null},
+    "discounts": [],
+    "line_items": [
+      {
+        "description": {"value": null, "provenance": null},
+        "quantity": {"value": null, "provenance": null, "printed_form": null},
+        "unit_price": {"value": null, "provenance": null, "printed_form": null},
+        "total_ht": {"value": null, "provenance": null, "printed_form": null},
+        "is_product_or_service": true,
+        "reference_number": null
+      }
+    ],
+    "document_inconsistencies": []
+  },
+  "allowed_provenance": ["printed", "absent", "illegible"],
+  "allowed_input_kind": ["scanned_image", "native_pdf", "photograph"],
+  "allowed_region": ["FR", "UK", "US", "other"],
+  "freeze": {
+    "reference_sha256": null,
+    "frozen_before_pipeline_run": null,
+    "frozen_at": null
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "schema_version": "pr70a-ocr-comparison-spec-v1",
+  "status": "specification_only_no_engine_installed_or_executed",
+  "created_for": "PR70B (not started; requires new authorization)",
+  "scope_note": "Declarative contract only. No OCR engine, model, GPU, cloud call or deployment is used or authorized by this file.",
+  "pairing_rule": {
+    "unit": "exact document",
+    "key": "file_sha256 from INVOICE_BENCHMARK_MANIFEST.json",
+    "requirement": "every engine must process the identical hash; results are joined per hash and never per filename or per locale aggregate",
+    "reject_if": [
+      "hash missing from the sealed selection manifest",
+      "document used in development or validation",
+      "engine output produced from a resized, re-cropped or re-encoded image"
+    ]
+  },
+  "dataset_contract": {
+    "source": "benchmark_prep/holdout_selection_manifest.json",
+    "precondition": "status == ready and selected_document_count matches the planned splits",
+    "splits": {
+      "development": {"documents": 6, "per_locale": {"fr-FR": 2, "en-GB": 2, "en-US": 2}},
+      "validation": {"documents": 9, "per_locale": {"fr-FR": 3, "en-GB": 3, "en-US": 3}},
+      "final_test": {
+        "documents": 15,
+        "per_locale": {"fr-FR": 5, "en-GB": 5, "en-US": 5},
+        "minimum_distinct_layout_families": 8,
+        "minimum_supplier_families_per_locale": 3,
+        "minimum_scored_fields": 120,
+        "minimum_line_items": 30,
+        "minimum_expected_proposals": 50
+      }
+    },
+    "reference": "adjudicated annotation only (two blind annotations + human arbitration); never a pipeline prediction, never a historical reference",
+    "tuning_rule": "no engine, threshold, preprocessing or prompt may be tuned on final_test; selection happens on validation only"
+  },
+  "engines": {
+    "A": {
+      "id": "tesseract_current",
+      "description": "current production OCR path",
+      "pinned_parameters": {"lang": "fra+eng", "general_confidence": 40, "mean_gate": 85, "line_token_threshold": 60, "document_budget_seconds": 45, "max_megapixels": 25},
+      "must_record": ["tesseract_version", "leptonica_version", "traineddata hashes", "PSM", "preprocessing chain", "wall-clock per document"],
+      "must_not_change": ["confidence thresholds", "grounding", "consensus policy", "preprocessing defaults"]
+    },
+    "B": {
+      "id": "rapidocr_local",
+      "description": "RapidOCR with an explicitly pinned compatible language model",
+      "status": "not installed; installation requires separate authorization",
+      "must_record": ["rapidocr_version", "model weights name and sha256", "detector/recogniser configuration", "language coverage evidence", "wall-clock per document"],
+      "known_risk": "RapidOCR default models are not presumed French/English compatible; language suitability must be demonstrated, not assumed"
+    },
+    "C": {
+      "id": "combined_proposals",
+      "description": "proposals from distinct engines kept separate, with abstention instead of confident disagreement",
+      "constraints": [
+        "each proposal keeps its engine, box and confidence",
+        "disagreement yields null + review flag, never a majority vote as proof",
+        "arithmetic consistency is a warning, never evidence of the printed value",
+        "no value may be accepted solely because two correlated engines agree"
+      ]
+    }
+  },
+  "metrics": [
+    {"id": "ocr_cell_accuracy", "definition": "proportion of annotated cells whose recognised text matches the reference text after documented normalisation", "unit": "ratio"},
+    {"id": "column_assignment_accuracy", "definition": "proportion of accepted cells assigned to the correct column role", "unit": "ratio"},
+    {"id": "row_attachment_accuracy", "definition": "proportion of line values attached to the correct line index", "unit": "ratio"},
+    {"id": "description_exact_accuracy", "definition": "strict string equality on line descriptions", "unit": "ratio"},
+    {"id": "description_substantial_accuracy", "definition": "token-overlap based substantial match on descriptions", "unit": "ratio"},
+    {"id": "quantity_accuracy", "definition": "absolute equality at 1e-6", "unit": "ratio"},
+    {"id": "price_accuracy", "definition": "centime equality with ROUND_HALF_UP", "unit": "ratio"},
+    {"id": "amount_accuracy", "definition": "centime equality with ROUND_HALF_UP", "unit": "ratio"},
+    {"id": "total_ht_ttc_accuracy", "definition": "centime equality on document totals", "unit": "ratio"},
+    {"id": "accepted_precision", "definition": "share of accepted values that are correct", "unit": "ratio"},
+    {"id": "visible_field_recall", "definition": "share of annotated present fields that are accepted", "unit": "ratio"},
+    {"id": "false_numeric_accepts", "definition": "count of accepted quantity/price/line-amount values that are wrong", "unit": "count"},
+    {"id": "null_rate", "definition": "share of scorable cells emitted as null", "unit": "ratio"},
+    {"id": "line_completeness", "definition": "share of annotated lines fully recovered", "unit": "ratio"},
+    {"id": "line_order_accuracy", "definition": "share of documents with correct line ordering", "unit": "ratio"},
+    {"id": "latency_p50_p95", "definition": "wall-clock per document", "unit": "seconds"}
+  ],
+  "success_criteria": {
+    "source": "PRODUCT_REVIEW_69_INDEPENDENT_OCR_STRATEGY.md section 7",
+    "frozen_before_the_test": true,
+    "criteria": [
+      {"id": "accepted_precision", "threshold": ">= 0.90"},
+      {"id": "false_numeric_accepts", "threshold": "== 0 for quantity, unit price and line amount"},
+      {"id": "visible_field_recall", "threshold": ">= 0.65"},
+      {"id": "present_field_recall_gain", "threshold": ">= +5 percentage points versus Tesseract alone on the pre-registered target"},
+      {"id": "numeric_accuracy_per_locale", "threshold": "no locale loses net numeric accuracy"},
+      {"id": "frozen_regression", "threshold": "no regression in the frozen suite"},
+      {"id": "latency_p95", "threshold": "<= 45 s per document within the existing OCR budget"}
+    ],
+    "reporting_requirements": [
+      "paired per-document statistics with intervals",
+      "separate development, validation and final_test results",
+      "state that the 15-document pilot is not a confirmatory statistical proof",
+      "report every failure, including engines that were not run"
+    ]
+  },
+  "comparison_rules": [
+    "score A and B on exactly the same hashes and the same adjudicated reference",
+    "report A/B/C per metric and per locale, never only as an aggregate",
+    "do not accept a value because the arithmetic reconciles",
+    "do not let an engine abstain on a cell and count it as a correct refusal without scoring recall",
+    "keep development/validation/final_test results separate and disclose any post-hoc change as a new pre-registration"
+  ],
+  "prohibited": [
+    "installing or executing RapidOCR without explicit authorization",
+    "calling Qwen, a GPU service or any cloud API",
+    "downloading models or documents",
+    "modifying production code, thresholds or grounding",
+    "tuning on final_test",
+    "presenting synthetic labels or historical references as independent ground truth"
+  ]
+}

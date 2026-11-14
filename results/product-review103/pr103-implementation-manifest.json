@@ -1,0 +1,228 @@
+{
+ "review": "PRODUCT-REVIEW-103",
+ "phase": "1 — implementation freeze, recorded before any validation document is accepted",
+ "date": "2026-11-08",
+ "git": {
+  "branch": "wip/layouts-reprise",
+  "head": "8598a8f379b07d5f6745cfaec7825edc9eec800d",
+  "head_subject": "docs: add reviewed PR51-PR81 reports and benchmark documentation",
+  "modified_tracked": 8,
+  "staged": 0,
+  "untracked_collapsed": 135,
+  "commits_made_in_pr103": 0
+ },
+ "source_hashes": {
+  "src/diagnose_pipeline.py": {
+   "sha256": "2960b3eeec0b9b5b25b4669dd0607d4b52b324a49f04bea43443c38a52adb616",
+   "bytes": 2297
+  },
+  "src/dual_ocr_experiment.py": {
+   "sha256": "1bd7d358866280530c1c579ef0087fa78187d549de445731490586c43f2fb001",
+   "bytes": 32642
+  },
+  "src/duration_parser.py": {
+   "sha256": "dc48b784954010483620f7ba03608b6d671ff7d59551723b196ac3f4ecd9dfec",
+   "bytes": 2100
+  },
+  "src/evaluate_baseline.py": {
+   "sha256": "ab9d8783e96876dab7587b20036902aa0ac7674e3be2d04a326041caf259eec0",
+   "bytes": 6939
+  },
+  "src/evaluate_finetuned.py": {
+   "sha256": "b080a398d9818fdc4f55df28400b129339adb8b0dd88ff07e1e03bd759aa2419",
+   "bytes": 31337
+  },
+  "src/evaluate_grounding.py": {
+   "sha256": "ce31fa3ff355ff1e06bebde3c587d3c06aa46e408c000311028ae1767eb5f5a4",
+   "bytes": 5017
+  },
+  "src/evaluation_metrics.py": {
+   "sha256": "102e837b12afb721b3e8455367300cb85e07a5fc0a799e919bd726901888150f",
+   "bytes": 16703
+  },
+  "src/invoice_evidence.py": {
+   "sha256": "8e56d99ca4495e2430892b0d7a3ee2d1103caa2bb857b11418a4d8710d62f623",
+   "bytes": 61784
+  },
+  "src/invoice_grounding.py": {
+   "sha256": "afe6cc25adadaae70b3dd7158cd97c4c43286ae5889ff902345c72f8e7a7d69d",
+   "bytes": 51686
+  },
+  "src/invoice_review.py": {
+   "sha256": "7e90a03dcb6486b717b3054551639f7506fa00030799ae8f298d108fef9867c2",
+   "bytes": 16066
+  },
+  "src/invoice_review_edit.py": {
+   "sha256": "7f8d5e4a7b79e5ddf845648e11ba5605e9c53938dded4480b7a84570fcc3ad4a",
+   "bytes": 27169
+  },
+  "src/invoice_review_store.py": {
+   "sha256": "32a062e6318e1df3fbec846d290765c0166a1d021ec9075ab9617393f4d3d381",
+   "bytes": 23150
+  },
+  "src/invoice_validation.py": {
+   "sha256": "91dcc415c74d589d9f5461056cfe69584a9792c18cd83867f56ea31197fe4853",
+   "bytes": 39586
+  },
+  "src/ocr_budget.py": {
+   "sha256": "f7fe7c3ae8f4a547b73aba66466a4dde6ba376bf9abaab89ddf5febb2a8c5c53",
+   "bytes": 1129
+  },
+  "src/ocr_config.py": {
+   "sha256": "fa75b2008f20fec276d7f0b4c7eceb3f361b518a1394d7eb308cbe60a5c3cad1",
+   "bytes": 1008
+  },
+  "src/ocr_consensus.py": {
+   "sha256": "0e49eb990642923f7f65670c437c87771ec3cb2d7fe07dea267be169fff961e5",
+   "bytes": 18767
+  },
+  "src/ocr_fast_path.py": {
+   "sha256": "048520d9c8c56ff12aca210c68662e190533f54f3925d5606ecdcc3fed5d3ed6",
+   "bytes": 6542
+  },
+  "src/ocr_preprocessing.py": {
+   "sha256": "fd7554949995b593a3892a15dd1192eb6feb88f9f230f4b190c91cde7d1ee389",
+   "bytes": 2576
+  },
+  "src/ocr_quality.py": {
+   "sha256": "93ead821b87fc2f017a036168e28d23f58fcb2d4959db64d7b2d1cf5143d6217",
+   "bytes": 5967
+  },
+  "src/ocr_recovery.py": {
+   "sha256": "2bd0d21140339e96616ef2972c8d6c7f372095e5275bd7f6dedfd76fb4b6ccdc",
+   "bytes": 18484
+  },
+  "src/rapidocr_evidence.py": {
+   "sha256": "71dad5fa1717b7c43f3a0796ec4676e488613009e90e5d96c466065928de13aa",
+   "bytes": 7855
+  },
+  "src/split_data.py": {
+   "sha256": "f7a9f7a8f314123ee5bd8683a5e00bdc3517f77e5d7bc8fc9f945c33d49ec80a",
+   "bytes": 2804
+  },
+  "src/table_geometry.py": {
+   "sha256": "dad45fdd498c806270028d44440dc8de0f9fd0cdb661bd1abef3bad9b3735355",
+   "bytes": 18339
+  },
+  "src/table_reconstruction.py": {
+   "sha256": "4f741a6d0f96d5fd7751901157fa21ef71aa0c9e8fa7c62ab743f4ace9fb4027",
+   "bytes": 45241
+  },
+  "src/table_recovery.py": {
+   "sha256": "f6d76a36234133b3695e612f6222902fc31800c2726f224c73966aae67733f4e",
+   "bytes": 13487
+  },
+  "src/table_shadow.py": {
+   "sha256": "d2375ceca92f540578141ba1a465fc0989c5c4f61f32e9552200ad196ffaaebc",
+   "bytes": 14682
+  },
+  "app/local_review.py": {
+   "sha256": "c33414c28dc0bf2f1a1703f24a965868ceaf70cb5c02b8ccd0b039082934d769",
+   "bytes": 5050
+  },
+  "app/main.py": {
+   "sha256": "96bf11a9fa99d5a92f6c050db75993fb4e6ec12601f21826b53fec247b553064",
+   "bytes": 70863
+  },
+  "app/review_persistence.py": {
+   "sha256": "441290ad9fcfa3f29a925a14e42995a2687b96ec0ebfc3e0caa9f6a9e7a1acd1",
+   "bytes": 9367
+  }
+ },
+ "config_hashes": {
+  "requirements.txt": {
+   "sha256": "5c391e59b10f3bf4823980db6c922344ecad063f56e899c18fbf5fd9f4d25871",
+   "bytes": 707
+  },
+  "requirements-inference.txt": {
+   "sha256": "f6e272cb88db9d5c0965886c12f80254f0fbf15ec001d2d3ca934e2a27b94d65",
+   "bytes": 37
+  },
+  "constraints-hf.txt": {
+   "sha256": "785b55b861541f122bd0d0dc6bf99580483e9435c72e9dfb865256f02c25ce8c",
+   "bytes": 336
+  },
+  "packages.txt": {
+   "sha256": "be6560c5e25fbb426cb9d83fc15cb90564af01e338ff66e792dbb4240ec43803",
+   "bytes": 50
+  },
+  "pytest.ini": {
+   "sha256": "aa48015b2e04f8cdd3306cd55e1069844e8b1108175f34b6ecfc90cc973ce0a0",
+   "bytes": 145
+  },
+  "AGENTS.md": {
+   "sha256": "22fe31a2d0395904541236ab9136fda4a6d7fee4fef434c6dc64488fdb4fc7ba",
+   "bytes": 2358
+  }
+ },
+ "ocr_configuration": {
+  "version": "ocr-policy-5-bounded-fastpath-quota",
+  "confidence": 40,
+  "families": [
+   "deskew",
+   "clahe",
+   "crop",
+   "denoise",
+   "scale3"
+  ],
+  "segmentations": [
+   4,
+   6
+  ],
+  "fast_families": [
+   "deskew",
+   "clahe"
+  ],
+  "fast_mean_confidence": 85,
+  "fast_token_confidence": 60,
+  "total_seconds": 45.0,
+  "call_seconds": 60.0,
+  "max_pixels": 25000000,
+  "gpu_initial_seconds": 18,
+  "gpu_margin_seconds": 3,
+  "gpu_min_seconds": 8,
+  "gpu_max_seconds": 22
+ },
+ "ocr_configuration_fingerprint": "6ec4771bf8b1d82d59ccfbf7586481019d13e55c57ec77af8f0bd482fbd8b1e1",
+ "experimental_flag": {
+  "name": "EXPERIMENTAL_DUAL_OCR",
+  "process_value": null,
+  "enabled_now": false,
+  "strategy_environment": null,
+  "strategy_default": "A",
+  "windows_scopes": {
+   "user": [],
+   "machine": []
+  }
+ },
+ "rapidocr_engine": {
+  "available": true,
+  "unavailable_reason": null,
+  "version": "3.10.0",
+  "flag_required_to_use_it": true
+ },
+ "tesseract_only_smoke": {
+  "document": "services_horizon",
+  "document_is_development_data": true,
+  "purpose": "prove the standard Tesseract-only path is operational, not to measure accuracy",
+  "seconds": 104.44,
+  "exported_rows": 4,
+  "dual_ocr_record_present": false,
+  "source_kind": "consensus",
+  "preprocessing_used": [
+   "deskew",
+   "clahe",
+   "crop",
+   "denoise",
+   "scale3"
+  ],
+  "ocr_calls": 12,
+  "flag_enabled_during_smoke": false
+ },
+ "freeze_rules": [
+  "no extraction rule, threshold, vocabulary or evaluator change after validation results are seen",
+  "any later adjustment must be evaluated on a different, previously unseen document set",
+  "the frozen hashes above are the reference for detecting a drift"
+ ],
+ "independent_validation_started": false
+}

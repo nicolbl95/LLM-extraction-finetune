@@ -1,0 +1,78 @@
+{
+  "schema": "pr110-independent-reference",
+  "version": 2,
+  "purpose": "Blind manual reference for one genuine invoice, written from the printed document before any OCR or model output is seen. Version 2 keeps every rule of the PR103 template and adds the two provenance states PR109 needed to classify existing truth, plus the page map PR109 could not express.",
+  "rules": [
+    "Record only what is printed. Never compute a missing value and present it as printed.",
+    "Every field carries provenance: printed, derived (arithmetic over printed values, with derived_from), absent (not on the document), illegible (present but unreadable) or ambiguous (readable but undecidable, with a note).",
+    "An absent field, an illegible field and an ambiguous field are three different states and must never be merged. The last three all carry a null value.",
+    "A value the document does not print but arithmetic fixes is derived, never printed, and never copied from the pipeline.",
+    "Do not normalise a printed inconsistency: if quantity x unit_price does not equal the printed line total, record both and describe the discrepancy in document_inconsistencies.",
+    "Shipping, discounts and tax are recorded separately and are never product rows.",
+    "A second annotator is required where feasible; record who reviewed and how any disagreement was resolved.",
+    "The pages list names every page of source_file that belongs to this one invoice. One file holds one invoice; a file holding two invoices is two references and the intake refuses it until it is split.",
+    "Record whether the document is a genuinely issued invoice rather than a template, sample or demo: the cohort's composition counts depend on the answer, not on a guess.",
+    "The reference and the image hash are frozen before the pipeline is run."
+  ],
+  "document": {
+    "id": null,
+    "source_file": null,
+    "sha256": null,
+    "pages": null,
+    "page_count_observed": null,
+    "page_map_note": "1-based page numbers of source_file that this invoice occupies; a single-page image is [1]",
+    "quality_declaration": null,
+    "owner_permission": {
+      "authorized_for_local_evaluation": null,
+      "evidence": null,
+      "date": null
+    },
+    "source_origin": null,
+    "genuine_business_invoice": null,
+    "language": null,
+    "region": null,
+    "input_kind": null,
+    "image_resolution_dpi": null,
+    "template_description": null,
+    "annotators": [],
+    "annotation_date": null,
+    "second_review": {
+      "performed": null,
+      "reviewer": null,
+      "disagreements_resolved": null
+    },
+    "ocr_output_seen_before_annotation": false,
+    "disagreements": []
+  },
+  "reference": {
+    "supplier_name": {"value": null, "provenance": null},
+    "invoice_date": {"value": null, "provenance": null, "printed_form": null, "order_evidence": null},
+    "currency": {"value": null, "provenance": null},
+    "total_ht": {"value": null, "provenance": null, "printed_label": null},
+    "total_ttc": {"value": null, "provenance": null, "printed_label": null},
+    "tax": {"rate": null, "amount": null, "provenance": null, "printed_label": null},
+    "shipping": {"value": null, "provenance": null, "printed_label": null},
+    "discounts": [],
+    "line_items": [
+      {
+        "description": {"value": null, "provenance": null},
+        "quantity": {"value": null, "provenance": null, "printed_form": null},
+        "unit_price": {"value": null, "provenance": null, "printed_form": null},
+        "total_ht": {"value": null, "provenance": null, "printed_form": null},
+        "is_product_or_service": true,
+        "reference_number": null
+      }
+    ],
+    "document_inconsistencies": []
+  },
+  "allowed_provenance": ["printed", "derived", "absent", "illegible", "ambiguous"],
+  "allowed_quality_declaration": ["clear", "small_text", "low_contrast", "skewed_or_cropped", "other"],
+  "allowed_input_kind": ["scanned_image", "native_pdf", "photograph", "mixed"],
+  "allowed_region": ["FR", "UK", "US", "CA", "other"],
+  "freeze": {
+    "reference_sha256": null,
+    "body_sha256": null,
+    "frozen_before_pipeline_run": null,
+    "frozen_at": null
+  }
+}
