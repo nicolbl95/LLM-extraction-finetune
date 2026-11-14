@@ -545,3 +545,8 @@ results/product-review145/
 # PR147: les livrables des revues 146-149 (rapports internes, evidences, clones jetables de
 # verification) suivent le meme sort que PR139-PR145 : aucun chemin n'est suivi sous results/product-review14x/.
 results/product-review14*/
+
+# PR154: la capture d'interface du README est le seul fichier image volontairement versionne.
+# L'exception est ancoree sur ce chemin exact ; la regle globale *.png (ligne 11) continue
+# d'exclure toute autre image, y compris dans docs/assets/.
+!/docs/assets/apercu-interface-extraction.png
