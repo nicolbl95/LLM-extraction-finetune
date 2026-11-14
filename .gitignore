@@ -484,6 +484,21 @@ results/product-review135/
 /tests/test_row_consensus_audit.py
 # <<< PR135 part 2 phase 7 <<<
 
+# PR146: internal research deliverables of the public-demo campaign (PR139-PR145).
+# Criterion: every path below is untracked, quoted by no tracked file, and is either an internal
+# report, a measured payload of the regression documents, a build copy of the HF package, a Gradio
+# temp-file cache, or a nested Git object store (rollback-bare/, gh-clone/, hf-deploy/).
+# 531 files and ~71 MB on disk, of which 393 were still stageable by `git add .` when PR145 measured
+# them. None of it is destined for the repository. Each pattern contains a slash, so it is anchored
+# to this directory; results/product-review137/ is deliberately not covered (two tracked files).
+results/product-review139/
+results/product-review140/
+results/product-review141/
+results/product-review142/
+results/product-review143/
+results/product-review144/
+results/product-review145/
+
 
 
 
