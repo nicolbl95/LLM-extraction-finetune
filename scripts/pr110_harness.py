@@ -37,6 +37,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "scripts"), str(ROOT / 
 import pr103_validate_reference as V  # noqa: E402
 import pr106_harness as P  # noqa: E402
 import pr109_intake as I  # noqa: E402
+import pr110_authority as J  # noqa: E402
 
 INVOICE_DIR = ROOT / "benchmark_prep" / "invoices"
 REFERENCE_DIR = ROOT / "benchmark_prep" / "references"
@@ -44,6 +45,10 @@ ARTIFACT_DIR = ROOT / "results" / "product-review110"
 TEMPLATE = ROOT / "benchmark_prep" / "pr110-reference-template.json"
 
 TARGET_DOCUMENTS = I.TARGET_DOCUMENTS
+# PR167: the protocol is a composition, not a count. The quota says which countries the campaign measures -
+# four invoices billed under each of the three conventions it was built for - and the target count is its
+# consequence, so `select_cohort()` refuses a quota that does not add up rather than silently measuring less.
+COHORT_QUOTA = {"FR": 4, "UK": 4, "US": 4}
 PROVENANCE = sorted(V.PROVENANCE_V2)
 NULL_PROVENANCE = sorted(V.NULL_VALUE_PROVENANCE_V2)
 VALUE_PROVENANCE = [state for state in PROVENANCE if state not in NULL_PROVENANCE]
@@ -323,6 +328,181 @@ def coverage(records: list[dict], geometry: dict[str, dict] | None = None) -> li
     ]
     return [{"category": label, "documents": names, "count": len(names), "underrepresented": len(names) < 2}
             for label, names in categories]
+
+
+# --------------------------------------------------------------------------- cohort selection (PR167)
+
+
+def region_of(record: dict) -> str | None:
+    """The billing country the owner declared: `document.region`, the only region field the validator pins.
+
+    `coverage()` above answers "which invoices are French?" from language *or* currency, which describes a
+    corpus well and spends a quota badly - an invoice priced in EUR is not therefore a French one. The
+    validator refuses a reference whose `document.region` is outside its closed vocabulary, so this is the
+    only declared value a country slot can be filled from, and a document with no region is not an
+    unclassified one: it is an invalid reference that never reaches a selection.
+    """
+    document = (record.get("annotation") or {}).get("document") or {}
+    return document.get("region")
+
+
+def _selection_key(record: dict) -> tuple:
+    return (str(record.get("id") or ""), str(record.get("sha256") or ""))
+
+
+def select_cohort(records: list[dict], quota: dict[str, int] | None = None,
+                  *, target: int | None = None) -> dict:
+    """The exact documents the evaluation will run, chosen deterministically from the eligible ones.
+
+    Twelve is not the protocol; four invoices billed under each of the three conventions the campaign was
+    built for is. Within a country the candidates are ordered by (document id, document sha256) - never by
+    the order `rglob` returns them - and the first `quota[region]` are taken, so the same intake and the same
+    sealed references always select the same cohort and a later run can be diffed against the freeze.
+
+    Candidates beyond a country's quota are kept and named as a reserve, which is what PR110's intake was
+    designed to allow; documents whose region carries no quota (CA, other) are kept out of the cohort rather
+    than used to patch a shortfall, because a Canadian invoice measured as French would be reported as one.
+    """
+    quota = dict(COHORT_QUOTA if quota is None else quota)
+    target = TARGET_DOCUMENTS if target is None else target
+    candidates: dict[str, list[dict]] = {}
+    off_quota: dict[str, list[str]] = {}
+    regionless: list[str] = []
+    for record in records:
+        region = region_of(record)
+        if region is None:
+            regionless.append(str(record.get("id")))
+        elif region in quota:
+            candidates.setdefault(region, []).append(record)
+        else:
+            off_quota.setdefault(str(region), []).append(str(record.get("id")))
+
+    selected: list[dict] = []
+    reserve: list[dict] = []
+    counts: dict[str, int] = {}
+    missing: dict[str, int] = {}
+    for region in sorted(quota):
+        ordered = sorted(candidates.get(region) or [], key=_selection_key)
+        taken, extra = ordered[:quota[region]], ordered[quota[region]:]
+        selected += taken
+        counts[region] = len(taken)
+        if len(taken) < quota[region]:
+            missing[region] = quota[region] - len(taken)
+        for record in extra:
+            reserve.append({"id": str(record.get("id")), "region": region, "sha256": record.get("sha256"),
+                            "reason": f"a {region} candidate beyond the quota of {quota[region]}; "
+                                      "not evaluated, kept as a named reserve"})
+    for region in sorted(off_quota):
+        for document_id in sorted(off_quota[region]):
+            reserve.append({"id": document_id, "region": region, "sha256": None,
+                            "reason": f"declared region {region!r} carries no quota in this protocol; "
+                                      "it cannot replace a required invoice"})
+
+    ordered_selected = sorted(selected, key=lambda record: (str(region_of(record)), ) + _selection_key(record))
+    return {
+        "quota": quota,
+        "required_total": target,
+        # the target is a consequence of the quota, so a protocol that no longer adds up is a finding, not a
+        # cohort: 4+4+4 is 12 and a selection asked for 11 documents would silently drop one country
+        "protocol_consistent": sum(quota.values()) == target,
+        "counts": counts,
+        "missing": missing,
+        "candidates": {region: sorted(str(record.get("id")) for record in candidates.get(region) or [])
+                       for region in sorted(quota)},
+        "off_quota_candidates": {region: names for region, names in sorted(off_quota.items())},
+        "without_a_declared_region": sorted(regionless),
+        "selected": ordered_selected,
+        "selected_ids": [str(record.get("id")) for record in ordered_selected],
+        "reserve": sorted(reserve, key=lambda entry: (entry["region"], entry["id"])),
+        "selection_sha256": digest([(str(region_of(record)), ) + _selection_key(record)
+                                    for record in ordered_selected]),
+        "ordered_by": "document id, then document sha256, within each declared region - never the order the "
+                      "files were found in",
+    }
+
+
+def cohort_variant_pairs(records: list[dict], *, geometry: bool = True) -> dict:
+    """Cohort members that are two renderings of one invoice, decided with the campaign's existing tests.
+
+    Nothing new is measured here. An identical `document.sha256` or an identical `document.id` is one document
+    by the campaign's own record; a homography at `pr110_authority`'s unchanged thresholds is one page
+    re-rendered; a pair inside `PERCEPTUAL_MAX_DISTANCE` bits, or one whose correspondence clears
+    `REVIEW_INLIERS` but not the conclusive band, is the resemblance PR164 chose to hand to a human rather
+    than assert. Proven pairs make the cohort wrong; unconfirmed ones make it unproven, and a twelve-document
+    cohort that cannot show its members are twelve different invoices has not been formed yet.
+    """
+    proven: list[dict] = []
+    unconfirmed: list[dict] = []
+    errors: list[dict] = []
+    pairs = 0
+    signatures: dict[str, dict | None] = {}
+
+    def signature_of(record):
+        name = str(record.get("id"))
+        if name not in signatures:
+            image = record.get("image")
+            signatures[name] = I.perceptual(Path(image)) if image is not None and Path(image).is_file() else None
+        return signatures[name]
+
+    for index, left in enumerate(records):
+        for right in records[index + 1:]:
+            pairs += 1
+            entry = {"pair": [str(left.get("id")), str(right.get("id"))],
+                     "regions": [region_of(left), region_of(right)]}
+            reasons = []
+            if left.get("sha256") and left.get("sha256") == right.get("sha256"):
+                reasons.append("identical document sha256")
+            if left.get("id") and str(left.get("id")) == str(right.get("id")):
+                reasons.append("the same document id is annotated twice")
+            if reasons:
+                proven.append({**entry, "basis": "; ".join(reasons)})
+                continue
+            if not geometry:
+                continue
+            first, second = signature_of(left), signature_of(right)
+            if not first or not second:
+                errors.append({**entry, "error": "no page signature could be computed for one of the two"})
+                continue
+            distance = min([value for value in (I.hamming(first.get("ahash"), second.get("ahash")),
+                                                I.hamming(first.get("dhash"), second.get("dhash")))
+                            if value is not None] or [None])
+            if distance is None:
+                errors.append({**entry, "error": "neither page carries an image hash "
+                                                 "(a PDF has no page image to compare): the pair is unproven"})
+                continue
+            entry["hash_distance"] = distance
+            if distance > J.GEOMETRY_PREFILTER_BITS:
+                continue
+            try:
+                found = J.correspondence(Path(left["image"]), Path(right["image"]))
+            except Exception as error:  # an unusable detector holds the cohort; it never clears it
+                errors.append({**entry, "error": f"{type(error).__name__}: {error}"})
+                continue
+            if not found:
+                errors.append({**entry, "error": "the geometric correspondence could not be computed"})
+                continue
+            fraction = found["inliers"] / max(1, found["good"])
+            entry.update({"inliers": found["inliers"], "good": found["good"], "fraction": round(fraction, 3)})
+            if found["inliers"] >= J.MIN_INLIERS and fraction >= J.MIN_INLIER_FRACTION:
+                proven.append({**entry, "basis": f"one homography explains {found['inliers']} of "
+                                                 f"{found['good']} correspondences at scale {found['scale']}"})
+            elif found["inliers"] >= J.REVIEW_INLIERS or distance <= I.PERCEPTUAL_MAX_DISTANCE:
+                unconfirmed.append({**entry, "basis": "a real but inconclusive correspondence, or a "
+                                                     f"{distance}-bit resemblance: two invoices issued from "
+                                                     "one template can reach this state and need the owner"})
+    return {
+        "computed": bool(geometry),
+        "pairs_tested": pairs,
+        "proven": sorted(proven, key=lambda item: item["pair"]),
+        "unconfirmed": sorted(unconfirmed, key=lambda item: item["pair"]),
+        "errors": sorted(errors, key=lambda item: item["pair"]),
+        "thresholds": {"similarity_bits": I.PERCEPTUAL_MAX_DISTANCE,
+                       "geometry_prefilter_bits": J.GEOMETRY_PREFILTER_BITS,
+                       "min_inliers": J.MIN_INLIERS, "min_inlier_fraction": J.MIN_INLIER_FRACTION,
+                       "review_inliers": J.REVIEW_INLIERS},
+        "note": "thresholds are PR164's, read from pr110_authority rather than restated; a pair that only "
+                "resembles is held for the owner, exactly as the intake screen holds a resemblance",
+    }
 
 
 # --------------------------------------------------------------------------- privacy

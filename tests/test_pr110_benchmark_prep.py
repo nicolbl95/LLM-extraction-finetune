@@ -3,7 +3,7 @@
 Every test here makes 0 OCR calls and 0 model calls: the intake is a temporary directory of synthetic images
 that carry no printed invoice text, and the pipeline is never reached - the runner refuses before it imports
 anything. What is under test is the part PR110 adds (eligibility classification, the annotation walkthrough,
-the seal, the projector, the two readiness gates, freeze verification) plus the one behaviour PR110 must not
+the seal, the projector, the three readiness gates, freeze verification) plus the one behaviour PR110 must not
 disturb: PR103's published validator on a `version: 1` reference.
 
 `test_guide_records_the_owners_answers_and_not_the_questions` exists because the first version of the
@@ -36,10 +36,22 @@ import pr103_validate_reference as V  # noqa: E402
 import pr106_harness as P  # noqa: E402
 import pr109_intake as I  # noqa: E402
 import pr110_annotate as A  # noqa: E402
+import pr110_authority as AU  # noqa: E402
 import pr110_eligibility as E  # noqa: E402
 import pr110_evaluate as G  # noqa: E402
 import pr110_harness as K  # noqa: E402
 import pr110_ready as R  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def declared_empty_document_authority(monkeypatch):
+    """PR164: the screen now decides identity from a document authority.
+
+    These tests measure the policy, not the corpora restored on the machine they run on, so they declare an
+    authority that knows no document. That is different from the authority being absent: an absent registry
+    holds every document for review (tested in test_pr164_eligibility_hardening.py).
+    """
+    monkeypatch.setattr(E.A, "load", lambda *args, **kwargs: AU.empty())
 
 DOCUMENT_DEFAULTS = {
     "language": "French", "region": "FR", "input_kind": "scanned_image",
@@ -124,6 +136,18 @@ def write_freeze(directory: Path, freeze: dict) -> Path:
     path = directory / "cohort-freeze.json"
     path.write_text(json.dumps(freeze), encoding="utf-8")
     return path
+
+
+def scale_protocol(monkeypatch, documents: int) -> None:
+    """Shrink the readiness protocol to `documents` for a fixture that cannot hold twelve.
+
+    `TARGET_DOCUMENTS` and `COHORT_QUOTA` are one protocol, not two knobs: the quota sums to the target, and
+    `select_cohort` reports a protocol that no longer adds up as a finding. A test that lowers one without the
+    other stops measuring the gate it names and measures PR167's coverage refusal instead - so both move
+    together, onto a single country whose slot the fixture's FR documents fill.
+    """
+    monkeypatch.setattr(K, "TARGET_DOCUMENTS", documents)
+    monkeypatch.setattr(K, "COHORT_QUOTA", {"FR": documents})
 
 
 def write_source_manifest(directory: Path, **changes) -> Path:
@@ -457,6 +481,12 @@ def test_eligibility_separates_eligible_excluded_and_pending(tmp_path, monkeypat
 
 
 def test_eligibility_catches_a_recompressed_copy_and_names_what_it_matched(tmp_path, monkeypatch):
+    """PR164: a perceptual resemblance no longer excludes on its own, so this copy is held for review.
+
+    PR163 measured two different documents inside the same 10-bit radius; the finding still blocks automatic
+    admission, and the registered-variant check is what turns a resemblance into an exclusion
+    (test_pr164_eligibility_hardening.py measures both).
+    """
     invoices, references = write_intake(tmp_path)
     original = add_document(invoices, references, "orig", 21)
     signature = I.perceptual(original["image"])
@@ -469,10 +499,13 @@ def test_eligibility_catches_a_recompressed_copy_and_names_what_it_matched(tmp_p
 
     report = E.eligibility(invoices, references, geometry=False)
     document = status_of(report, "recompressed")
-    assert document["status"] == E.EXCLUDED
-    assert "visually_similar_duplicate" in document["hard_reasons"]
+    assert document["status"] == E.PENDING_REVIEW
+    assert document["review_label"] == "MANUAL_REVIEW_REQUIRED"
+    assert document["hard_reasons"] == []
+    assert "visually_similar_duplicate" in document["open_questions"]
     finding = next(check for check in document["checks"] if check["check"] == "visually_similar_duplicate")
     assert "somewhere/already-measured.png" in finding["detail"], "the finding must name what it matched"
+    assert "resemblance only" in finding["detail"]
 
 
 def test_eligibility_pairs_a_reference_to_a_renamed_document_by_hash(tmp_path, monkeypatch):
@@ -503,7 +536,7 @@ def test_a_file_holding_more_than_one_invoice_is_held_for_review(tmp_path, monke
 def test_readiness_refuses_an_empty_cohort_and_writes_no_freeze(tmp_path, monkeypatch):
     invoices, references = write_intake(tmp_path)
     monkeypatch.setattr(I, "signed_population", lambda: [])
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 2)
+    scale_protocol(monkeypatch, 2)
     monkeypatch.setattr(R, "ARTIFACT_DIR", tmp_path)
 
     report = R.readiness(invoices, references, geometry=False)
@@ -520,9 +553,9 @@ def test_readiness_refuses_an_empty_cohort_and_writes_no_freeze(tmp_path, monkey
     assert not (tmp_path / "cohort-freeze.json").exists()
 
 
-def test_readiness_freezes_a_cohort_that_passes_both_gates(tmp_path, monkeypatch):
+def test_readiness_freezes_a_cohort_that_passes_all_three_gates(tmp_path, monkeypatch):
     monkeypatch.setattr(I, "signed_population", lambda: [])
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 2)
+    scale_protocol(monkeypatch, 2)
     invoices, references = write_intake(tmp_path)
     first = add_document(invoices, references, "f-01", 51)
     add_document(invoices, references, "f-02", 52)
@@ -530,8 +563,14 @@ def test_readiness_freezes_a_cohort_that_passes_both_gates(tmp_path, monkeypatch
     report = R.readiness(invoices, references, geometry=False,
                          source_manifest=write_source_manifest(tmp_path))
     assert report["verdict"] == R.READY, report["blocking_findings"]
+    assert report["coverage_gate"]["passed"] is True
     freeze = report["freeze"]
     assert [entry["id"] for entry in freeze["documents"]] == ["f-01", "f-02"]
+    assert [entry["region"] for entry in freeze["documents"]] == ["FR", "FR"]
+    assert freeze["selection"]["selected_ids"] == ["f-01", "f-02"]
+    assert {key: value for key, value in freeze["gates"].items() if key != "note"} == {
+        "intake_gate": True, "annotation_gate": True, "coverage_gate": True}
+    assert freeze["document_authority"]["scope"] == "fixture"
     assert freeze["frozen_before_any_pipeline_run"] is True
     assert freeze["experimental_switches"]["all_off"] is True
     assert freeze["production_sources"]["pr103_drift"]["drifted"] == []
@@ -553,10 +592,11 @@ def test_readiness_freezes_a_cohort_that_passes_both_gates(tmp_path, monkeypatch
     assert any("seal does not recompute" in problem for problem in tampered["problems"])
 
     (references / "f-01.json").write_text(json.dumps(first["annotation"]), encoding="utf-8")
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 3)
+    scale_protocol(monkeypatch, 3)
     short = R.readiness(invoices, references, geometry=False)
     assert short["verdict"] == R.NOT_READY and short["freeze"] is None
     assert short["intake_gate"]["eligible"] == 2 and short["intake_gate"]["shortage"] == 1
+    assert short["coverage_gate"]["report"] == "FR: 2/3" and short["coverage_gate"]["missing"] == {"FR": 1}
 
 
 # --------------------------------------------------------------------------- the declared source version
@@ -565,7 +605,7 @@ def test_readiness_freezes_a_cohort_that_passes_both_gates(tmp_path, monkeypatch
 def test_readiness_names_pr103_when_no_source_version_is_declared(tmp_path, monkeypatch):
     """PR103 stays the historical baseline by default; nothing here re-freezes it."""
     monkeypatch.setattr(I, "signed_population", lambda: [])
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 1)
+    scale_protocol(monkeypatch, 1)
     invoices, references = write_intake(tmp_path)
     add_document(invoices, references, "solo", 71)
 
@@ -592,7 +632,7 @@ def test_readiness_names_pr103_when_no_source_version_is_declared(tmp_path, monk
 def test_readiness_still_reports_a_source_that_does_not_match_its_declared_version(tmp_path, monkeypatch):
     """A declared manifest is a claim the tree has to answer, not a way to make drift disappear."""
     monkeypatch.setattr(I, "signed_population", lambda: [])
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 1)
+    scale_protocol(monkeypatch, 1)
     invoices, references = write_intake(tmp_path)
     add_document(invoices, references, "solo", 72)
     renamed = sorted(P.source_hashes())[0]
@@ -611,7 +651,7 @@ def test_readiness_still_reports_a_source_that_does_not_match_its_declared_versi
 def test_evaluation_refuses_sources_that_changed_after_the_freeze(tmp_path, monkeypatch):
     """The run-time anti-tamper is independent of which manifest readiness compared against."""
     monkeypatch.setattr(I, "signed_population", lambda: [])
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 1)
+    scale_protocol(monkeypatch, 1)
     invoices, references = write_intake(tmp_path)
     add_document(invoices, references, "solo", 73)
     freeze = R.readiness(invoices, references, geometry=False,
@@ -633,7 +673,7 @@ def test_evaluation_refuses_sources_that_changed_after_the_freeze(tmp_path, monk
 
 def test_run_refuses_a_freeze_that_does_not_recompute(tmp_path, monkeypatch):
     monkeypatch.setattr(I, "signed_population", lambda: [])
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 1)
+    scale_protocol(monkeypatch, 1)
     invoices, references = write_intake(tmp_path)
     add_document(invoices, references, "solo", 61)
     freeze = R.readiness(invoices, references, geometry=False)["freeze"]
@@ -650,7 +690,7 @@ def test_run_refuses_a_freeze_that_does_not_recompute(tmp_path, monkeypatch):
 
 def test_run_refuses_a_french_cohort_when_the_french_data_is_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(I, "signed_population", lambda: [])
-    monkeypatch.setattr(K, "TARGET_DOCUMENTS", 1)
+    scale_protocol(monkeypatch, 1)
     invoices, references = write_intake(tmp_path)
     add_document(invoices, references, "fr-01", 71, language="French", region="FR")
     freeze = R.readiness(invoices, references, geometry=False)["freeze"]

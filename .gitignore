@@ -109,6 +109,12 @@ results/product-review109/
 benchmark_prep/invoices/
 benchmark_prep/references/
 
+# PR167 : l'autorite documentaire reelle nomme les documents de developpement et l'endroit ou ils sont
+# gardes, donc elle reste locale ($PR110_DOCUMENT_AUTHORITY ou ce chemin). Le fichier suivi n'est que la
+# demonstration du format : benchmark_prep/document-authority.demo.json, scope « demo », aucune admission.
+benchmark_prep/document-authority.private.json
+benchmark_prep/document-authority.json
+
 # PR110 : freeze du cohort, signatures perceptuelles et rapports d'evaluation — prive.
 results/product-review110/
 
@@ -556,3 +562,15 @@ results/product-review14*/
 # sous results/product-review156/. La regle est ancoree sur ce seul dossier ; les futures
 # campagnes 15x restent stageables tant qu'elles n'ont pas ete examinees.
 results/product-review156/
+
+# PR165: la revue 164 (artefacts internes de la certification du controle d'admissibilite)
+# contient des empreintes geometriques de documents du corpus prive deja ignore par Git :
+# c'est elles qui prouvent qu'une piece jointe est la re-rendu d'une facture deja evaluee.
+# La regle est ancoree sur ce seul dossier ; les regles generales existantes ne changent pas.
+results/product-review164/
+
+# PR166: la revue 165 (certification du controle d'admissibilite) produira les memes artefacts
+# internes de validation que la 164 - empreintes geometriques et rapports de rejouage portant sur
+# des documents du corpus prive. Le dossier n'existe pas encore : la regle est preventive.
+# Ancoree sur ce seul dossier ; les regles generales existantes ne changent pas.
+results/product-review165/

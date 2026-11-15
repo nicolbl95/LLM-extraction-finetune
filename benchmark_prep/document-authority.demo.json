@@ -1,0 +1,363 @@
+{
+  "version": 1,
+  "scope": "demo",
+  "purpose": "a demonstration registry: the published schema, the published thresholds and only the images this repository already tracks",
+  "built_from": [],
+  "policy": {
+    "similarity_threshold_bits": 10,
+    "geometry_prefilter_bits": 32,
+    "geometry_min_inliers": 60,
+    "note": "a global-hash resemblance raises MANUAL_REVIEW_REQUIRED; only a registered variant, by exact hash or by a single homography a majority of one page's keypoints agree on, excludes as previous use"
+  },
+  "documents": [
+    {
+      "id": "examples/france",
+      "category": "demo_asset",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "demo_asset",
+          "record": "app/examples/france.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "app/examples/france.png",
+          "role": "demo_asset",
+          "expect_present": true,
+          "sha256": "6b4909f8428cad4fa726e8eb2299d8fc9e0f9419e8e9a93a77cb1f75aabf5671",
+          "bytes": 57321,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x1a107ffffffff",
+          "dhash": "0x808cb09080000000"
+        }
+      ]
+    },
+    {
+      "id": "examples/modele-vierge",
+      "category": "demo_asset",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "demo_asset",
+          "record": "app/examples/modele-vierge.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "app/examples/modele-vierge.png",
+          "role": "demo_asset",
+          "expect_present": true,
+          "sha256": "5ca3879f6f2bfb3ff4219948c064b27713291839d879f8f173135cd08388746f",
+          "bytes": 32253,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x312107ffffffff",
+          "dhash": "0x9028301000000000"
+        }
+      ]
+    },
+    {
+      "id": "examples/uk",
+      "category": "demo_asset",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "demo_asset",
+          "record": "app/examples/uk.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "app/examples/uk.png",
+          "role": "demo_asset",
+          "expect_present": true,
+          "sha256": "0d03a8b55fb89d0a59696059eefe45e49c4640643fb3c5fe28c492a9e448f57e",
+          "bytes": 64941,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x3de117ffffffff",
+          "dhash": "0x88acb29080000000"
+        }
+      ]
+    },
+    {
+      "id": "examples/us",
+      "category": "demo_asset",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "demo_asset",
+          "record": "app/examples/us.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "app/examples/us.png",
+          "role": "demo_asset",
+          "expect_present": true,
+          "sha256": "5a7b9bc7e1faef3f9570e3bfccd6626d583f66da189609b9ca00482466b27ae4",
+          "bytes": 70536,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x92107ffffffff",
+          "dhash": "0x80aca89080000000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/france-blur-light",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/france-blur-light.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/france-blur-light.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "e23f477b679519ea09e3849f5d706b0a5ab6dff7df9c5e5fbc19f221c04061d1",
+          "bytes": 103319,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x1a107ffffffff",
+          "dhash": "0x808cb09080000000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/france-rotate-2",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/france-rotate-2.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/france-rotate-2.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "4caa1fb5334997cd1000764d3bd2bc61f39194e04286fdf6572f0721f1a90489",
+          "bytes": 133743,
+          "width": 937,
+          "height": 1295,
+          "ahash": "0x1ba187ffffffff",
+          "dhash": "0x808cb09080000000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/layout-joanna-binet",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/layout-joanna-binet.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/layout-joanna-binet.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "068062b42c7ddf4fc2c1fcb380b37906cb27f47ad7053bef482fd68ab695e894",
+          "bytes": 48719,
+          "width": 1200,
+          "height": 1600,
+          "ahash": "0x81fff1fdffff",
+          "dhash": "0x8888ca430a0a0000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/uk-blur-light",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/uk-blur-light.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/uk-blur-light.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "3fc99620282a03efa0eaed7825ea81e22e6daf8c80a26caa18846e9ec72e72ae",
+          "bytes": 107885,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x3de117ffffffff",
+          "dhash": "0x88acb29080000000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/uk-rotate-2",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/uk-rotate-2.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/uk-rotate-2.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "e734421a678f40848e852c78014647eee8df3883cf553f8b771e03e2351c0921",
+          "bytes": 132076,
+          "width": 937,
+          "height": 1295,
+          "ahash": "0x192117bfffffff",
+          "dhash": "0x888cb09080000000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/us-blur-light",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/us-blur-light.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/us-blur-light.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "f41013d4f7304630ac1b3dbe1e45aa808349f9509b193e2479b4cb5fbdb3109f",
+          "bytes": 125760,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x92307ffffffff",
+          "dhash": "0x80aca89080000000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/us-line3-amount-error",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/us-line3-amount-error.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/us-line3-amount-error.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "627eca6531248fb876b6d97d8feca96649fafcff4081723e6c539c2ee03a6a6b",
+          "bytes": 89322,
+          "width": 893,
+          "height": 1263,
+          "ahash": "0x92107ffffffff",
+          "dhash": "0x80aca89080000000"
+        }
+      ]
+    },
+    {
+      "id": "fixtures/us-rotate-2",
+      "category": "regression_fixture",
+      "source_type": null,
+      "genuine_business_invoice": null,
+      "layout_family": null,
+      "document_type": null,
+      "region": null,
+      "currency": null,
+      "history": [
+        {
+          "kind": "regression_fixture",
+          "record": "tests/fixtures/us-rotate-2.png"
+        }
+      ],
+      "variants": [
+        {
+          "path": "tests/fixtures/us-rotate-2.png",
+          "role": "regression_fixture",
+          "expect_present": true,
+          "sha256": "5fad7529ec106e9d78502ef8d7ca24c3e9c0b552da8f1415250ffb0a779d16ee",
+          "bytes": 154727,
+          "width": 937,
+          "height": 1295,
+          "ahash": "0x12307bfffffff",
+          "dhash": "0x8088a89080000000"
+        }
+      ]
+    }
+  ],
+  "note": "not the document authority. It cannot certify that a candidate is a document the campaign never used, because it never looked at the private corpora; a screen that loads it holds every document."
+}

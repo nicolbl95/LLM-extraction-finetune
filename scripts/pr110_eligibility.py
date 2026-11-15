@@ -12,11 +12,13 @@ record of past use, and from what the blind annotation says about permission, or
 Three states, never merged:
 
 * **eligible** - readable, unseen by the campaign, permitted, and annotated, validated and sealed.
-* **excluded** - a hard reason exists: a byte-identical or visually similar file already used, a purpose in
-  the PR103 inventory (training render, development scan, fixture, derivative), a permission refused, a
-  document that is not an invoice a business issued, or a file that cannot be read at all.
-* **pending_review** - no hard reason, but something is missing: no annotation, an unsealed or invalid one,
-  permission or language left blank, a page map that does not add up.
+* **excluded** - a hard reason exists: a byte-identical or registered-variant copy of a document already
+  used, a purpose in the PR103 inventory (training render, development scan, fixture, derivative), a
+  permission refused, a document that is not an invoice a business issued, or a file that cannot be read.
+* **pending_review** - no hard reason, but something is missing or unproven: no annotation, an unsealed or
+  invalid one, permission or language left blank, a page map that does not add up, a visual resemblance
+  nobody confirmed, or a document authority that could not be verified. Reported to the owner as
+  `MANUAL_REVIEW_REQUIRED`; it never admits a document on its own.
 
 Two rules the brief states and this module enforces:
 
@@ -43,6 +45,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "scripts"), str(ROOT / 
 
 import pr106_harness as P  # noqa: E402
 import pr109_intake as I  # noqa: E402
+import pr110_authority as A  # noqa: E402
 import pr110_harness as K  # noqa: E402
 
 ARTIFACT_DIR = K.ARTIFACT_DIR
@@ -116,10 +119,12 @@ def _check(name: str, status: str, detail: str, blocking: str | None = None) -> 
     return {"check": name, "status": status, "detail": detail, "blocks": blocking}
 
 
-def screen_file(path: Path, record: dict, population: list[dict], siblings: dict[str, dict]) -> dict:
-    """Everything the bytes alone establish: readability, hash, duplicates and prior use."""
+def screen_file(path: Path, record: dict, population: list[dict], siblings: dict[str, dict],
+                authority: dict | None = None) -> dict:
+    """Everything the bytes alone establish: readability, identity, duplicates and prior use."""
     signature = I.perceptual(path)
     checks = []
+    authority = authority if authority is not None else A.load()
 
     if path.suffix.lower() not in I.DOCUMENT_SUFFIXES:
         checks.append(_check("format_readable", "finding",
@@ -139,7 +144,20 @@ def screen_file(path: Path, record: dict, population: list[dict], siblings: dict
 
     checks.append(_check("sha256_recorded", "pass", signature["sha256"]))
 
+    if not authority.get("available"):
+        checks.append(_check("document_authority", "unanswered", authority.get("reason")
+                             or "no document authority is available", "pending"))
+    elif not authority.get("complete"):
+        checks.append(_check("document_authority", "unanswered", authority.get("reason")
+                             or "the document authority could not be verified against the disk", "pending"))
+    else:
+        checks.append(_check("document_authority", "pass",
+                             f"{len(authority.get('documents') or [])} document(s), "
+                             f"{authority.get('usable_variants')} of {authority.get('declared_variants')} "
+                             "registered variant(s) verified on disk"))
+
     known = record["by_sha"].get(signature["sha256"])
+    registered = A.exact_matches(signature["sha256"], authority)
     duplicates = []
     if known:
         duplicates.append({"path": known["path"], "purpose": known["purpose"],
@@ -150,11 +168,43 @@ def screen_file(path: Path, record: dict, population: list[dict], siblings: dict
     if signature["sha256"] in record["used_hashes"]:
         duplicates.append({"path": known["path"] if known else "?", "purpose": known["purpose"] if known else "?",
                            "basis": "the PR103 inventory classifies this hash as already used"})
+    for hit in registered:
+        duplicates.append({"path": hit["path"], "purpose": f"a variant of {hit['document']}",
+                           "basis": "byte-identical to a variant the campaign recorded, "
+                                    f"role {hit['role']}"})
     if duplicates:
         checks.append(_check("exact_duplicate", "finding",
                              "; ".join(f"{d['path']} ({d['purpose']})" for d in duplicates), "exclude"))
     else:
-        checks.append(_check("exact_duplicate", "pass", "no byte-identical file in the PR103 inventory"))
+        checks.append(_check("exact_duplicate", "pass",
+                             "no byte-identical file in the PR103 inventory or the document authority"))
+
+    matches = (A.variant_matches(path, signature, authority)
+               if signature.get("ahash") is not None else {"matches": [], "considered": 0})
+    strong = [entry for entry in matches["matches"] if entry["strong"]]
+    ambiguous = [entry for entry in matches["matches"] if entry["ambiguous"]]
+    if strong:
+        best = strong[0]
+        recorded = ", ".join(f"{key}={best.get(key)!r}" for key in
+                             ("category", "source_type", "genuine_business_invoice", "document_type")
+                             if best.get(key) is not None)
+        checks.append(_check(
+            "registered_variant", "finding",
+            f"the page is a registered variant of {best['document']} ({best['role']}): "
+            f"{best['inliers']} of {best['good']} matched features agree on one homography, scale "
+            f"{best['scale']}; the campaign recorded {recorded or 'no further metadata'}",
+            "exclude"))
+    elif ambiguous:
+        best = ambiguous[0]
+        checks.append(_check(
+            "registered_variant", "unanswered",
+            f"geometric correspondence with {best['document']} ({best['role']}) is inconclusive: "
+            f"{best['inliers']} of {best['good']} features agree, which a different document of the same "
+            "template can also reach; the owner must confirm whether this is that document",
+            "pending"))
+    else:
+        checks.append(_check("registered_variant", "pass",
+                             f"no registered variant corresponds ({matches['considered']} compared)"))
 
     near = []
     for entry in population:
@@ -164,9 +214,14 @@ def screen_file(path: Path, record: dict, population: list[dict], siblings: dict
         if best <= I.PERCEPTUAL_MAX_DISTANCE:
             near.append({"path": entry["path"], "distance": best})
     if near:
-        checks.append(_check("visually_similar_duplicate", "finding",
-                             f"within {I.PERCEPTUAL_MAX_DISTANCE} bits of "
-                             + ", ".join(f"{n['path']} ({n['distance']})" for n in near[:5]), "exclude"))
+        checks.append(_check(
+            "visually_similar_duplicate", "finding",
+            f"resemblance only, not identity: within {I.PERCEPTUAL_MAX_DISTANCE} bits of "
+            + ", ".join(f"{n['path']} ({n['distance']})" for n in near[:5])
+            + ("; the registered-variant check confirmed no such document" if not strong and not ambiguous
+               else "; a registered variant was matched, see registered_variant" if strong
+               else "; a related document was matched inconclusively"),
+            "pending"))
     else:
         checks.append(_check("visually_similar_duplicate", "pass",
                              f"nothing in the signed population within {I.PERCEPTUAL_MAX_DISTANCE} bits"))
@@ -186,7 +241,8 @@ def screen_file(path: Path, record: dict, population: list[dict], siblings: dict
         checks.append(_check("previous_use", "pass",
                              "this hash appears in no PR103 inventory entry, so no recorded training, "
                              "development, regression or evaluation use"))
-    return {"signature": signature, "checks": checks, "pages": page_signatures(path)}
+    return {"signature": signature, "checks": checks, "pages": page_signatures(path),
+            "variant_matches": matches["matches"], "variants_compared": matches["considered"]}
 
 
 def screen_annotation(annotation: dict | None, problems: list[str], seal: dict,
@@ -288,14 +344,23 @@ def decide(checks: list[dict]) -> dict:
     excluded = [check["check"] for check in checks if check["blocks"] == "exclude"]
     pending = [check["check"] for check in checks if check["blocks"] == "pending"]
     status = EXCLUDED if excluded else PENDING_REVIEW if pending else ELIGIBLE
-    return {"status": status, "hard_reasons": excluded, "open_questions": pending}
+    return {"status": status, "hard_reasons": excluded, "open_questions": pending,
+            "review_label": "MANUAL_REVIEW_REQUIRED" if status == PENDING_REVIEW else None}
 
 
 def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFERENCE_DIR,
-                *, geometry: bool = True, inventory: Path = I.PR103_INVENTORY) -> dict:
-    """Screen every document in the intake, paired with its annotation, and classify it."""
+                *, geometry: bool = True, inventory: Path = I.PR103_INVENTORY,
+                authority: dict | None = None,
+                registry: Path | None = None) -> dict:
+    """Screen every document in the intake, paired with its annotation, and classify it.
+
+    `registry` stays unset by default so the authority is resolved the way PR167 defined it: an explicit file,
+    then `$PR110_DOCUMENT_AUTHORITY`, then the local private registry. The demonstration registry is never
+    reached by that chain, and loading it would hold every document rather than admit any.
+    """
     record = pr103_record(inventory)
     population = I.signed_population()
+    authority = authority if authority is not None else A.load(registry)
     files = K.invoice_files(invoice_dir)
     siblings: dict[str, Path] = {}
     for path in files:
@@ -308,7 +373,7 @@ def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFER
 
     documents = []
     for path in files:
-        signature_block = screen_file(path, record, population, siblings)
+        signature_block = screen_file(path, record, population, siblings, authority)
         annotation_record = by_image.get(path.resolve())
         signature = signature_block["signature"]
         annotation = (annotation_record or {}).get("annotation")
@@ -324,6 +389,8 @@ def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFER
             "id": (annotation or {}).get("document", {}).get("id"),
             **decide(checks),
             "checks": checks,
+            "registered_identity": (signature_block["variant_matches"] or [None])[0],
+            "variants_compared": signature_block["variants_compared"],
             "pages": signature_block["pages"],
             "layout": screen_layout(path, annotation, signature_block["signature"]) if geometry else
                       {"computed": False, "note": "skipped by --no-geometry"},
@@ -347,7 +414,28 @@ def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFER
                                        "decision is composed here from its primitives",
             "prior_use_authority": f"{record['manifest']} ({record['manifest_file']}): "
                                    f"{record['files']} files classified, verdict {record['verdict']}",
+            "document_authority": f"{len(authority.get('documents') or [])} document(s) and "
+                                  f"{authority.get('usable_variants')}/{authority.get('declared_variants')} "
+                                  "registered variant(s) verified on disk; a global-hash resemblance is "
+                                  "reported for manual review, only a registered variant excludes",
             "population_signatures": len(population),
+        },
+        "document_authority": {
+            "available": authority.get("available"),
+            "complete": authority.get("complete"),
+            "version": authority.get("version"),
+            "scope": authority.get("scope"),
+            "registry": authority.get("path") and K.display(Path(authority["path"])),
+            "documents": len(authority.get("documents") or []),
+            "declared_variants": authority.get("declared_variants"),
+            "usable_variants": authority.get("usable_variants"),
+            "sources_verified": authority.get("sources_verified"),
+            "sources_declared": authority.get("sources_declared"),
+            "sources_unverifiable": [entry["path"] for entry in authority.get("sources_unverifiable") or []],
+            "missing": [entry["path"] for entry in authority.get("missing") or []],
+            "drift": [entry["path"] for entry in authority.get("drift") or []],
+            "undeclared": list(authority.get("undeclared") or []),
+            "reason": authority.get("reason"),
         },
         "references_without_a_document": [
             {"file": reference.get("file"), "id": reference.get("id"), "problems": reference["problems"]}
@@ -362,9 +450,27 @@ def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFER
                                                  "dominated by whitespace: a blank synthetic test image sits "
                                                  "7 bits from app/examples/modele-vierge.png, a blank template, "
                                                  "so a very low-ink document can be flagged as similar to an "
-                                                 "unrelated one. The distance is reported with the file it "
-                                                 "matched, so the owner can look and decide; the screen never "
-                                                 "clears a document, only questions it.",
+                                                 "unrelated one. Since PR164 that resemblance holds the "
+                                                 "document for manual review instead of excluding it, and the "
+                                                 "registered-variant check decides identity.",
+            "resemblance_is_not_identity": "PR163 measured two different documents inside the 10-bit radius "
+                                           "of an unrelated one (a UK template against a US scan, a pro forma "
+                                           "against another US scan). The 10-bit finding now blocks automatic "
+                                           "admission without asserting a duplicate; only an exact hash or a "
+                                           "single homography a majority of one page's keypoints agree on "
+                                           "excludes as previous use.",
+            "variant_recognition_needs_the_registered_files": "a re-rendered copy is recognised by geometry "
+                                                             "against a registered variant. When a registered "
+                                                             "variant is absent or has changed, the screen "
+                                                             "reports it and holds every document for review "
+                                                             "rather than assuming the missing file resembles "
+                                                             "nothing",
+            "geometry_is_not_text": "identity is decided from the page's geometry, never from its words: "
+                                    "PR164 makes no OCR call. Two invoices issued from one template share their "
+                                    "furniture, so a correspondence below the conclusive fraction is reported "
+                                    "for manual review rather than excluded - and a used document re-rendered "
+                                    "beyond recognition could still pass, which is why the similarity finding "
+                                    "is kept alongside",
             "permission_rule_lives_in_the_validator": "PR103's published validator refuses to seal a reference "
                                                      "whose permission is not true, so a refused document "
                                                      "reaches this screen unsealed; the explicit exclude branch "
@@ -375,9 +481,17 @@ def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFER
                                                         "(640 files), so `previous_use` cannot see a file added "
                                                         "to the repository after that freeze - PR129 measured 6 "
                                                         "such files, all derived debug crops under results/. The "
-                                                        "byte and perceptual screens still apply; screening with "
-                                                        "--inventory <a rebuilt manifest> narrows the window to "
-                                                        "the interval since the last inventory run.",
+                                                        "document authority covers the campaign's own corpora by "
+                                                        "identity; screening with --inventory <a rebuilt "
+                                                        "manifest> narrows the remaining window.",
+            "document_authority_is_local_by_design": "PR167 moved the real registry out of the repository: it "
+                                                     "names private documents and where they are kept, so it is "
+                                                     "read from $PR110_DOCUMENT_AUTHORITY or the gitignored "
+                                                     "benchmark_prep/document-authority.private.json. A clone "
+                                                     "without it finds no authority, which holds every document "
+                                                     "for review rather than admitting it as independent, and the "
+                                                     "tracked demo registry is declared scope 'demo' so loading it "
+                                                     "by hand cannot admit anything either.",
         },
     }
 
@@ -414,12 +528,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="skip production's ruled-region detector (it reads pixels, never text)")
     parser.add_argument("--inventory", type=Path, default=I.PR103_INVENTORY,
                         help="a PR103-format manifest of past use; defaults to the frozen PR103 artefact")
+    parser.add_argument("--registry", type=Path, default=None,
+                        help="the document authority written by scripts/pr110_authority.py; defaults to "
+                             f"${A.REGISTRY_ENV} or {A._display(A.REGISTRY_PATH)}")
     parser.add_argument("--self-test", action="store_true",
                         help="also re-run PR109's synthetic duplicate proof and record the result")
     args = parser.parse_args(argv)
 
     report = eligibility(args.invoices, args.references, geometry=not args.no_geometry,
-                         inventory=args.inventory)
+                         inventory=args.inventory, registry=args.registry)
     if args.self_test:
         report["self_test"] = detector_proof(detector_samples())
 

@@ -8,6 +8,10 @@ calls it. What this module adds is only the glue the campaign keeps needing:
 * it reads the **freeze** PR110's readiness gate wrote and refuses to run against anything else, so a
   reference edited after sealing, a document swapped on disk, or a production source that changed since the
   freeze all stop the run rather than silently producing a different number;
+* PR167: it re-runs the eligibility screen and the composition gate on the bytes that are there now, because a
+  freeze certifies *which twelve invoices* were admitted, not only that twelve references still seal. A
+  document added to or withdrawn from the intake, or a quota slot relabelled to another region after the
+  freeze, selects a different cohort and is refused before a single pipeline call;
 * it turns a version-2 reference into the evaluator's plain shape through `pr110_harness.project()`, which is
   what keeps `absent`, `illegible` and `ambiguous` out of the denominators instead of scoring them as errors;
 * it reports per document and in aggregate, and never writes extracted or printed text into its own output:
@@ -32,7 +36,9 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "scripts"), str(ROOT / 
 import evaluation_metrics as M  # noqa: E402
 import pr106_harness as P  # noqa: E402
 import pr109_intake as I  # noqa: E402
+import pr110_eligibility as E  # noqa: E402
 import pr110_harness as K  # noqa: E402
+import pr110_ready as R  # noqa: E402
 
 ARTIFACT_DIR = K.ARTIFACT_DIR
 DEFAULT_FREEZE = ARTIFACT_DIR / "pr110-phase5-cohort-freeze.json"
@@ -48,7 +54,8 @@ def verify_freeze(freeze: dict, invoice_dir: Path, reference_dir: Path) -> dict:
                         "numbers the frozen cohort was prepared to measure")
 
     on_disk = {I.sha256_file(path): path for path in K.invoice_files(invoice_dir)}
-    references = {reference.get("id"): reference for reference in K.cohort(reference_dir, invoice_dir)}
+    records = K.cohort(reference_dir, invoice_dir)
+    references = {record.get("id"): record for record in records}
     documents = []
     for entry in freeze.get("documents") or []:
         document = {"id": entry.get("id"), "problems": []}
@@ -67,14 +74,64 @@ def verify_freeze(freeze: dict, invoice_dir: Path, reference_dir: Path) -> dict:
             frozen = (record["annotation"].get("freeze") or {})
             if frozen.get("reference_sha256") != entry.get("reference_sha256"):
                 document["problems"].append("freeze.digest on disk differs from the cohort freeze")
+            if K.region_of(record) != entry.get("region"):
+                document["problems"].append(f"declares region {K.region_of(record)!r} where the freeze "
+                                            f"certified {entry.get('region')!r}: a quota slot cannot be "
+                                            "relabelled to another country after the cohort is frozen")
             document["annotation"] = record["annotation"]
             document["image"] = image
         documents.append(document)
         problems += [f"{entry.get('id')}: {problem}" for problem in document["problems"]]
 
-    recomputed = K.digest([document["annotation"]["freeze"]["reference_sha256"] for document in documents
-                           if document.get("annotation")])
-    if recomputed != freeze.get("cohort_sha256"):
+    # PR167 Phase 4: a freeze certifies a composition, not only twelve references that still seal. The screen
+    # that admitted these documents and the gate that selected them are re-run against the bytes on disk, so an
+    # invoice added to or withdrawn from the intake, and a slot moved to another country, select a different
+    # cohort and stop the run instead of quietly measuring something else. The gate's geometric pair band is
+    # not re-measured here: the drift it alone would catch - one frozen page replaced by a re-rendering of
+    # another - changes that document's digest, which the per-document checks above already refuse, and an
+    # evaluation must not ask the owner a question the freeze already put to them.
+    screen = E.eligibility(invoice_dir, reference_dir, geometry=False)
+    authority = screen["document_authority"]
+    if not authority["available"] or not authority["complete"]:
+        # The two states the screen itself refuses on - no registry, and a registry that says nothing, the
+        # demonstration file among them - are the same finding here: this run cannot show these documents to be
+        # new to the campaign, so it must not present an evaluation as if it had.
+        problems.append(f"the document authority this cohort was certified against is not usable here "
+                        f"({authority['reason']}); without it nothing can be shown to be an independent "
+                        "document, and the silence of a clone that never received the registry, or of a "
+                        "registry that records nothing, is not permission to run")
+    else:
+        admitted = {str(Path(document["path"]).resolve()) for document in screen["documents"]
+                    if document["status"] == E.ELIGIBLE}
+        # One candidate per document, the same intersection `readiness()` selected from: two references can
+        # pair with one image, and the second is not a second invoice.
+        candidates, paired_once = [], set()
+        for record in records:
+            path = str(Path(record["image"]).resolve()) if record.get("image") is not None else None
+            if record["eligible"] and path in admitted and path not in paired_once:
+                paired_once.add(path)
+                candidates.append(record)
+        live = R.coverage_gate(K.select_cohort(candidates), geometry=False)
+        certified = freeze.get("selection") or {}
+        if not certified:
+            problems.append("this freeze records no selection, so it cannot be shown to have held the "
+                            "composition the protocol requires: run the readiness gate again and freeze again")
+        else:
+            frozen_ids = certified.get("selected_ids") or []
+            withdrawn = [document_id for document_id in frozen_ids if document_id not in live["selected_ids"]]
+            taken = [document_id for document_id in live["selected_ids"] if document_id not in frozen_ids]
+            if live["selection_sha256"] != certified.get("selection_sha256"):
+                problems.append("these bytes no longer select the frozen cohort: frozen "
+                                f"{certified.get('report')} as {certified.get('selection_sha256')}, now "
+                                f"{live['report']} as {live['selection_sha256']}"
+                                + (f"; withdrawn: {', '.join(withdrawn)}" if withdrawn else "")
+                                + (f"; newly selected: {', '.join(taken)}" if taken else ""))
+            problems += [f"the composition gate no longer passes on these bytes: {finding}"
+                         for finding in live["findings"]]
+
+    recomputed_digest = K.digest([document["annotation"]["freeze"]["reference_sha256"] for document in documents
+                                  if document.get("annotation")])
+    if recomputed_digest != freeze.get("cohort_sha256"):
         problems.append("the cohort digest does not recompute from the sealed references on disk")
     return {"ok": not problems, "problems": problems, "documents": documents,
             "production_sources_now": {"count": len(now), "sha256": K.digest(now)}}
