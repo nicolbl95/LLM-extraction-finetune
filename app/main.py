@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from collections import deque
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import unquote
 
 import spaces
 import gradio as gr
@@ -150,10 +152,11 @@ FEW_SHOT_RESULT = {
 def free_upload_enabled() -> bool:
     """Whether a visitor may have a document they brought processed.
 
-    A Space exposes every file this app created from one shared, unauthenticated folder for as long
-    as it stays cached, so an uploaded invoice remains fetchable by other visitors. Until that
-    isolation exists, a hosted deployment processes only the bundled synthetic examples; local
-    development keeps free upload.
+    A Space exposes every file this app created from one shared folder, so opening upload also means
+    running `VisitorFileIsolation`: it binds each file to the visitor it was shown to. Both halves
+    are opened by the same lever and neither works without the other, because the staging guard
+    stays closed unless the isolation middleware has stamped the request. Local development keeps
+    free upload; a hosted deployment stays on its three bundled examples until the operator opts in.
     """
     override = os.environ.get("INVOICE_FREE_UPLOAD", "").strip().casefold()
     if override in {"0", "false", "no", "off"}:
@@ -239,7 +242,7 @@ class SyntheticUploadStagingGuard:
     public URL for the cache lifetime. This middleware is the missing pre-write half of the same
     rule and covers clients that post to the staging route directly. It also closes the one other
     multipart writer this app never uses, `DEAD_MULTIPART_ROUTES`. Local development keeps free
-    upload: the guard is inert while `free_upload_enabled()`.
+    upload: the guard is inert while `upload_staging_allowed()`.
     """
 
     def __init__(self, app) -> None:
@@ -251,7 +254,7 @@ class SyntheticUploadStagingGuard:
         if root_path and path.startswith(root_path):
             path = path[len(root_path):]
         path = path.rstrip("/")
-        if (scope["type"] != "http" or scope["method"] != "POST" or free_upload_enabled()):
+        if scope["type"] != "http" or scope["method"] != "POST" or upload_staging_allowed(scope):
             await self.app(scope, receive, send)
             return
         if path in DEAD_MULTIPART_ROUTES:
@@ -295,6 +298,435 @@ class SyntheticUploadStagingGuard:
             return await receive()
 
         await self.app(scope, replay, send)
+
+
+# --- Isolation between visitors ---------------------------------------------------------------
+# Gradio authorises a file read by directory: `route_utils.file_fetch` accepts any path under the
+# upload folder or the examples cache and never asks which visitor put it there. PR171 measured the
+# consequence — one visitor's invoice stayed fetchable by another for the whole cache lifetime, and
+# the preview image derived from it was not even among the files the sweep reads. So opening upload
+# also means running `VisitorFileIsolation`, and the two are one lever: see `upload_staging_allowed`.
+SESSION_COOKIE = "invoice_sid"
+SESSION_SCOPE_KEY = "invoice_visitor_session"
+SESSION_ISOLATION_ERROR = "Ce fichier n'est pas accessible depuis votre session."
+TOO_LARGE_ERROR = "Le fichier dépasse 20 Mo."
+API_PATH_PREFIX = "/gradio_api"
+FILE_READ_ROUTES = ("/file=", "/file/")
+DISCLOSURE_ROUTES = ("/upload", "/call/", "/run/", "/queue/data", "/predict")
+MAX_SESSIONS = 512
+MAX_PATHS_PER_SESSION = 64
+SESSION_RETENTION_SECONDS = 900.0
+MAX_TEEED_BYTES = 4 * 1024 * 1024
+_SESSION_TOKEN = re.compile(r"\A[A-Za-z0-9_-]{16,128}\Z")
+_PROTOCOL = re.compile(r"\A[a-zA-Z][a-zA-Z0-9+.-]*://")
+_SYNTHETIC_CACHE_DIRS: dict[str, frozenset[str]] = {}
+
+
+def upload_staging_allowed(scope: dict) -> bool:
+    """Whether a document a visitor brought may be written to disk at all.
+
+    `INVOICE_FREE_UPLOAD` is the operator's lever, but the files it lets in are safe from other
+    visitors only because `VisitorFileIsolation` has bound them to a session. The stamp it puts on
+    the scope is the proof of that, so a build that drops the middleware keeps the staging guard
+    closed instead of quietly storing invoices every other visitor can read.
+    """
+    return free_upload_enabled() and SESSION_SCOPE_KEY in scope
+
+
+def _lowered_headers(items) -> dict[str, str]:
+    return {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in items}
+
+
+def _headers(scope) -> dict[str, str]:
+    return _lowered_headers(scope.get("headers", []))
+
+
+def _route(scope) -> str:
+    """The request path as Gradio's own routing table sees it: no root path, no API prefix."""
+    path = scope.get("path", "") or "/"
+    root_path = scope.get("root_path") or ""
+    if root_path and path.startswith(root_path):
+        path = path[len(root_path):]
+    if path.startswith(API_PATH_PREFIX):
+        path = path[len(API_PATH_PREFIX):]
+    return path or "/"
+
+
+def _canonical(text: str) -> str | None:
+    """The path a request or a response means, spelled the way this filesystem spells it.
+
+    `os.path.abspath` is what `file_fetch` itself calls, and `normcase` keeps Windows spellings
+    comparable. Symlinks are deliberately not resolved: a path that escapes a served directory
+    through one stays inside for this rule, and so still needs an owner.
+    """
+    if "\x00" in text or _PROTOCOL.match(text):
+        return None
+    try:
+        return os.path.normcase(os.path.abspath(text))
+    except (OSError, ValueError):
+        return None
+
+
+def _served_roots() -> tuple[str, ...]:
+    """The two directories Gradio serves files from — the only ones this rule governs."""
+    return tuple(
+        os.path.normcase(os.path.abspath(folder()))
+        for folder in (gr.utils.get_upload_folder, gr.utils.get_cache_folder)
+    )
+
+
+def _inside(path: str, roots: tuple[str, ...]) -> bool:
+    return any(path == root or path.startswith(root + os.sep) for root in roots)
+
+
+def _file_arguments(text: str) -> list[str]:
+    """The path behind each `.../file=<path>` in a string, as written and as unescaped."""
+    found: list[str] = []
+    for marker in FILE_READ_ROUTES:
+        index = text.find(marker)
+        while index != -1:
+            tail = text[index + len(marker):].split("?", 1)[0].split("#", 1)[0]
+            for candidate in (tail, unquote(tail), unquote(unquote(tail))):
+                if candidate not in found:
+                    found.append(candidate)
+            index = text.find(marker, index + 1)
+    return found
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _strings(item)
+
+
+def _paths_in(value) -> list[str]:
+    """Every path a decoded payload names, in either spelling a component could use.
+
+    A response shows a visitor a file as the absolute path the handler wrote or as the URL the
+    widget renders; both name the same file, so both claim the same owner.
+    """
+    found: list[str] = []
+    for text in _strings(value):
+        for candidate in (text, *_file_arguments(text)):
+            path = _canonical(candidate)
+            if path is not None and path not in found:
+                found.append(path)
+    return found
+
+
+def _payloads(body: bytes, content_type: str) -> list:
+    """The JSON documents a response body carries, including one per server-sent event."""
+    text = body.decode("utf-8", errors="replace")
+    if "text/event-stream" not in content_type:
+        try:
+            return [json.loads(text)]
+        except json.JSONDecodeError:
+            return []
+    payloads = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            payloads.append(json.loads(line[5:].strip()))
+        except json.JSONDecodeError:
+            continue  # `data: COMPLETE` and friends carry no payload to read
+    return payloads
+
+
+def _discloses(route: str) -> bool:
+    """Whether a response on this route can name a file the visitor will be asked to read."""
+    return route.startswith(DISCLOSURE_ROUTES)
+
+
+def _synthetic_cache_dirs() -> frozenset[str]:
+    """Where Gradio keeps its copy of a bundled example, which the sweep must leave alone."""
+    root = os.path.normcase(os.path.abspath(gr.utils.get_upload_folder()))
+    if root not in _SYNTHETIC_CACHE_DIRS:
+        _SYNTHETIC_CACHE_DIRS[root] = frozenset(
+            os.path.join(root, processing_utils.hash_file(path))
+            for _, path in EXAMPLES if path.is_file()
+        )
+    return _SYNTHETIC_CACHE_DIRS[root]
+
+
+def _bundled_example(path: str) -> bool:
+    """Whether this is one of the invoices the demo ships with, which every visitor may read.
+
+    An example lives in the same folder as a visitor's upload, so the ownership rule would refuse a
+    visitor the very document the interface offered them. Those files are this app's own content and
+    not someone's invoice, so they need no holder — and nothing a visitor brings can land in one of
+    these directories, because its name is the digest of a shipped example.
+    """
+    return os.path.dirname(path) in _synthetic_cache_dirs()
+
+
+def _set_cookie(session_id: str, scope) -> bytes:
+    """The header that gives a visitor their id: never in a URL, never in a response body.
+
+    `Secure` follows the scheme the proxy told us about, because a cookie that could be sent in clear
+    text would hand the id — and with it every file it holds — to whoever watches the connection.
+    """
+    attributes = [f"{SESSION_COOKIE}={session_id}", "Path=/", "HttpOnly", "SameSite=Lax"]
+    forwarded = _headers(scope).get("x-forwarded-proto", "").split(",")[0].strip()
+    if scope.get("scheme") == "https" or forwarded == "https":
+        attributes.append("Secure")
+    return "; ".join(attributes).encode("latin-1")
+
+
+def _setting_cookie(send, cookie: bytes):
+    async def wrapped(message):
+        if message["type"] == "http.response.start":
+            message = {**message,
+                       "headers": list(message.get("headers", [])) + [(b"set-cookie", cookie)]}
+        await send(message)
+
+    return wrapped
+
+
+class _VisitorFiles:
+    """Which visitors each served file has been shown to, and when each was last seen.
+
+    A path holds several ids when two visitors bring byte-identical documents: Gradio stages them in
+    the one directory its content hash names, so they are the same file and sharing it discards
+    nothing. A path with no holder here is refused, which is why ownership, not the difficulty of
+    guessing a name, is what authorises a read. The bounds keep a crowd of browsers from growing
+    the book without end, and dropping the least recently active visitor only ever takes away its
+    own reading.
+    """
+
+    def __init__(self) -> None:
+        self._holders: dict[str, set[str]] = {}
+        self._shown: dict[str, list[str]] = {}
+        self._seen: dict[str, float] = {}
+
+    def allowed(self, path: str, session_id: str) -> bool:
+        return session_id in self._holders.get(path, ())
+
+    def visit(self, session_id: str) -> None:
+        now = time.monotonic()
+        self._expire(now)
+        self._seen[session_id] = now
+
+    def show(self, session_id: str, paths: list[str]) -> None:
+        shown = self._shown.pop(session_id, [])
+        for path in paths:
+            self._holders.setdefault(path, set()).add(session_id)
+            if path not in shown:
+                shown.append(path)
+                while len(shown) > MAX_PATHS_PER_SESSION:
+                    self._release(shown.pop(0), session_id)
+        self._shown[session_id] = shown
+        while len(self._shown) > MAX_SESSIONS:
+            self._forget(next(iter(self._shown)))
+
+    def _release(self, path: str, session_id: str) -> None:
+        holders = self._holders.get(path)
+        if holders is None:
+            return
+        holders.discard(session_id)
+        if not holders:
+            del self._holders[path]
+
+    def _forget(self, session_id: str) -> None:
+        for path in self._shown.pop(session_id, []):
+            self._release(path, session_id)
+        self._seen.pop(session_id, None)
+
+    def _expire(self, now: float) -> None:
+        for session_id in [session for session, seen in self._seen.items()
+                           if now - seen > SESSION_RETENTION_SECONDS]:
+            self._forget(session_id)
+
+
+class VisitorFileIsolation:
+    """Bind every file this app creates to the visitor it was created for.
+
+    Each browser is given an unguessable HttpOnly cookie; the served files a response shows that
+    cookie are recorded as its own; a `/file=` read, or an API call whose body claims a path, is
+    refused unless this visitor holds it. The two are the same rule seen from either side of a
+    request, so a client that bypasses the interface entirely meets it too. Three properties are
+    what make it deployable: it only ever governs the two directories Gradio serves, so it can
+    refuse more files and never fewer; a path with no recorded holder is refused, so no read rests
+    on a file name being hard to guess; and the session id is carried only in a cookie, never in a URL,
+    a log line or a JSON answer. Inert while upload is closed, because then nothing is staged.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self._files = _VisitorFiles()
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if not free_upload_enabled():
+            await self.app(scope, receive, send)
+            return
+        session_id, cookie = self._session(scope)
+        if cookie is not None:
+            send = _setting_cookie(send, cookie)
+        self._files.visit(session_id)
+        scope[SESSION_SCOPE_KEY] = session_id
+        route = _route(scope)
+        roots = _served_roots()
+        if route.startswith(FILE_READ_ROUTES):
+            denial = self._read_denial(scope, roots, session_id)
+            if denial is not None:
+                await _staging_refusal(403, denial, send)
+                return
+        else:
+            body, refusal = await _buffered_json(scope, receive)
+            if refusal is not None:
+                await _staging_refusal(refusal[0], refusal[1], send)
+                return
+            if body is not None:
+                denial = self._claim_denial(body, roots, session_id)
+                if denial is not None:
+                    await _staging_refusal(403, denial, send)
+                    return
+                receive = _replay(body, receive)
+        if _discloses(route):
+            send = self._attributing(send, scope, session_id, roots)
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _session(scope) -> tuple[str, bytes | None]:
+        """This visitor's id, and the header that gives them one when they arrive without it.
+
+        Gradio's `session_hash` is chosen by the browser and repeated in request bodies, so it names
+        a session without proving one; only a value this server minted cannot be claimed by someone
+        else.
+        """
+        for piece in _headers(scope).get("cookie", "").split(";"):
+            name, _, value = piece.strip().partition("=")
+            if name == SESSION_COOKIE and _SESSION_TOKEN.match(value.strip()):
+                return value.strip(), None
+        session_id = secrets.token_urlsafe(32)
+        return session_id, _set_cookie(session_id, scope)
+
+    def _read_denial(self, scope, roots: tuple[str, ...], session_id: str) -> str | None:
+        """Refuse a `/gradio_api/file=` read of a file this visitor was never shown.
+
+        Gradio answers every request its own `is_allowed_file` accepts, whichever visitor asked, and
+        the two directories it serves are one shared folder: the answer is the whole document.
+        """
+        for path in _claimed_paths(scope, roots):
+            if _bundled_example(path) or self._files.allowed(path, session_id):
+                continue
+            return SESSION_ISOLATION_ERROR
+        return None
+
+    def _claim_denial(self, body: bytes, roots: tuple[str, ...], session_id: str) -> str | None:
+        """Refuse a call that asks the app to open a file the visitor was never shown.
+
+        `checked_path` reads whichever path the request names, so the extraction route is a second
+        way to be handed another visitor's invoice: the JSON answer is the document. The claim is in
+        the request body, and reading it here is what leaves the interface handlers untouched.
+        """
+        for payload in _payloads(body, "application/json"):
+            for path in _paths_in(payload):
+                if not _inside(path, roots) or _bundled_example(path):
+                    continue  # le fichier n'est pas servi, ou c'est un exemple livré avec la démo
+                if not self._files.allowed(path, session_id):
+                    return SESSION_ISOLATION_ERROR
+        return None
+
+    def _attributing(self, send, scope, session_id, roots):
+        """Record the files a response shows this visitor, then hand them to the cache sweep."""
+        state = {"status": 0, "content_type": "", "body": bytearray()}
+
+        async def wrapped(message):
+            if message["type"] == "http.response.start":
+                state["status"] = message["status"]
+                state["content_type"] = _lowered_headers(
+                    message.get("headers", [])).get("content-type", "")
+            elif message["type"] == "http.response.body":
+                if len(state["body"]) < MAX_TEEED_BYTES:
+                    state["body"] += message.get("body", b"")
+                if not message.get("more_body", False) and 200 <= state["status"] < 300:
+                    # Before the last byte reaches the client: a browser handed a path asks for the
+                    # file at once, and a refusal it cannot explain would look like a broken demo.
+                    self._record(bytes(state["body"]), state["content_type"], scope, session_id, roots)
+            await send(message)
+
+        return wrapped
+
+    def _record(self, body: bytes, content_type: str, scope, session_id, roots) -> None:
+        """Give this visitor the files a response shows them, and put them on the deletion list.
+
+        `blocks.upload_file_set` is what Gradio adds an uploaded document to and what the
+        `delete_cache=(60, 600)` sweep reads, but a preview image is written by the component and
+        never added: PR171 found one still fetchable after the sweep had run. Registering the paths
+        closes that gap. The bundled examples are excluded here and left in place, because they are
+        the demo's own content and every visitor still needs them after one visitor's sweep.
+        """
+        paths = [path for payload in _payloads(body, content_type)
+                 for path in _paths_in(payload)
+                 if _inside(path, roots) and not _bundled_example(path)]
+        if not paths:
+            return
+        self._files.show(session_id, paths)
+        created = getattr(getattr(scope.get("app"), "blocks", None), "upload_file_set", None)
+        if created is None:
+            return
+        created.update(paths)
+
+
+def _claimed_paths(scope, roots: tuple[str, ...]) -> list[str]:
+    """Every served file a `/file=` request asks for, in each reading a client could rely on.
+
+    The ASGI server has already unescaped the path once and that is what Gradio opens; a second
+    unescaping is what a request can hide behind, so both readings are named here and any one of
+    them landing inside a served directory is enough to require an owner.
+    """
+    found: list[str] = []
+    for text in (scope.get("path", ""), _decoded(scope.get("raw_path"))):
+        for claim in _file_arguments(text):
+            path = _canonical(claim)
+            if path and _inside(path, roots) and path not in found:
+                found.append(path)
+    return found
+
+
+def _decoded(raw) -> str:
+    return raw.decode("latin-1") if isinstance(raw, bytes) else (raw or "")
+
+
+async def _buffered_json(scope, receive) -> tuple[bytes | None, tuple[int, str] | None]:
+    """(body, refusal) for a JSON request body: `None, None` when it is a body this rule ignores.
+
+    Reading the body here is the only way to see a claimed path before the app opens it, and it is
+    bounded by the same 20 Mo ceiling the rest of the deployment answers with.
+    """
+    if scope["method"] != "POST" or "application/json" not in _headers(scope).get("content-type", ""):
+        return None, None
+    body = bytearray()
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return None, None
+        body += message.get("body", b"")
+        if len(body) > MAX_BYTES:
+            return None, (413, TOO_LARGE_ERROR)
+        if not message.get("more_body", False):
+            return bytes(body), None
+
+
+def _replay(body: bytes, receive):
+    """Hand the buffered request body to Gradio as the bytes it already read."""
+    pending: list[dict] = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def replay():
+        if pending:
+            return pending.pop(0)
+        return await receive()
+
+    return replay
 
 
 def checked_path(filename: str | None) -> Path:
@@ -1771,18 +2203,25 @@ def build_app(*, persistence=None) -> gr.Blocks:
 
 
 def launch_app_kwargs() -> dict:
-    """ASGI wiring for the pre-write staging refusal.
+    """ASGI wiring for the two halves of opening upload.
 
-    Kept out of the `__main__` block so a research arm mounting these very bytes installs the same
-    guard the Space runs, instead of measuring an app that is only half the deployment.
+    Isolation runs first: it stamps the request the staging guard then reads, so a document is only
+    written once a visitor's session exists to own it. Kept out of the `__main__` block so a
+    research arm mounting these very bytes installs the same guards the Space runs, instead of
+    measuring an app that is only half the deployment.
     """
     from starlette.middleware import Middleware
 
-    return {"middleware": [Middleware(SyntheticUploadStagingGuard)]}
+    return {"middleware": [Middleware(VisitorFileIsolation),
+                           Middleware(SyntheticUploadStagingGuard)]}
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    # Static file workers serve `/file=` and `/upload` from a separate process, and that process has
+    # no session book to consult: leaving the lever settable would let a container setting move the
+    # read route out of the isolation mounted above.
+    os.environ["GRADIO_NUM_WORKERS"] = "0"
     startup_prefetch()
     build_app().launch(
         server_name="0.0.0.0",

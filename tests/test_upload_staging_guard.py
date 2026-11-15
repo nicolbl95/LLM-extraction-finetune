@@ -129,9 +129,15 @@ def ask(guard, body_chunks, *, method="POST", path="/gradio_api/upload", content
     return seen.get("status"), detail
 
 
-def guarded(on_a_space):
-    backend = RecordedGradio()
-    return main.SyntheticUploadStagingGuard(backend), backend
+def guarded(on_a_space, backend=None):
+    """The guard as a Space actually runs it: behind the isolation that gives it its proof of a session.
+
+    Driving it alone is the negative test — `upload_staging_allowed()` reads the stamp
+    `VisitorFileIsolation` leaves on the scope, so a build that drops that middleware keeps upload
+    refused rather than quietly storing documents every other visitor can read.
+    """
+    backend = backend or RecordedGradio()
+    return main.VisitorFileIsolation(main.SyntheticUploadStagingGuard(backend)), backend
 
 
 def test_a_direct_post_of_a_foreign_document_never_reaches_the_writer(on_a_space):
@@ -169,7 +175,7 @@ def test_the_recording_route_is_closed_on_a_space(on_a_space):
 
 
 def test_the_recording_route_stays_usable_in_local_development(locally):
-    guard = main.SyntheticUploadStagingGuard(RecordedGradio())
+    guard, _ = guarded(locally)
     body, content_type = multipart(files=[("video", "test.webm", b"\x1a\x45\xdf\xa3 synthetic")])
     status, _ = ask(guard, [body], path="/gradio_api/process_recording", content_type=content_type)
     assert status == 200
@@ -307,10 +313,15 @@ def test_the_part_digests_are_the_ones_gradio_would_store():
 
 
 def test_the_guard_is_mounted_on_the_launched_application():
-    """A refusal that is never wired is a comment; `__main__` is what a Space runs."""
+    """A refusal that is never wired is a comment; `__main__` is what a Space runs.
+
+    Isolation is listed first because Starlette makes `user_middleware[0]` the outermost layer, and
+    the guard reads the proof of a session it leaves on the scope.
+    """
     kwargs = main.launch_app_kwargs()
     middleware = kwargs["middleware"]
-    assert [entry.cls for entry in middleware] == [main.SyntheticUploadStagingGuard]
+    assert [entry.cls for entry in middleware] == [main.VisitorFileIsolation,
+                                                   main.SyntheticUploadStagingGuard]
     source = Path(main.__file__).read_text(encoding="utf-8")
     assert "app_kwargs=launch_app_kwargs()" in source
 
