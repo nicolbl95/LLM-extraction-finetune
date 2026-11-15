@@ -260,7 +260,11 @@ def readiness(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFEREN
         "coverage": descriptive,
         "coverage_gaps": [category["category"] for category in gaps],
         "blocking_findings": (
-            ([] if screen["document_authority"]["available"] else
+            ([] if screen["prior_use_inventory"]["present"] else
+             [f"PR103's prior-use inventory is not on this machine ({screen['prior_use_inventory']['file']}), "
+              "so no document can be shown never to have been used; the screen holds every candidate for "
+              "review rather than treating an absent record as an empty one"])
+            + ([] if screen["document_authority"]["available"] else
              ["the document authority is not available: "
               + str(screen["document_authority"]["reason"])])
             + ([] if not screen["document_authority"]["available"]
@@ -290,7 +294,7 @@ def readiness(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFEREN
                    "scripts/pr110_evaluate.py refuses independently by re-checking the freeze it was given",
         "eligibility_screen": {key: screen[key] for key in
                                ("target_documents", "counts", "shortage", "screen_provenance",
-                                "document_authority", "known_limitations",
+                                "prior_use_inventory", "document_authority", "known_limitations",
                                 "references_without_a_document")},
     }
 

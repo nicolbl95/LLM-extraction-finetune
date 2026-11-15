@@ -72,7 +72,15 @@ def pr103_record(manifest_path: Path = I.PR103_INVENTORY) -> dict:
     `manifest_path` defaults to the frozen PR103 artefact. Passing a freshly rebuilt inventory narrows the
     window in which a file added after the freeze is invisible to `previous_use`; the report always names the
     manifest it consumed, so the two are never confused.
+
+    When that artefact is not on this machine the record says so instead of coming back empty: an empty
+    inventory and a missing one are opposite claims - the first records that nothing was used, the second
+    records nothing - and only the first can be read as evidence of independence.
     """
+    if not manifest_path.is_file():
+        return {"manifest": "absent", "manifest_file": manifest_path.name,
+                "verdict": "the prior-use inventory is not on this machine", "files": 0,
+                "by_sha": {}, "used_hashes": set(), "used_document_hashes": set(), "absent": True}
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     by_sha = {entry["sha256"]: entry for entry in manifest["files"]}
     used_hashes = {entry["sha256"] for entry in manifest["files"]
@@ -177,7 +185,9 @@ def screen_file(path: Path, record: dict, population: list[dict], siblings: dict
                              "; ".join(f"{d['path']} ({d['purpose']})" for d in duplicates), "exclude"))
     else:
         checks.append(_check("exact_duplicate", "pass",
-                             "no byte-identical file in the PR103 inventory or the document authority"))
+                             "no byte-identical file in the document authority or the prior-use inventory"
+                             + (", which is absent here and can match nothing; see previous_use"
+                                if record.get("absent") else "")))
 
     matches = (A.variant_matches(path, signature, authority)
                if signature.get("ahash") is not None else {"matches": [], "considered": 0})
@@ -237,6 +247,12 @@ def screen_file(path: Path, record: dict, population: list[dict], siblings: dict
         detail = f"PR103 classifies this hash as {known['purpose']}"
         blocks = "exclude" if known["purpose"].startswith(NOT_INDEPENDENT_PURPOSES_PREFIX) else None
         checks.append(_check("previous_use", "finding" if blocks else "pass", detail, blocks))
+    elif record.get("absent"):
+        checks.append(_check(
+            "previous_use", "unanswered",
+            f"PR103's prior-use inventory ({record['manifest_file']}) is not on this machine, so this hash can "
+            "be neither recognised as used nor shown never to have been; independence is not provable here",
+            "pending"))
     else:
         checks.append(_check("previous_use", "pass",
                              "this hash appears in no PR103 inventory entry, so no recorded training, "
@@ -349,7 +365,7 @@ def decide(checks: list[dict]) -> dict:
 
 
 def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFERENCE_DIR,
-                *, geometry: bool = True, inventory: Path = I.PR103_INVENTORY,
+                *, geometry: bool = True, inventory: Path | None = None,
                 authority: dict | None = None,
                 registry: Path | None = None) -> dict:
     """Screen every document in the intake, paired with its annotation, and classify it.
@@ -357,8 +373,12 @@ def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFER
     `registry` stays unset by default so the authority is resolved the way PR167 defined it: an explicit file,
     then `$PR110_DOCUMENT_AUTHORITY`, then the local private registry. The demonstration registry is never
     reached by that chain, and loading it would hold every document rather than admit any.
+
+    `inventory` is resolved at call time rather than bound as a default: PR103's published inventory is a
+    local artefact that no clone carries, and a default evaluated at import could not be redirected by a
+    test that only needs the screen's own behaviour. Unset still means PR103's freeze.
     """
-    record = pr103_record(inventory)
+    record = pr103_record(inventory if inventory is not None else I.PR103_INVENTORY)
     population = I.signed_population()
     authority = authority if authority is not None else A.load(registry)
     files = K.invoice_files(invoice_dir)
@@ -420,6 +440,8 @@ def eligibility(invoice_dir: Path = K.INVOICE_DIR, reference_dir: Path = K.REFER
                                   "reported for manual review, only a registered variant excludes",
             "population_signatures": len(population),
         },
+        "prior_use_inventory": {"present": not record.get("absent"), "file": record["manifest_file"],
+                                "entries": record["files"], "verdict": record["verdict"]},
         "document_authority": {
             "available": authority.get("available"),
             "complete": authority.get("complete"),

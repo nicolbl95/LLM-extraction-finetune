@@ -43,6 +43,7 @@ import pr110_harness as K  # noqa: E402
 import pr110_ready as R  # noqa: E402
 
 from test_pr110_benchmark_prep import filled_annotation, synthetic_image, write_freeze, write_intake  # noqa: E402
+from pr110_prior_use import install as install_prior_use  # noqa: E402
 
 # The sixteen pages this file can build, and the only seeds it uses. `distinct_page()` keeps them mutually far
 # enough for the screen; see `test_the_fixture_pages_are_far_enough_apart_for_the_screen_to_admit_them`.
@@ -68,6 +69,17 @@ def no_campaign_population(monkeypatch):
 def declared_empty_document_authority(monkeypatch):
     """Independence is settled elsewhere; here every fixture document is a new one, so admissibility is equal."""
     monkeypatch.setattr(E.A, "load", lambda *args, **kwargs: AU.empty())
+
+
+@pytest.fixture(autouse=True)
+def declared_empty_prior_use(monkeypatch, tmp_path):
+    """PR169: the same reasoning as the authority above, for the screen's other per-machine input.
+
+    `eligibility()` reads an inventory of what the campaign used before, and PR103's published one is a local
+    artefact that no clone carries. This file gates on coverage, selection and the freeze, not on that record,
+    so the fixture declares an empty one in PR103's format and every cohort stays as admissible as it was.
+    """
+    install_prior_use(monkeypatch, tmp_path)
 
 
 # --------------------------------------------------------------------------- fixtures

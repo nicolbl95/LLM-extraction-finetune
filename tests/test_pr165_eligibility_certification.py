@@ -37,12 +37,24 @@ import pr110_harness as K  # noqa: E402
 import pr110_ready as R  # noqa: E402
 
 from test_pr110_benchmark_prep import add_document, scale_protocol, write_intake  # noqa: E402
+from pr110_prior_use import install as install_prior_use  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def no_campaign_population(monkeypatch):
     """The fixtures are synthetic; the repository's own signed images must not collide with them."""
     monkeypatch.setattr(I, "signed_population", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def declared_empty_prior_use(monkeypatch, tmp_path):
+    """PR169: the screen reads an inventory of past use, and PR103's published one is not in a clone.
+
+    Nothing in this file measures that inventory - it measures the gates built on top of the screen - so the
+    fixture supplies an empty one in PR103's own format. A test that was passing before keeps passing for the
+    same reason: the documents it builds are still new to the record it now reads.
+    """
+    install_prior_use(monkeypatch, tmp_path)
 
 
 @pytest.fixture
@@ -141,6 +153,35 @@ def test_an_incomplete_authority_is_a_named_blocking_finding(tmp_path, monkeypat
         report["blocking_findings"])
 
 
+def test_an_absent_prior_use_inventory_admits_nothing_and_says_why(declared_authority, tmp_path, monkeypatch):
+    """PR169: a machine without PR103's inventory has no record of past use, which is not a record of none.
+
+    The screen read that artefact through an import-time default, so a clone that does not carry it crashed on
+    the first document instead of refusing. An absent inventory now reaches the same place as an unavailable
+    authority: `previous_use` stays unanswered, every candidate is held for review and the readiness report
+    names the missing file. The point of the test is that the absence is *reported* - an empty record read as
+    an absent one would admit the cohort, and that is the mistake PR165 exists to keep out.
+    """
+    scale_protocol(monkeypatch, 1)
+    absent = tmp_path / "pr103-dataset-manifest.json"
+    assert not absent.exists()
+    monkeypatch.setattr(I, "PR103_INVENTORY", absent)
+
+    invoices, references = write_intake(tmp_path)
+    add_document(invoices, references, "solo", 209)
+    screen = E.eligibility(invoices, references, geometry=False)
+    assert screen["prior_use_inventory"]["present"] is False
+    assert screen["counts"] == {E.ELIGIBLE: 0, E.EXCLUDED: 0, E.PENDING_REVIEW: 1}, screen["counts"]
+    checks = {check["check"]: check for check in screen["documents"][0]["checks"]}
+    assert checks["previous_use"]["status"] == "unanswered"
+    assert checks["previous_use"]["blocks"] == "pending"
+
+    report = R.readiness(invoices, references, geometry=False)
+    assert report["verdict"] == R.NOT_READY and report["freeze"] is None
+    assert any("prior-use inventory is not on this machine" in finding
+               for finding in report["blocking_findings"]), report["blocking_findings"]
+
+
 # --------------------------------------------------------------------------- the stale registry
 
 def test_an_unregistered_development_image_makes_the_registry_incomplete(tmp_path):
@@ -149,7 +190,7 @@ def test_an_unregistered_development_image_makes_the_registry_incomplete(tmp_pat
     directory.mkdir(parents=True)
     for name in ("already-registered.png", "arrived-afterwards.png"):
         (directory / name).write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
-    registry = {"built_from": [{"path": "diagnostics/holdout/manifest-four-templates.json"}],
+    registry = {"built_from": [{"path": "benchmark_prep/example-source-manifest.json"}],
                 "documents": [{"id": "one", "variants": [
                     {"path": "tests/fixtures/already-registered.png", "sha256": None,
                      "expect_present": False}]}]}
@@ -162,7 +203,7 @@ def test_a_directory_the_registry_names_nothing_from_makes_no_claim(tmp_path):
     directory = tmp_path / "real-scans"
     directory.mkdir()
     (directory / "unseen.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    registry = {"built_from": [{"path": "diagnostics/holdout/manifest-four-templates.json"}],
+    registry = {"built_from": [{"path": "benchmark_prep/example-source-manifest.json"}],
                 "documents": []}
     assert A.undeclared(registry, root=tmp_path) == []
 

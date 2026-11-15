@@ -42,6 +42,8 @@ import pr110_evaluate as G  # noqa: E402
 import pr110_harness as K  # noqa: E402
 import pr110_ready as R  # noqa: E402
 
+from pr110_prior_use import install as install_prior_use  # noqa: E402
+
 
 @pytest.fixture(autouse=True)
 def declared_empty_document_authority(monkeypatch):
@@ -52,6 +54,17 @@ def declared_empty_document_authority(monkeypatch):
     holds every document for review (tested in test_pr164_eligibility_hardening.py).
     """
     monkeypatch.setattr(E.A, "load", lambda *args, **kwargs: AU.empty())
+
+
+@pytest.fixture(autouse=True)
+def declared_empty_prior_use(monkeypatch, tmp_path):
+    """PR169: the same reasoning as above, for the other per-machine input of the screen.
+
+    PR103's inventory of past use is a local artefact no clone carries, so the screen is given an empty one
+    and a document the test has not named reads as new to the campaign. Where a test needs a file to be
+    known, it installs its own entry over this one.
+    """
+    install_prior_use(monkeypatch, tmp_path)
 
 DOCUMENT_DEFAULTS = {
     "language": "French", "region": "FR", "input_kind": "scanned_image",
@@ -455,6 +468,8 @@ def test_eligibility_separates_eligible_excluded_and_pending(tmp_path, monkeypat
         json.dumps(filled_annotation("unsealed", unsealed), ensure_ascii=False), encoding="utf-8")
 
     used = ROOT / "tests" / "fixtures" / "france-blur-light.png"
+    # the copy below is these same bytes, so the screen must report the use PR103 recorded for them
+    install_prior_use(monkeypatch, tmp_path, used=(used,))
     shutil.copyfile(used, invoices / "previously-used.png")
 
     report = E.eligibility(invoices, references, geometry=False)
@@ -603,15 +618,22 @@ def test_readiness_freezes_a_cohort_that_passes_all_three_gates(tmp_path, monkey
 
 
 def test_readiness_names_pr103_when_no_source_version_is_declared(tmp_path, monkeypatch):
-    """PR103 stays the historical baseline by default; nothing here re-freezes it."""
+    """PR103 stays the historical baseline by default; nothing here re-freezes it.
+
+    The one test of this file that reads a private artefact on purpose: it asserts the 29 sources PR103
+    hashed and the digest of its published manifest, which no clone ships.
+    """
+    published_path = ROOT / "results" / "product-review103" / "pr103-implementation-manifest.json"
+    if not published_path.is_file():
+        pytest.skip(f"needs PR103's published implementation manifest, which is gitignored and absent: "
+                    f"{published_path.relative_to(ROOT).as_posix()}")
     monkeypatch.setattr(I, "signed_population", lambda: [])
     scale_protocol(monkeypatch, 1)
     invoices, references = write_intake(tmp_path)
     add_document(invoices, references, "solo", 71)
 
     default = R.readiness(invoices, references, geometry=False)["freeze"]["production_sources"]["pr103_drift"]
-    published = json.loads((ROOT / "results/product-review103/pr103-implementation-manifest.json")
-                           .read_text(encoding="utf-8"))["source_hashes"]
+    published = json.loads(published_path.read_text(encoding="utf-8"))["source_hashes"]
     current = P.source_hashes()
     assert default["manifest"] == "results/product-review103/pr103-implementation-manifest.json"
     assert default["manifest_defaulted_to_pr103"] is True
@@ -619,8 +641,7 @@ def test_readiness_names_pr103_when_no_source_version_is_declared(tmp_path, monk
     # the drift is reported, not assumed: whichever of PR103's sources the tree now differs from are named
     assert default["drifted"] == sorted(name for name, value in published.items()
                                         if name in current and current[name]["sha256"] != value["sha256"])
-    assert default["manifest_sha256"] == hashlib.sha256(
-        (ROOT / "results/product-review103/pr103-implementation-manifest.json").read_bytes()).hexdigest()
+    assert default["manifest_sha256"] == hashlib.sha256(published_path.read_bytes()).hexdigest()
 
     declared = R.readiness(invoices, references, geometry=False,
                            source_manifest=write_source_manifest(tmp_path))["freeze"]["production_sources"]

@@ -18,17 +18,23 @@ be committed. Nothing is uploaded anywhere: the scripts never open a network con
 
 A `git clone` delivers the whole toolchain: the six `scripts/pr110_*.py` entry points and the ten research
 harnaises they import, `benchmark_prep/` (this guide, the annotation protocol, the two schemas, the two
-reference templates, `annotation_tools.py` and its tests) and the frozen PR103 source manifest that
-`pr110_ready.py` defaults to. It does **not** deliver the five inputs below, and never will — four of them are
-private data, one is a machine-level dependency.
+reference templates, `annotation_tools.py` and its tests). What it deliberately does not deliver is PR103's
+frozen dataset manifest, the prior-use inventory the eligibility screen consults: since PR169 nothing in a
+clone stops working for lack of it — the tests write their own declared-empty inventory in a temporary
+directory, and the gate answers `previous_use` as pending and names the missing file, rather than reading
+silence as cleanliness.
+It does **not** deliver the seven inputs below either, and never will: five are
+documents and sealed answers that stay on the owner's machine, one is the synthetic corpus
+`data/generate_dataset.py` regenerates anywhere, one is a machine-level dependency.
 
 | What | Where it comes from | In Git? | Needed to |
 |---|---|---|---|
 | Invoice files you collect | you copy them in | no — `benchmark_prep/invoices/` is ignored | run the intake and the gate |
 | Sealed reference JSONs | `pr110_annotate.py seal` writes them | no — `benchmark_prep/references/` is ignored | pass the annotation gate |
-| Development truth (`data/invoices/`, 600 rendered pages) | restore from the owner's machine | no — ignored since PR119 | run `pytest tests` at full strength; 3 tests deselect without it |
-| PR103's frozen prior-use inventory (`results/product-review103/pr103-dataset-manifest.json`, 640 hashes) | restore from the owner's machine — it cannot be republished | no — it names real parties, measured in PR147 | decide `previous_use`, which both the eligibility screen and `pr110_ready.py` consult; 11 of the 51 tests below |
+| Development truth (`data/invoices/`, 600 rendered pages) | `python data/generate_dataset.py` regenerates them on any machine | no — ignored since PR119 | compare the shipped examples and the persisted dataset with the pages they were rendered from; without the directory both comparisons skip by naming the pages they looked for. The 3 tests deselected in every run are the `slow`-marked real-model ones, which no data changes |
+| PR103's frozen prior-use inventory (`results/product-review103/pr103-dataset-manifest.json`, 640 hashes) | restore from the owner's machine — it cannot be republished | no — it names real parties, measured in PR147 | decide `previous_use`, which both the eligibility screen and `pr110_ready.py` consult. Since PR169 none of the 51 tests below reads it: they write a declared-empty inventory in their own temporary directory instead, and `pr110_ready.py` on a machine without the file reports `previous_use` as pending rather than as clean |
 | The document authority **and the variants it names** (`diagnostics/holdout/`, `diagnostics/anonymized/`, `real-scans/`, `real-scans-supplementary/`) | built on the owner's machine by `scripts/pr110_authority.py`, from `$PR110_DOCUMENT_AUTHORITY` or `benchmark_prep/document-authority.private.json`; the images come from the same machine | no — PR167 took the registry out of Git, and the images never were in it | decide `registered_variant`, and hold `previous_use` to what the PR103 inventory covers. Without the registry **nothing is admitted** (section 3b); without its images the registry is incomplete, which is the same refusal |
+| The four pages behind PR163's four fixed adjudications (`diagnostics/holdout/*.png`) | on the owner's machine only | no — `diagnostics/` is ignored | replay those four in `tests/test_pr164_eligibility_hardening.py`. Since PR169 the test calls them `private-fixture-01` … `private-fixture-04` and resolves the names through a local, ignored map (`diagnostics/pr169/private-fixtures.json`); a clone that has no map skips the replay and says so |
 | The demonstration registry (`benchmark_prep/document-authority.demo.json`) | comes with the clone | yes | show the format and let the tests run without private data. It declares `scope: "demo"` and admits nothing |
 | Tesseract with `fra.traineddata` | system install + `TESSDATA_PREFIX` | no — machine-level | any OCR run; without `fra` the reader degrades to English silently (PR81) |
 
@@ -50,10 +56,16 @@ Then check the toolchain before touching any invoice — `pr110_status.py` reads
 ```
 
 On a clone that has none of the private inputs above, the expected result is measured, not guessed: the three
-test modules give **40 passed, 11 failed**, every failure being
+test modules give **51 passed, 0 failed**. They used to give 40 passed and 11 failed, every one of them
 `FileNotFoundError: results/product-review103/pr103-dataset-manifest.json` — the prior-use authority the
-eligibility screen refuses to invent. Copying that one file from the owner's machine turns all 51 green; PR147
-measured 14 unqualified real-party names inside it, which is why it stays out of Git. `pr110_status.py` itself
+eligibility screen refuses to invent — and copying that file in was the only way to turn them green. PR169
+removed the dependency instead of hiding it: a test that needs an answer about prior use writes a
+declared-empty inventory in its own temporary directory, and a scenario about the refusal the other answer
+produces has the helper write that document's own digest into it, so the duplicate rejection is still
+executed rather than assumed. The real inventory stays out of Git — PR147 measured 14 unqualified real-party
+names inside it — and a machine that has it is still consulted for real: `pr110_ready.py` without it reports
+`previous_use` as pending and names the missing file among its blocking findings, which is a refusal, not a
+clean bill. `pr110_status.py` itself
 does run on an empty clone and prints `intake: 0 invoice file(s), 0 reference(s) | target 12 | shortage 12`
 with `verdict CHECK REQUIRED`. That is the tool working, not a broken install. The real gate is section 7
 (`pr110_ready.py`), and it stays BLOCKED until twelve annotated documents exist.

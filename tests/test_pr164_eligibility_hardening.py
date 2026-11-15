@@ -28,10 +28,27 @@ import pr110_authority as A  # noqa: E402
 import pr110_eligibility as E  # noqa: E402
 import pr110_harness as K  # noqa: E402
 
+from pr110_prior_use import install as install_prior_use  # noqa: E402
+
 FRANCE = ROOT / "app" / "examples" / "france.png"
 US = ROOT / "app" / "examples" / "us.png"
 BLUR_FR = ROOT / "tests" / "fixtures" / "france-blur-light.png"
 BLUR_US = ROOT / "tests" / "fixtures" / "us-blur-light.png"
+
+# PR163's four false negatives are the owner's own pages, so this file names them only by a generic id. The
+# bytes are resolved through a local map from id to path that lives under the ignored `diagnostics/` tree, so
+# a clone carries neither the pages nor the filename of a page, and the test below skips with the map named.
+PRIVATE_FIXTURE_IDS = ("private-fixture-01", "private-fixture-02", "private-fixture-03", "private-fixture-04")
+PRIVATE_FIXTURE_MAP = ROOT / "diagnostics" / "pr169" / "private-fixtures.json"
+
+
+def private_fixtures() -> dict[str, Path]:
+    """The fixture ids this machine can actually supply, mapped to the pages standing behind them."""
+    if not PRIVATE_FIXTURE_MAP.is_file():
+        return {}
+    listing = json.loads(PRIVATE_FIXTURE_MAP.read_text(encoding="utf-8"))
+    return {fixture_id: ROOT / listing[fixture_id] for fixture_id in PRIVATE_FIXTURE_IDS
+            if listing.get(fixture_id) and (ROOT / listing[fixture_id]).is_file()}
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -164,18 +181,14 @@ def test_a_re_render_of_a_registered_document_is_excluded(tmp_path, label, scale
 
 def test_the_four_pr163_false_negatives_are_recognised_as_variants(tmp_path):
     """The four documents PR163 measured as wrongly eligible, re-rendered exactly as they were supplied."""
-    cases = [
-        ("photographer", "diagnostics/holdout/new-layout/photographer-anon.png"),
-        ("image-proforma", "diagnostics/holdout/image-proforma-anon.png"),
-        ("graphic-designers", "diagnostics/holdout/graphic-designers-anon.png"),
-        ("service", "diagnostics/holdout/new-layout/service-anon.png"),
-    ]
-    missing = [path for _, path in cases if not (ROOT / path).is_file()]
-    if missing:
-        pytest.skip(f"campaign corpora not restored: {missing}")
+    held = private_fixtures()
+    if len(held) < len(PRIVATE_FIXTURE_IDS):
+        pytest.skip(f"needs the owner's four private pages, which no clone has; the local map "
+                    f"{PRIVATE_FIXTURE_MAP.relative_to(ROOT).as_posix()} (gitignored) supplies "
+                    f"{sorted(held)} of {list(PRIVATE_FIXTURE_IDS)} here")
 
-    for identity, relative in cases:
-        source = ROOT / relative
+    for identity in PRIVATE_FIXTURE_IDS:
+        source = held[identity]
         # PR163 measured these as downscaled screenshots of the original download: new bytes, same page
         variant = re_render(source, tmp_path / f"{identity}.png", scale=0.42, jpeg=True)
         authority = A.load(write_registry(tmp_path, [document(
@@ -240,6 +253,9 @@ def test_a_same_template_sibling_is_held_rather_than_excluded(tmp_path, monkeypa
 def test_a_new_document_is_not_treated_as_a_duplicate(tmp_path, monkeypatch):
     monkeypatch.setattr(E.A, "load", lambda *args, **kwargs: A.empty())
     monkeypatch.setattr(I, "signed_population", lambda: [])
+    # PR169: the screen's prior-use inventory is PR103's local artefact; this test needs it to exist and say
+    # nothing, which is the claim a fresh document is judged against, not a weakening of it.
+    install_prior_use(monkeypatch, tmp_path)
     invoices, references = tmp_path / "invoices", tmp_path / "references"
     invoices.mkdir()
     references.mkdir()
