@@ -1,22 +1,8 @@
----
-title: Extraction standardisée de données de factures
-emoji: 🧾
-colorFrom: blue
-colorTo: indigo
-sdk: gradio
-sdk_version: 6.30.0
-python_version: "3.12"
-app_file: app/main.py
-pinned: false
----
-
 # LLM-extraction-finetune
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/) [![Gradio](https://img.shields.io/badge/Gradio-6.30.0-F97316?style=for-the-badge&logo=gradio&logoColor=white)](https://www.gradio.app/) [![Tesseract OCR](https://img.shields.io/badge/Tesseract-fra%20%2B%20eng-22C55E?style=for-the-badge)](https://tesseract-ocr.github.io/) [![OpenCV](https://img.shields.io/badge/OpenCV-headless-10B981?style=for-the-badge)](https://opencv.org/) [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063?style=for-the-badge&logo=pydantic&logoColor=white)](https://docs.pydantic.dev/latest/)
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-outil_de_developpement-D97757?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/anthropics/claude-code) — outil de développement, pas un composant exécuté par l'application.
-
-**Démo publique — pipeline OCR en ligne :** <https://nicolbl95-llm-extraction-finetune.hf.space>
+[![Claude Code](https://img.shields.io/badge/Claude_Code-outil_de_developpement-D97757?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/anthropics/claude-code)
 
 ## 📖 Description
 
@@ -32,6 +18,8 @@ insuffisamment étayé.
 La démo publique fonctionne **sans chargement de modèle de langage** (`INVOICE_MODEL=0`) et n'accepte
 que les factures synthétiques autorisées du dépôt — un choix de confidentialité, pas une limite du
 moteur ; en local, le téléversement est libre.
+
+**Démo publique — pipeline OCR en ligne :** <https://nicolbl95-llm-extraction-finetune.hf.space>
 
 ## 📸 Aperçu de l'interface
 
@@ -142,12 +130,6 @@ données de langue, variables d'environnement et commande de référence des tes
 pip install -r requirements-dev.txt
 python -X utf8 -m pytest -q -p no:cacheprovider tests   # TESSDATA_PREFIX doit rester défini
 ```
-
-## ⚠️ Limites et améliorations possibles
-
-- **Confidentialité entre visiteurs d'un Space public non démontrée** ; la route fichier de Gradio ne connaît pas les sessions.
-- **Premier chantier : la validation indépendante** — douze factures étrangères au générateur, annotées à l'aveugle ([protocole](benchmark_prep/OWNER_GUIDE.md)).
-- **Comparaison OCR / LLM à approfondir** sur ce corpus indépendant, pour mesurer une généralisation plutôt qu'une adaptation à des gabarits synthétiques.
 
 ## 👨‍💻 Auteur et développement
 
