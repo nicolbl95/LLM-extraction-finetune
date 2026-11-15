@@ -21,6 +21,7 @@ from ocr_preprocessing import prepare
 from ocr_quality import assess_ocr
 from ocr_recovery import table_crop
 from ocr_config import OCR_CONFIG
+import ocr_provenance
 from run_stress_check import run_case
 from invoice_grounding import read_model, reconcile
 from ocr_consensus import build_consensus
@@ -47,21 +48,26 @@ def split_cases(names):
 
 def read_variant(image, method, psm):
     import pytesseract
+    env = ocr_provenance.environment()
     prepared, metadata = prepare(image, method)
     image_hash = hashlib.sha256(image.tobytes() + str(image.size).encode()).hexdigest()
-    key = hashlib.sha256(f"{image_hash}/{method}/{psm}/v1".encode()).hexdigest()
-    path = CACHE / f"{key}.json"
+    path = CACHE / f"{ocr_provenance.cache_key(image_hash, method, psm, env)}.json"
     CACHE.mkdir(exist_ok=True)
     if path.exists():
-        return json.loads(path.read_text())
+        entry = json.loads(path.read_text())
+        if ocr_provenance.reusable(entry, env):
+            return entry
     data = pytesseract.image_to_data(
-        prepared, lang="fra+eng", config=f"--psm {psm}", output_type=pytesseract.Output.DICT, timeout=60,
+        prepared, lang=env["reader_languages"], config=f"--psm {psm}",
+        output_type=pytesseract.Output.DICT, timeout=60,
     )
     if method == "crop":
         data = table_crop(data, prepared, lambda crop, mode: pytesseract.image_to_data(
-            crop, lang="fra+eng", config=f"--psm {mode}", output_type=pytesseract.Output.DICT, timeout=60,
+            crop, lang=env["reader_languages"], config=f"--psm {mode}",
+            output_type=pytesseract.Output.DICT, timeout=60,
         ))
-    result = {"data": data, "metadata": metadata, "input_sha256": image_hash, "psm": psm}
+    result = {"data": data, "metadata": metadata, "input_sha256": image_hash, "psm": psm,
+              "environment": env}
     path.write_text(json.dumps(result), encoding="utf-8")
     return result
 
