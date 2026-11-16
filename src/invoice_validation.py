@@ -85,7 +85,7 @@ def document_currency(evidence: DocumentEvidence) -> str | None:
     return None
 
 
-TAX_VOCABULARY = re.compile(r"\b(?:tva|taxe|tax|vat)\b")
+TAX_VOCABULARY = re.compile(r"\b(?:tva|taxe|tax|vat|tps|tvq|qst|hst|gst)\b")
 PRINTED_RATE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
 RATE_WHERE = {
     "corroborated_cell": "est lu dans le détail des lignes par plusieurs prétraitements",

@@ -63,6 +63,20 @@ LINE_TOTAL_EXCLUDED = re.compile(
     r"\b(?:gross|brut|ttc|subtotal|tax|vat|tva|discount|remise)\b"
 )
 
+# A tax line declares itself in its own label: TVA/VAT in French and English documents, and the Canadian
+# acronyms printed in exactly the same position (TPS 13,42 $). The delimiter after the label is what separates
+# a tax line from prose that merely mentions the acronym.
+TAX_LINE_LABEL = re.compile(
+    r"^(?:tva|vat|tax|sales tax|tps|tvq|qst|hst|gst)\s*(?:\(|:|\d|[$€£])"
+)
+# Quebec prints its TPS and TVQ registration numbers in the same `LABEL : value` syntax as a tax amount, so a
+# bare integer of five or more digits is read as an identifier and never becomes a tax.
+TAX_IDENTITY_NUMBER = re.compile(r"\d{5,}")
+
+
+def is_identity_number(raw: str) -> bool:
+    return bool(TAX_IDENTITY_NUMBER.fullmatch(raw.strip().replace(" ", "")))
+
 
 def is_line_total_header(text: str, *, at_start: bool = False) -> bool:
     normalized = normalized_label(text)
@@ -1146,7 +1160,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             if len(money) == 1:
                 evidence.discounts.append(money[0])
                 continue
-        tax_label = re.match(r"^(?:tva|vat|tax|sales tax)\s*(?:\(|:|\d|[$€£])", label)
+        tax_label = TAX_LINE_LABEL.match(label)
         total_field = None
         if TOTAL_HT_LABEL.match(label):
             total_field = "total_ht"
@@ -1161,7 +1175,7 @@ def from_tokens(tokens: list[Token], *, locale: str | None = None,
             if tax_label and amounts:
                 rate = next((n for n in amounts if "%" in n.raw), None)
                 money = [n for n in amounts if "%" not in n.raw]
-                if money:
+                if money and not is_identity_number(money[-1].raw):
                     tax = Tax(rate, money[-1], money[0] if len(money) > 1 else None)
                     if tax not in evidence.taxes:
                         evidence.taxes.append(tax)
