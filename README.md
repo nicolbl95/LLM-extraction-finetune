@@ -15,9 +15,11 @@ Le système identifie fournisseur, date, articles, quantités, prix, taxes et to
 un **rapport de vérification** qui distingue ce qui est confirmé, ce qui est anormal et ce qui reste
 insuffisamment étayé.
 
-La démo publique fonctionne **sans chargement de modèle de langage** (`INVOICE_MODEL=0`) et n'accepte
-que les factures synthétiques autorisées du dépôt — un choix de confidentialité, pas une limite du
-moteur ; en local, le téléversement est libre.
+La démo publique fonctionne **sans chargement de modèle de langage** (`INVOICE_MODEL=0`) : seul le
+pipeline OCR traite le document. Les visiteurs peuvent téléverser leurs propres factures — PDF, PNG ou
+JPEG, 20 Mo au plus — ou partir des exemples fournis. Le document est traité sur l'infrastructure
+Hugging Face de l'Espace, et les fichiers créés pour un visiteur restent à l'écart des autres visiteurs
+par le contrôle d'accès lié à la session.
 
 **Démo publique — pipeline OCR en ligne :** <https://nicolbl95-llm-extraction-finetune.hf.space>
 
