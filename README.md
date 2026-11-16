@@ -124,7 +124,7 @@ données de langue, variables d'environnement et commande de référence des tes
 
 | Registre | Ce qui a réellement été exécuté | Résultat |
 | --- | --- | --- |
-| **Tests logiciels** | 1 296 tests automatisés hors ligne, sans appel de modèle de langage, plus 26 qui réclament les ressources non versionnées (corpus PNG régénéré, diagnostics privés) et 3 marqués `slow` écartés d'office | **1 296 réussis, 26 ignorés, 0 échec, 0 erreur** |
+| **Tests logiciels** | 1 328 tests automatisés hors ligne, sans appel de modèle de langage, plus 26 qui réclament les ressources non versionnées (corpus PNG régénéré, diagnostics privés) et 3 marqués `slow` écartés d'office | **1 328 réussis, 26 ignorés, 0 échec, 0 erreur** |
 | **Factures synthétiques** | 600 textes et 600 PNG générés pour le développement ([`data/generate_dataset.py`](data/generate_dataset.py)) ; les tests vérifient leur intégrité et leur partitionnement (480 / 60 / 60), rendent 27 variantes gabarit × locale et extraient 8 images de fixtures versionnées | **aucune évaluation d'exactitude sur les 600 documents** ; les PNG sont régénérés localement, non versionnés |
 | **Factures réelles** | une dizaine essayées manuellement dans l'interface ; la validation indépendante exige douze factures annotées à l'aveugle ([`scripts/pr110_ready.py`](scripts/pr110_ready.py)) | **0 / 12** admissibles, donc **aucun taux de précision publié** pour le moteur servi |
 
