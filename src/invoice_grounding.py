@@ -17,7 +17,9 @@ from invoice_evidence import (
     DocumentEvidence, Number, TableRow, description_is_usable, folded, has_replacement_character,
     number_tokens, parse_number, reading_issue_category, total_label_field,
 )
-from invoice_validation import Validation, anomaly_digest, document_validation, render_report
+from invoice_validation import (
+    Validation, anomaly_digest, document_validation, render_report, TAX_VOCABULARY, PRINTED_RATE,
+)
 from ocr_quality import document_quality
 from ocr_config import OCR_CONFIG
 from ocr_consensus import number_confident
@@ -384,6 +386,26 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
             derived_ht_from_lines = True
         if ttc is None and total_candidate is not None and ht is not None and close(ht + tax_sum, total_candidate):
             ttc = total_candidate
+    # Documents that print a percentage but no tax amount leave every route above without an operand, so an
+    # unqualified grand total stays unexported even when it is plainly the tax-inclusive amount. The rate is
+    # used only to test the printed candidate against the base already in evidence; the export is the print.
+    total_gross_up_supported = False
+    if ttc is None and total_candidate is not None and not tax_available:
+        printed_rates = {
+            Decimal(match[1].replace(",", "."))
+            for line in evidence.lines
+            if TAX_VOCABULARY.search(folded(line.text))
+            for match in PRINTED_RATE.finditer(line.text)
+        }
+        base = ht
+        if base is None and rows_anchor_totals and len(options) == len(evidence.rows) and all(
+                len(row_options) == 1 for row_options in options):
+            base = sum((row_options[0].total_ht for row_options in options), Decimal(0)) - discount_total
+        if len(printed_rates) == 1 and base is not None:
+            rate = next(iter(printed_rates))
+            if close(rounded_product(base, Decimal(1) + (rate / 100 if rate > 1 else rate)), total_candidate):
+                ttc = total_candidate
+                total_gross_up_supported = True
     sum_supported = (
         ht is not None and rows_anchor_totals and all(len(values) == 1 for values in printed_totals)
         and close(sum((values[0] for values in printed_totals), Decimal(0)) - discount_total, ht)
@@ -643,7 +665,7 @@ def reconcile(evidence: DocumentEvidence, passes: list[dict]) -> GroundedResult:
 
     for key, source, corroborated in (
         ("total_ht", ht, sum_supported or tax_ok),
-        ("total_ttc", ttc, tax_ok),
+        ("total_ttc", ttc, tax_ok or total_gross_up_supported),
     ):
         previous = numeric(initial.get(key), evidence.locale)
         if source is not None and (source in all_numbers or key == "total_ht" and derived_ht_from_lines):
