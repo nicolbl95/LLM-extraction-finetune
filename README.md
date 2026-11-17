@@ -2,8 +2,6 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/) [![Gradio](https://img.shields.io/badge/Gradio-6.30.0-F97316?style=for-the-badge&logo=gradio&logoColor=white)](https://www.gradio.app/) [![Tesseract OCR](https://img.shields.io/badge/Tesseract-fra%20%2B%20eng-22C55E?style=for-the-badge)](https://tesseract-ocr.github.io/) [![OpenCV](https://img.shields.io/badge/OpenCV-headless-10B981?style=for-the-badge)](https://opencv.org/) [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063?style=for-the-badge&logo=pydantic&logoColor=white)](https://docs.pydantic.dev/latest/)
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-outil_de_developpement-D97757?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/anthropics/claude-code)
-
 ## 📖 Description
 
 **LLM-extraction-finetune** est un projet d'extraction automatisée de données de factures PDF et
@@ -43,19 +41,17 @@ la configuration de la démo publique. Fournisseur, client, montants et identifi
 Document (PDF, image) → Prétraitement → OCR positionné → Extraction → Vérification → JSON + rapport
 ```
 
-L'architecture est modulaire : acquisition et prétraitement ([`src/ocr_preprocessing.py`](src/ocr_preprocessing.py),
-[`src/ocr_recovery.py`](src/ocr_recovery.py)), preuve documentaire et lignes ([`src/invoice_evidence.py`](src/invoice_evidence.py)),
-ancrage des montants sur leurs opérandes ([`src/invoice_grounding.py`](src/invoice_grounding.py)), cohérence arithmétique
-et documentaire ([`src/invoice_validation.py`](src/invoice_validation.py)), contrat de sortie ([`data/schema.py`](data/schema.py))
-et interface Gradio unique ([`app/main.py`](app/main.py)). Étapes et lecture des mesures : [docs/DESIGN.md](docs/DESIGN.md).
+Chaque étape est un module autonome : prétraitement ([`src/ocr_preprocessing.py`](src/ocr_preprocessing.py)),
+preuve documentaire et lignes ([`src/invoice_evidence.py`](src/invoice_evidence.py)), ancrage des montants
+([`src/invoice_grounding.py`](src/invoice_grounding.py)), cohérence arithmétique ([`src/invoice_validation.py`](src/invoice_validation.py)),
+contrat de sortie ([`data/schema.py`](data/schema.py)) et interface Gradio ([`app/main.py`](app/main.py)).
+Détail des étapes et lecture des mesures : [docs/DESIGN.md](docs/DESIGN.md).
 
-**Expérimentation LLM :** le projet a également exploré le fine-tuning de Qwen2.5-3B avec QLoRA sur des
-factures synthétiques. Cette approche expérimentale n'est pas utilisée dans la démo publique actuelle, qui
-repose sur un pipeline OCR et des règles de validation. Le notebook d'entraînement
-([`notebooks/fine_tune_unsloth.ipynb`](notebooks/fine_tune_unsloth.ipynb)), l'évaluateur
-([`src/evaluate_finetuned.py`](src/evaluate_finetuned.py)) et leurs mesures historiques
-([`results/baseline_metrics.json`](results/baseline_metrics.json), [`results/evaluation-3/finetuned_metrics.json`](results/evaluation-3/finetuned_metrics.json))
-restent dans le dépôt ; ils exigent un GPU et aucun poids adapté n'est versionné.
+**Expérimentation LLM :** le fine-tuning de Qwen2.5-3B par QLoRA sur des factures synthétiques a été exploré ;
+le cahier d'entraînement ([`notebooks/fine_tune_unsloth.ipynb`](notebooks/fine_tune_unsloth.ipynb)) et l'évaluateur
+([`src/evaluate_finetuned.py`](src/evaluate_finetuned.py)) restent dans le dépôt, exigent un GPU et aucun poids adapté
+n'est versionné. Cette approche demeure expérimentale : la démo publique n'exécute que le pipeline OCR et ses règles
+de validation.
 
 ## 🛠️ Technologies utilisées
 
@@ -83,18 +79,10 @@ restent dans le dépôt ; ils exigent un GPU et aucun poids adapté n'est versio
 **Outils de développement** : [Claude Code](https://github.com/anthropics/claude-code), ayant assisté le
 développement du projet — aucun composant exécuté par l'application.
 
-## 📂 Structure du projet
-
-- **`app/`** — interface Gradio, point d'entrée du Space et garde d'import ASGI.
-- **`src/`** — pipeline OCR, preuve documentaire, ancrage des montants, cohérence, évaluation.
-- **`data/` · `tests/`** — contrat Pydantic, générateur du corpus synthétique, suite hors ligne et fixtures.
-- **`scripts/` · `notebooks/`** — latence, robustesse, diagnostics, outillage du benchmark indépendant ; entraînement QLoRA (travaux de recherche).
-- **`docs/`** — environnement, conception, déploiement, protocoles et capture d'interface.
-
 ## 🚀 Installation locale
 
-Prérequis : **Python 3.12** et **Tesseract** avec les données `fra` **et** `eng`. L'installation
-Windows par défaut ne livre qu'`eng` et `osd` ; sans `fra`, Tesseract lit l'anglais sans lever d'erreur.
+Prérequis : **Python 3.12** et **Tesseract** avec les données `fra` **et** `eng`. L'installation Windows
+par défaut ne livre qu'`eng` et `osd` ; sans `fra`, Tesseract lit l'anglais sans lever d'erreur.
 
 ```powershell
 git clone https://github.com/nicolbl95/LLM-extraction-finetune.git
@@ -102,21 +90,26 @@ cd LLM-extraction-finetune
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-& "C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs   # par défaut : eng et osd seulement
-$env:TESSDATA_PREFIX = "$PWD\.venv\tessdata"   # dossier où l'on dépose fra.traineddata, hors Git
-$env:INVOICE_MODEL   = "0"                     # comme la démo publique : OCR déterministe seul
-.\.venv\Scripts\python.exe app\main.py         # interface sur http://127.0.0.1:7860
+mkdir .venv\tessdata
+# copier fra.traineddata et eng.traineddata dans .venv\tessdata : le dépôt ne fournit pas ces binaires
+$env:TESSDATA_PREFIX = "$PWD\.venv\tessdata"
+& "C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs   # doit lister eng et fra
+$env:INVOICE_MODEL = "0"
+python app\main.py
 ```
 
+`TESSDATA_PREFIX` **remplace** le dossier de langues de l'installation au lieu de le compléter : le
+répertoire configuré doit donc contenir `fra` **et** `eng`, les deux langues demandées par le moteur.
+L'interface répond sur <http://127.0.0.1:7860> et `INVOICE_MODEL=0` reproduit la démo publique :
+OCR déterministe seul.
 Sous Linux, `packages.txt` donne les paquets apt et `fra` y est installé. Dépendances réellement importées,
-données de langue, variables d'environnement et commande de référence des tests : [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md).
+variables d'environnement et commande de référence des tests : [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md).
 
 ## 🛡️ Validation et contrôle des erreurs
 
-- **Justification par le document** — une valeur n'est retenue que si le document l'imprime ou la recoupe.
-- **Recalculs contrôlés** — quantité × prix unitaire, somme des lignes, net + TVA, en arithmétique `Decimal`.
-- **Anomalies signalées** — chaque incohérence est nommée dans le rapport, jamais masquée silencieusement.
-- **Aucune invention** — un champ incertain sort `null` ; le moteur n'exécute pas d'auto-correction par LLM.
+Une valeur n'est retenue que si le document l'imprime ou la recoupe, et les montants sont recalculés en
+arithmétique `Decimal` (quantité × prix unitaire, somme des lignes, net + TVA). Chaque incohérence est
+nommée dans le rapport ; un champ incertain sort `null`, sans invention et sans auto-correction par LLM.
 
 ## 🧪 Corpus, tests et résultats
 
@@ -124,9 +117,9 @@ données de langue, variables d'environnement et commande de référence des tes
 
 | Registre | Ce qui a réellement été exécuté | Résultat |
 | --- | --- | --- |
-| **Tests logiciels** | 1 328 tests automatisés hors ligne, sans appel de modèle de langage, plus 26 qui réclament les ressources non versionnées (corpus PNG régénéré, diagnostics privés) et 3 marqués `slow` écartés d'office | **1 328 réussis, 26 ignorés, 0 échec, 0 erreur** |
-| **Factures synthétiques** | 600 textes et 600 PNG générés pour le développement ([`data/generate_dataset.py`](data/generate_dataset.py)) ; les tests vérifient leur intégrité et leur partitionnement (480 / 60 / 60), rendent 27 variantes gabarit × locale et extraient 8 images de fixtures versionnées | **aucune évaluation d'exactitude sur les 600 documents** ; les PNG sont régénérés localement, non versionnés |
-| **Factures réelles** | une dizaine essayées manuellement dans l'interface ; la validation indépendante exige douze factures annotées à l'aveugle ([`scripts/pr110_ready.py`](scripts/pr110_ready.py)) | **0 / 12** admissibles, donc **aucun taux de précision publié** pour le moteur servi |
+| **Tests logiciels** | 1 328 tests automatisés hors ligne, sans appel de modèle de langage ; 26 réclament les ressources non versionnées, 3 sont marqués `slow` | **1 328 réussis, 26 ignorés, 0 échec, 0 erreur** |
+| **Factures synthétiques** | 600 textes et 600 PNG générés pour le développement ([`data/generate_dataset.py`](data/generate_dataset.py)), partitionnés 480 / 60 / 60 ; les tests vérifient leur intégrité | **aucune évaluation d'exactitude sur les 600 documents** |
+| **Factures réelles** | une dizaine essayées manuellement dans l'interface ; la validation indépendante exige douze factures annotées à l'aveugle ([`scripts/pr110_ready.py`](scripts/pr110_ready.py)) | **0 / 12** admissibles, donc **aucun taux de précision publié** |
 
 ```powershell
 pip install -r requirements-dev.txt
@@ -135,5 +128,5 @@ python -X utf8 -m pytest -q -p no:cacheprovider tests   # TESSDATA_PREFIX doit r
 
 ## 👨‍💻 Auteur et développement
 
-Développé par **Nicolas DAVOINE** ([`nicolbl95`](https://github.com/nicolbl95)), avec l'assistance de
+Développé par **Nicolas DAVOINE** ([nicolbl95](https://github.com/nicolbl95)), avec l'assistance de
 **Claude Code** — démo : <https://nicolbl95-llm-extraction-finetune.hf.space>
